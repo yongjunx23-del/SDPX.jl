@@ -9,7 +9,7 @@ export V2_SCHEMA_VERSION, V2Axis, V2Tier, V2Precision, V2Reference,
     V2RunResult, expand, validate_catalog, catalog_fingerprint,
     input_fingerprint, execution_fingerprint, adapt_generic_specs,
     build_instance, run_instance, reference_interval, resource_tiers,
-    precision_matrix
+    precision_matrix, training_instances, holdout_instances, sentinel_instances
 
 const V2_SCHEMA_VERSION = 2
 
@@ -80,7 +80,7 @@ struct V2Reference{O}
                    :discretized, :xfail) ||
             throw(ArgumentError("unsupported reference status $status"))
         expected_status in (:optimal, :primal_infeasible, :dual_infeasible,
-                            :iteration_limit, :build_only) ||
+                            :iteration_limit, :numerical_breakdown, :build_only) ||
             throw(ArgumentError("unsupported expected solver status $expected_status"))
         disposition in (:PASS, :FAIL, :XFAIL, :XPASS, :RESOLVED) ||
             throw(ArgumentError("unsupported reference disposition $disposition"))
@@ -110,6 +110,8 @@ struct V2Reference{O}
             throw(ArgumentError("build-only expected solver status must be build_only"))
         status === :xfail && expected_status === :xfail &&
             throw(ArgumentError("xfail must declare the expected solver status separately"))
+        status === :xfail && expected_status === :build_only &&
+            throw(ArgumentError("xfail must declare a concrete non-build solver status"))
         new{typeof(oracle)}(status, expected_status, disposition, certificate_kind, interval, oracle, String(note))
     end
 end
@@ -327,7 +329,7 @@ input_fingerprint(instance::V2Instance) = _hex((
     :tier, instance.tier, :axis_values, instance.axis_values, :source, instance.source,
     :provenance, instance.provenance, :checksum, instance.checksum,
     :reference, instance.reference,
-    :transform, instance.payload isa V2Transform ? instance.payload : nothing,
+    :transform, get(instance.provenance, :transform, nothing),
     :payload, instance.payload,
     :resource, instance.resource, :split, instance.split,
 ))
@@ -390,6 +392,13 @@ function validate_catalog(catalog::V2Catalog)
     )
     sum(length, values(suite_sets)) == length(union(values(suite_sets)...)) ||
         throw(ArgumentError("V2 suites overlap"))
+    for (name, ids_in_suite) in ((:train, catalog.suites.train),
+                                  (:holdout, catalog.suites.holdout),
+                                  (:sentinel, catalog.suites.sentinel))
+        length(ids_in_suite) == length(suite_sets[name]) ||
+            throw(ArgumentError("V2 suite $name contains duplicate IDs"))
+    end
+    math_fingerprints = Dict{String,Symbol}()
     for instance in catalog.instances
         instance.id in ids && throw(ArgumentError("duplicate V2 instance $(instance.id)"))
         push!(ids, instance.id)
@@ -404,11 +413,43 @@ function validate_catalog(catalog::V2Catalog)
             throw(ArgumentError("build-only reference mismatch for $(instance.id)"))
         instance.reference.status === :xfail && instance.reference.disposition !== :XFAIL &&
             throw(ArgumentError("xfail disposition mismatch for $(instance.id)"))
+        instance.reference.status === :xfail && instance.reference.expected_status === :xfail &&
+            throw(ArgumentError("xfail must retain a concrete observed solver status for $(instance.id)"))
+        instance.reference.status === :xfail &&
+            get(instance.provenance, :solve_eligible, false) === true &&
+            throw(ArgumentError("XFAIL instances are optimizer-ineligible"))
+        if instance.payload isa AbstractV2SourceArtifact
+            instance.checksum == _hex(instance.payload) ||
+                throw(ArgumentError("artifact checksum mismatch for $(instance.id)"))
+            declared = get(instance.provenance, :transform, nothing)
+            declared isa V2Transform || throw(ArgumentError(
+                "source artifact instance $(instance.id) must declare its transform"))
+            math_fp = _hex((instance.family, instance.payload.coefficients,
+                instance.payload.dimension, instance.payload.cone_parameter,
+                instance.payload.infeasible, instance.payload.infeasibility_ray))
+            haskey(math_fingerprints, math_fp) &&
+                throw(ArgumentError("duplicate mathematical V2 artifact across splits: $(instance.id) and $(math_fingerprints[math_fp])"))
+            math_fingerprints[math_fp] = instance.id
+        end
     end
     union(values(suite_sets)...) == ids ||
         throw(ArgumentError("V2 suites must partition all instance IDs"))
     return true
 end
+
+function _declared_transform(instance::V2Instance)
+    value = get(instance.provenance, :transform, nothing)
+    return value isa V2Transform ? value : nothing
+end
+
+training_instances(catalog::V2Catalog) =
+    filter(instance -> instance.split === :train, catalog.instances)
+
+holdout_instances(catalog::V2Catalog) =
+    filter(instance -> instance.split === :holdout, catalog.instances)
+
+sentinel_instances(catalog::V2Catalog) =
+    filter(instance -> instance.split === :sentinel, catalog.instances)
 
 function build_instance(catalog::V2Catalog, instance::V2Instance, precision::V2Precision)
     family = only(filter(f -> f.name === instance.family, catalog.families))
@@ -420,6 +461,18 @@ function build_instance(catalog::V2Catalog, instance::V2Instance, precision::V2P
     built.transform.exactness in (:identity, :exact_univariate_halfline,
         :exact_univariate_matrix_halfline_if_proved, :sos_relaxation,
         :finite_grid_surrogate) || throw(ArgumentError("invalid transform metadata"))
+    declared = _declared_transform(instance)
+    declared === nothing || built.transform.fingerprint == declared.fingerprint ||
+        throw(ArgumentError("builder transform does not match instance transform contract"))
+    if instance.payload isa AbstractV2SourceArtifact
+        hasproperty(built.facts, :artifact_fingerprint) &&
+            built.facts.artifact_fingerprint == instance.checksum ||
+            throw(ArgumentError("builder facts do not bind source artifact fingerprint"))
+        hasproperty(built.facts, :model_fingerprint) ||
+            throw(ArgumentError("builder must publish canonical generated-model fingerprint"))
+        occursin(r"^[0-9a-f]{64}$", String(built.facts.model_fingerprint)) ||
+            throw(ArgumentError("invalid generated-model fingerprint"))
+    end
     elapsed = (time_ns() - started) * 1.0e-9
     return built, elapsed
 end
@@ -461,18 +514,37 @@ function _run_instance_impl(catalog::V2Catalog, instance::V2Instance,
     end
     oracle_ok = instance.reference.oracle === nothing ?
         instance.reference.status === :build_only : instance.reference.oracle(built, certificate)
-    cert_ok = instance.reference.status === :build_only || certificate.valid
+    # Infeasibility is independently certified by the exact Farkas oracle; a
+    # primal certificate.valid field is not required for that status.
+    cert_ok = instance.reference.status === :build_only ||
+        (instance.reference.status === :primal_infeasible ? oracle_ok : certificate.valid)
     failures = Symbol[]
     interval_ok || push!(failures, :objective_interval)
     oracle_ok || push!(failures, :oracle)
     cert_ok || push!(failures, :certificate)
     status_ok = SDPX.status(solved) === instance.reference.expected_status
     instance.reference.status === :build_only && (status_ok = true)
+    validation_status = SDPX.status(solved)
+    reference_ok = oracle_ok && interval_ok && status_ok
+    semantic_ok = reference_ok && cert_ok
+    if instance.reference.disposition === :XFAIL
+        if status_ok && oracle_ok
+            # XFAIL means an expected, independently classified failure: it is
+            # not optimizer-eligible and deliberately has semantic_pass=false.
+            validation_status = :XFAIL
+            reference_ok = true
+            semantic_ok = false
+            push!(failures, :xfail_expected_failure)
+        else
+            validation_status = :XPASS
+            reference_ok = false
+            semantic_ok = false
+            push!(failures, :xpass_unexpected_success)
+        end
+    end
     status_ok || push!(failures, :status)
-    instance.reference.disposition === :XFAIL &&
-        (status_ok = !status_ok; push!(failures, :xfail_expected_failure))
-    validation = V2Validation(SDPX.status(solved), certificate.valid,
-        oracle_ok && interval_ok && status_ok, failures)
+    validation = V2Validation(validation_status, cert_ok,
+        reference_ok, failures)
     return V2RunResult(
         instance.id, instance.family, instance.tier.name, precision.name, precision.bits,
         SDPX.status(solved), certificate.valid, objective,
@@ -523,23 +595,18 @@ function adapt_generic_specs(specs; source_prefix="generic-v1",
     instances = V2Instance[]
     for spec in specs
         tier = only(filter(t -> t.name === spec.tier, _TIERS))
-        ref_status = spec.expected_status === :known_solver_finding ? :xfail : spec.expected_status
-        cert_kind = ref_status === :primal_infeasible ? :farkas :
-            ref_status === :dual_infeasible ? :ray : ref_status === :xfail ? :interval_or_bound : :optimal
-        interval = spec.known_objective === nothing ? nothing :
-            (string(spec.known_objective - spec.objective_tolerance), string(spec.known_objective + spec.objective_tolerance))
-        expected_status = ref_status === :xfail ? :iteration_limit : ref_status
-        ref = V2Reference(ref_status, cert_kind, interval,
-            (built, cert) -> begin
-                spec.known_objective === nothing || isapprox(cert.primal_objective,
-                    spec.known_objective; atol=spec.objective_tolerance, rtol=spec.objective_tolerance)
-            end, "Adapted from V1; independent source metadata retained";
-            expected_status=expected_status,
-            disposition=(ref_status === :xfail ? :XFAIL : :PASS))
+        # V1 remains compatibility-only: preserve its declared status as
+        # metadata, but never promote a V1 finding/objective to a V2 oracle.
+        v1_status = spec.expected_status
+        ref = V2Reference(:build_only, :build_only, nothing, nothing,
+            "V1 compatibility-only; original expected_status=$(v1_status) retained as metadata";
+            expected_status=:build_only, disposition=:PASS)
         checksum = _hex((source=spec.source, id=spec.id, params=spec.params,
                          objective=spec.known_objective))
         push!(instances, V2Instance(spec.id, spec.family, tier, spec.params, :train,
-            source_prefix * "/" * spec.source, (source=spec.source, v1_id=spec.id), checksum,
+            source_prefix * "/" * spec.source,
+            (source=spec.source, v1_id=spec.id, compatibility_only=true,
+             solve_eligible=false, v1_expected_status=v1_status), checksum,
             (wall_seconds=tier.wall_seconds, memory_bytes=tier.memory_bytes), ref, spec))
     end
     return V2Catalog(:general_v2, V2_SCHEMA_VERSION, families, instances,

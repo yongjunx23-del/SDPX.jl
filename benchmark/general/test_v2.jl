@@ -1,4 +1,5 @@
 using Test
+using LinearAlgebra
 isdefined(Main, :GenericConicBenchmark) ||
     include(joinpath(@__DIR__, "GenericConicBenchmark.jl"))
 include(joinpath(@__DIR__, "v2", "GeneralBenchmarkV2.jl"))
@@ -46,6 +47,9 @@ using .GeneralBenchmarkV2
         "1e-8", "5e-7", :test))[2] >= 0
 
     @test_throws ArgumentError V2Reference(:build_only, :optimal, nothing, nothing)
+    @test_throws ArgumentError V2Reference(:xfail, :interval_or_bound, nothing,
+        (built, cert) -> true)
+    @test_throws ArgumentError V2Reference(:optimal, :optimal, nothing, nothing)
     @test_throws ArgumentError V2Catalog(:bad, 1, [family],
         [instance, instance], (train=[:unit], holdout=Symbol[], sentinel=Symbol[]))
 end
@@ -64,8 +68,13 @@ end
     @test all(length(execution_fingerprint(i,
         V2Precision(:Float64, Float64, 53, "1e-8", "5e-7", :test))) == 64
         for i in catalog.instances)
-    @test all(i.reference.status !== :known_solver_finding for i in catalog.instances)
-    @test count(i -> i.reference.status === :xfail, catalog.instances) > 0
+    @test all(i.reference.status === :build_only for i in catalog.instances)
+    @test all(i -> get(i.provenance, :compatibility_only, false) === true &&
+                   get(i.provenance, :solve_eligible, true) === false &&
+                   haskey(i.provenance, :v1_expected_status),
+              catalog.instances)
+    @test_throws ArgumentError run_instance(catalog, first(catalog.instances),
+        V2Precision(:Float64, Float64, 53, "1e-8", "5e-7", :test))
 
     # Build one representative instance through the additive adapter for each
     # public scalar/conic family; V1 builders and IDs remain the source of truth.
@@ -92,12 +101,21 @@ end
     @test all(i -> i.reference.oracle !== nothing, catalog.instances)
     sent = only(filter(i -> i.split === :sentinel && i.family === :lp, catalog.instances))
     @test sent.reference.status === :xfail
-    @test sent.reference.expected_status === :primal_infeasible
+    @test sent.reference.expected_status === :numerical_breakdown
     @test sent.reference.disposition === :XFAIL
     @test sent.reference.oracle.dual_ray == Rational{Int}[1, -1]
     @test all(i -> i.split == :train ? i.id in catalog.suites.train :
                    (i.split == :holdout ? i.id in catalog.suites.holdout : i.id in catalog.suites.sentinel),
               catalog.instances)
+    @test all(family -> begin
+        train = only(filter(i -> i.family === family && i.split === :train, catalog.instances))
+        holdout = only(filter(i -> i.family === family && i.split === :holdout, catalog.instances))
+        train.checksum != holdout.checksum &&
+            GeneralBenchmarkV2._hex((train.payload.coefficients, train.payload.dimension,
+                train.payload.cone_parameter, train.payload.infeasible)) !=
+            GeneralBenchmarkV2._hex((holdout.payload.coefficients, holdout.payload.dimension,
+                holdout.payload.cone_parameter, holdout.payload.infeasible))
+    end, (:lp, :nonpositive, :soc, :rsoc, :sdp, :exp, :power, :mixed))
     precision = V2Precision(:Float64, Float64, 53, "1e-8", "1e-8", :standard)
     for family in (:lp, :nonpositive, :soc, :rsoc, :sdp, :exp, :power, :mixed)
         instance = only(filter(i -> i.family === family && i.split === :train, catalog.instances))
@@ -123,8 +141,26 @@ end
     @test changed_built.facts.cone_parameter == changed_artifact.cone_parameter
     @test changed_built.input_fingerprint == input_fingerprint(changed)
     @test changed_built.input_fingerprint != input_fingerprint(original)
+    @test changed_built.facts.model_fingerprint !=
+          build_instance(catalog, original, precision)[1].facts.model_fingerprint
+    @test_throws ArgumentError V2ConicArtifact(:soc, :extra,
+        Rational{Int}[1//2, 1//2, 1//3], 2, 1//2, false, :x, 1)
+    sentinel = only(filter(i -> i.family === :soc && i.split === :sentinel, catalog.instances))
+    sentinel_result = run_instance(catalog, sentinel, precision)
+    @test sentinel_result.status === :numerical_breakdown
+    @test sentinel_result.validation.status === :XFAIL
+    @test sentinel_result.validation.reference
+    @test GeneralBenchmarkV2._farkas_valid(sentinel.payload)
     # The canonical encoder is explicit for exact rational coefficients and
     # does not depend on host-endian or struct string formatting.
     @test GeneralBenchmarkV2._hex(Rational{Int}[1//2, 1//3]) !=
           GeneralBenchmarkV2._hex(Rational{Int}[1//2, 1//4])
+    # Exact interval bytes do not depend on ambient BigFloat precision.
+    ref_at_128 = setprecision(BigFloat, 128) do
+        GeneralBenchmarkV2._native_reference(original.payload).objective_interval
+    end
+    ref_at_512 = setprecision(BigFloat, 512) do
+        GeneralBenchmarkV2._native_reference(original.payload).objective_interval
+    end
+    @test ref_at_128 == ref_at_512
 end

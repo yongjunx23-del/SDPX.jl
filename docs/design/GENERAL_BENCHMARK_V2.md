@@ -2,7 +2,9 @@
 
 V2 is an additive, typed benchmark corpus. `native_v2_catalog()` owns
 rational source artifacts, family dispatch, train/holdout/sentinel splits, and
-independent reference callbacks for LP/SOC/RSOC/SDP/EXP/Power/mixed. Existing
+independent reference callbacks for LP/SOC/RSOC/SDP/EXP/Power/mixed. Native
+artifacts carry exact rational witnesses, explicit Farkas data for real
+contradictory sentinels, and a canonical generated-model fingerprint. Existing
 `BenchmarkSpec`, IDs, builders, and E2E tests remain unchanged through the
 explicit `adapt_generic_specs` compatibility adapter; that adapter is not the
 authoritative V2 corpus. V2 adds explicit lifecycle, arithmetic, reference,
@@ -22,7 +24,9 @@ legacy = adapt_generic_specs(v1_specs)        # compatibility-only view
 `:dual_infeasible`, `:build_only`, `:discretized`, and `:xfail`. Certificate
 kinds are independently named (`:optimal`, `:farkas`, `:ray`,
 `:interval_or_bound`, or `:build_only`). A known solver finding is an explicit
-`xfail` annotation; it is never treated as a passing certificate.
+`xfail` annotation; it is never treated as a passing certificate. V1 adapter
+instances are compatibility-only build records (`solve_eligible=false`) and
+retain their original status as metadata without inventing a V2 oracle.
 
 Objective intervals are serialized as decimal strings and are not narrowed to
 `Float64`. Non-build references require an independent oracle; xfail requires
@@ -51,7 +55,12 @@ continuum PMP.
 ## Identity and lifecycle
 
 `input_fingerprint` hashes schema, stable ID, sorted parameters, provenance,
-source checksum, reference contract, and transform metadata. It is separate
+source checksum, reference contract, and transform metadata. Native V2 build
+facts additionally bind the exact artifact checksum and generated-model
+canonical fingerprint; artifact shape constructors reject ignored/extra
+coefficients. Train/holdout/sentinel mathematical fingerprints must be
+pairwise unique, and only `training_instances(catalog)` is eligible for inner
+optimization. It is separate
 from `execution_fingerprint`, which additionally includes arithmetic,
 precision, provider, route, and manifest. `V2RunResult` preserves setup/core/
 recovery timing and allocated bytes; unavailable phases are represented by
