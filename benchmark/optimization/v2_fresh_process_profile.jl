@@ -544,8 +544,9 @@ function _validate_schema_semantics(path)
     if !isdefined(Main, :PhysicsBenchmarkHarness)
         Base.include(Main, joinpath(ROOT, "benchmark", "bootstrap", "PhysicsBenchmarkHarness.jl"))
     end
-    harness = getfield(Main, :PhysicsBenchmarkHarness)
-    rows = Base.invokelatest(getfield(harness, :compare_result_files), path, path)
+    harness = Base.invokelatest(getfield, Main, :PhysicsBenchmarkHarness)
+    compare = Base.invokelatest(getfield, harness, :compare_result_files)
+    rows = Base.invokelatest(compare, path, path)
     length(rows) == 1 || throw(ArgumentError("schema semantic validator returned unexpected row count"))
     getproperty(only(rows), :comparison_valid) === true || throw(ArgumentError(
         "schema-v9 row failed repository semantic comparison validation"))
