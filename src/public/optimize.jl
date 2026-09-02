@@ -286,7 +286,7 @@ function _public_original_certificate(
     end
     dual_residual = max(dual_residual, maximum(abs, stationarity; init=zero(T)))
     relative_gap = abs(primal_objective - dual_objective) /
-                   max(one(T), (abs(primal_objective) + abs(dual_objective)) / T(2))
+                   (one(T) + abs(primal_objective) + abs(dual_objective))
 
     # Normalize original-coordinate residuals by the same conservative data
     # scales used by the numerical certificate.  Raw residuals are retained

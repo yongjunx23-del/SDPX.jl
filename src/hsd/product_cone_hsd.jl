@@ -1734,7 +1734,8 @@ end
 ) where {T}
     isfinite(residual) && isfinite(work) && work >= zero(T) || return false
     iszero(work) && return iszero(residual)
-    return abs(residual) <= T(512) * sqrt(eps(T)) * work
+    threshold = max(T(65536) * sqrt(eps(T)), T(10) * cbrt(eps(T)))
+    return abs(residual) <= threshold * work
 end
 
 @inline function _product_hsd_cone_newton_close(
@@ -1742,7 +1743,8 @@ end
 ) where {T}
     isfinite(residual) && isfinite(work) && work >= zero(T) || return false
     iszero(work) && return iszero(residual)
-    return abs(residual) <= T(512) * sqrt(eps(T)) * work
+    threshold = max(T(65536) * sqrt(eps(T)), T(10) * cbrt(eps(T)))
+    return abs(residual) <= threshold * work
 end
 
 @inline function _product_hsd_conditioned_cone_newton_close(

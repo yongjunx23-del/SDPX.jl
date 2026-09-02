@@ -38,9 +38,9 @@ with the Newton-system contract.
 
 Provider spikes, review transcripts, completed wave plans, superseded
 architecture reviews, old maturity reports, and resolved bug diaries are not
-part of the shipped documentation tree. They remain recoverable from Git
-history. Local convenience copies created during the 2026-08-28 cleanup are
-stored outside the repository at:
+part of the shipped documentation tree. They are archived in `docs/archive/` or
+remain recoverable from Git history. Local convenience copies created during
+cleanups are stored outside the repository at:
 
 ```text
 ../local-archives/SDPX.jl-docs-20260828/

@@ -92,12 +92,7 @@ least one quarter of its predicted `alpha * current` reduction.
     isfinite(current) && isfinite(trial) && isfinite(alpha) || return false
     resolution = T(256) * eps(T) * scale
     predicted = alpha * current
-    minimum_fraction = T(2) * cbrt(eps(T))
-    arithmetic_neighborhood = T(16) * sqrt(eps(T)) * scale
-    if current > arithmetic_neighborhood &&
-       predicted < minimum_fraction * current
-        return false
-    elseif predicted <= resolution
+    if predicted <= resolution
         return trial <= current + resolution
     end
     return trial <= current - predicted / T(4) + resolution

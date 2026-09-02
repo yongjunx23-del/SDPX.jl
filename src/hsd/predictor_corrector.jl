@@ -76,9 +76,6 @@ does not materialise a product-cone matrix or allocate a block view.
     apply_R!(runtime, state.g_input, base.y)
     product_jordan!(runtime, state.g_output, state.g_input, state.g_input)
     product_identity!(runtime, state.gb)
-    @inbounds for block in runtime.soc
-        state.gb[block.offset] += state.gb[block.offset]
-    end
     @inbounds for k in 1:base.m
         state.g_input[k] = sigma_mu * state.gb[k] -
                            state.g_output[k] - state.h[k]
@@ -976,8 +973,14 @@ function _product_hsd_symmetric_core_direction!(
         return false
     end
     if !_product_hsd_newton_residual_ok(state, corrector_scalar)
-        state.diagnostic = :fixed_trace_corrector_residual_failed
-        return false
+        copyto!(base.dx, base.dx_a)
+        copyto!(base.dy, base.dy_a)
+        copyto!(base.ds, base.ds_a)
+        base.dtau = base.dtau_a
+        base.dkappa = base.dkappa_a
+        _product_hsd_core_scatter!(state)
+        state.diagnostic = :corrector_fallback_to_predictor
+        return true
     end
     timings.corrector_linear_solve_seconds +=
         Float64(time_ns() - t0) * 1.0e-9 -

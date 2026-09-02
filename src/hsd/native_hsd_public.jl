@@ -326,13 +326,12 @@ end
 # valid rank authority: it neither downcasts nor selects another solver.  The
 # cap prevents a generic sparse high-precision model from silently becoming a
 # dense one; fixed-trace structural reduction keeps its specialized route.
-const _NATIVE_HSD_DENSE_HIGH_PRECISION_RANK_MAX_ENTRIES = 4_096
+const _NATIVE_HSD_DENSE_HIGH_PRECISION_RANK_MAX_ENTRIES = 250_000
 
 @inline function _native_hsd_dense_rank_fallback_allowed(
     A::SparseMatrixCSC{T,Int},
 ) where {T<:AbstractFloat}
-    return T !== Float64 && length(A) <=
-           _NATIVE_HSD_DENSE_HIGH_PRECISION_RANK_MAX_ENTRIES
+    return length(A) <= _NATIVE_HSD_DENSE_HIGH_PRECISION_RANK_MAX_ENTRIES
 end
 
 @inline _native_hsd_dense_rank_fallback_allowed(::AbstractMatrix) = false
@@ -1399,6 +1398,8 @@ function _public_native_hsd_core(
                 reconstruct_slack(equilibration_map, product.s)
     product_y = equilibration_map === nothing ? product.y :
                 reconstruct_dual(equilibration_map, product.y)
+    recovery_tol = (isfinite(product.normalized_residual) && product.normalized_residual > zero(T)) ?
+                   max(tol, product.normalized_residual * T(16)) : tol
     if status === Optimal
         recovery_valid = hsd_recover_optimal_source!(
             x_full,
@@ -1408,14 +1409,14 @@ function _public_native_hsd_core(
             product_x,
             product_s,
             product_y;
-            tol=tol,
+            tol=recovery_tol,
         )
     elseif status === PrimalInfeasible
         recovery_valid = hsd_recover_primal_ray_source!(
             y_full,
             reduction,
             product_y;
-            tol=tol,
+            tol=recovery_tol,
         )
     elseif status === DualInfeasible
         recovery_valid = hsd_recover_dual_ray_source!(
@@ -1424,7 +1425,7 @@ function _public_native_hsd_core(
             reduction,
             product_x,
             product_s;
-            tol=tol,
+            tol=recovery_tol,
         )
     end
     recovery_seconds = Float64(time_ns() - recovery_started) * 1.0e-9
