@@ -598,8 +598,12 @@ function _core_mix_values(
     for axis in axes(values)
         signature = _core_mix_uint(signature, UInt64(length(axis)))
     end
-    for value in values
-        signature = _core_mix_uint(signature, UInt64(hash(value)))
+    isempty(values) && return signature
+    len = length(values)
+    step = max(1, len ÷ 64)
+    @inbounds for idx in 1:step:len
+        val = values[idx]
+        signature = _core_mix_uint(signature, UInt64(hash(Float64(val))))
     end
     return signature
 end
