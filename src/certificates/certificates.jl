@@ -239,32 +239,9 @@ function in_canonical_cone(canonical::CanonicalConicProgram, v;
     tol = convert(T, tol)
     _valid_certificate_tolerance(tol) || return false
     _all_finite(v) || return false
-    blocks = layout_blocks(canonical.cone_layout)
-    nb = length(blocks)
-    # Blockwise membership is a pure read predicate over disjoint slices, so
-    # a multithreaded sweep is bit-identical to the serial loop (each block
-    # evaluates its own membership independently; the conjunction is exact).
-    # Large product cones with many small blocks gain the most; small ones
-    # keep the zero-overhead serial loop.
-    if nb >= 256 && Threads.nthreads() > 1
-        failed = Threads.Atomic{Bool}(false)
-        chunk = max(1, cld(nb, Threads.nthreads() * 4))
-        Threads.@threads :static for start in 1:chunk:nb
-            stop = min(start + chunk - 1, nb)
-            failed[] && continue
-            @inbounds for b in start:stop
-                block = blocks[b]
-                off = block_offset(block); len = block_length(block)
-                if !_block_in_cone(
-                    block, view(v, off:(off + len - 1)), tol, dual,
-                )
-                    failed[] = true
-                    break
-                end
-            end
-        end
-        return !failed[]
-    end
+    # Certificate checks stay serial: they short-circuit on the first invalid
+    # block, allocate no task/atomic state, and avoid compiling a second
+    # threaded copy of every cone-membership kernel for each arithmetic type.
     for block in layout_blocks(canonical.cone_layout)
         off = block_offset(block); len = block_length(block)
         _block_in_cone(block, view(v, off:(off + len - 1)), tol, dual) || return false

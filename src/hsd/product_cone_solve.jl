@@ -251,7 +251,7 @@ function _product_hsd_refined_optimal_result!(
     return nothing
 end
 
-@inline function _product_hsd_candidate_result!(
+Base.@noinline function _product_hsd_candidate_result!(
     state::ProductConeHSDState{T},
     x_original::Vector{T},
     s_original::Vector{T},
