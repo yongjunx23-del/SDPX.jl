@@ -123,7 +123,7 @@ end
     # frozen Mehrotra centering contract; only the accepted trial is damped.
     # `beta` is the optional initial fraction-to-boundary damping; the
     # historical literal remains on the default path for bit identity.
-    beta = get(state.iteration_knobs, :beta, nothing)
+    beta = state.iteration_beta
     alpha *= beta === nothing ? T(0.9) : beta
     p_norm = _hsd_maxinf(base.rP)
     d_norm = _hsd_maxinf(base.rD)
@@ -203,7 +203,7 @@ end
             end
             # `gamma` is the optional rejected-trial contraction factor; the
             # historical literal remains on the default path for bit identity.
-            gamma = get(state.iteration_knobs, :gamma, nothing)
+            gamma = state.iteration_gamma
             alpha *= gamma === nothing ? T(0.5) : gamma
             backtracking += 1
             backtracking >= max_backtracking && break

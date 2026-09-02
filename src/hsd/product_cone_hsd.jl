@@ -193,9 +193,14 @@ mutable struct ProductConeHSDState{
     # Phase-level timing accumulators (review slice 1): additive Float64
     # fields, zero allocation on the hot path, disjoint wall-time intervals.
     phase_timings::ProductHSDPhaseTimings
-    # Public additive iteration controls; a normalized NamedTuple avoids any
-    # per-step allocation and defaults to the historical path.
+    # Public additive iteration controls; retain the normalized NamedTuple for
+    # introspection, but cache its numeric members in typed fields so the hot
+    # path never boxes `get(::NamedTuple, ::Symbol, ::Any)` results.
     iteration_knobs::NamedTuple
+    iteration_sigma::Union{Nothing,T}
+    iteration_beta::Union{Nothing,T}
+    iteration_gamma::Union{Nothing,T}
+    iteration_predictor::Symbol
     # One-shot route restart uses a terminal expanded executor. Ordinary
     # expanded requests retain the historical expanded->bordered fallback.
     allow_expanded_bordered_fallback::Bool
@@ -362,6 +367,10 @@ function _product_cone_hsd_state(
         residual_hook,
         phase_timings,
         iteration_knobs,
+        get(iteration_knobs, :sigma, nothing),
+        get(iteration_knobs, :beta, nothing),
+        get(iteration_knobs, :gamma, nothing),
+        get(iteration_knobs, :predictor, :classic),
         allow_expanded_bordered_fallback,
     )
 end
@@ -404,7 +413,7 @@ end
 @inline function _product_hsd_sigma(
     state::ProductConeHSDState{T}, ratio::T,
 ) where {T}
-    sigma = get(state.iteration_knobs, :sigma, nothing)
+    sigma = state.iteration_sigma
     sigma === nothing && return min(one(T), ratio * ratio * ratio)
     return sigma
 end
