@@ -69,6 +69,9 @@ end
 
 @testset "schema, route, identity, and malformed-sample negatives" begin
     good = _v9_row("a"^40)
+    native_profile = merge(good, Dict("execution_mode"=>"profile",
+        "requested_engine"=>"native_hsd", "executed_engine"=>"native_hsd"))
+    @test Main._validate_route(native_profile; label="native").valid
     @test !Main._validate_route(merge(good, Dict("execution_mode"=>"bogus")); label="bad").valid
     @test !Main._validate_route(merge(good, Dict("executed_engine"=>"unknown")); label="bad").valid
     bad_sample = merge(good, Dict("sample_status"=>"[\"optimal\",\"iteration_limit\",\"optimal\"]"))
