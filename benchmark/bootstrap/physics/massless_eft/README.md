@@ -1,35 +1,42 @@
 # Massless EFT pole-augmented bootstrap slice
 
-This is the first reviewed, build-only bootstrap slice. It implements the
-external pole-plus-symmetric-pair ansatz and finite partial-wave projection,
-but it is **not** a paper-equivalent continuum oracle and does not select a
-solver/profile route.
+This reviewed benchmark is a finite, sampled build-only problem.  It exposes
+mathematically identical SOCP and 2x2 real-PSD `SDPX.Model` builders from one
+coefficient artifact.  It does not specialize or modify a solver route.
 
-## Normalization (resolved explicitly)
+## Normalization and frozen algebra
 
-The external rows use an amplitude `tau` and the PSD block
+The implemented source variable is `tau`; its physical factor-four
+normalization is unresolved and is not inferred.  The only frozen equivalence
+is
 
 ```
-[2-Im(tau)  Re(tau); Re(tau)  Im(tau)] >= 0.
+[2-Im(tau)  Re(tau); Re(tau) Im(tau)] >= 0
+  <=> [1, Re(tau), 1-Im(tau)] in Q3
+  <=> abs(1+i*tau) <= 1.
 ```
 
-Therefore the exact native cone is `[1, Re(tau), 1-Im(tau)] in Q3`, or
-`abs(1+i*tau) <= 1`. The source prose instead writes
-`abs(1+4*i*T_physical) <= 1`; this implementation resolves that discrepancy by
-explicitly declaring `tau = 4*T_physical`. No factor four is silently inserted
-in generated rows.
+The source rows are generated in a 1024-bit BigFloat guard scope in the
+external generator's operation order, checked against a literal reference
+implementation, and converted once to the requested target type.  The full
+artifact fingerprint is `external_checksum`; catalog loading uses only a
+cheap spec-plus-manifest fingerprint and never builds N14.
 
-## Objective contract
+## Objectives and claim boundary
 
-`g0 = 3 alpha_00 - 3 alpha_pole`.
-For the generated `Phi_11` and the stated `sigma_2`, the reviewed Taylor map is
-`g2 = alpha_10/2 + alpha_20/4 - alpha_11/32 - 3 alpha_pole/8`.
-The source's `-alpha_11/16` is retained only as a documented discrepancy and
-is never used by this implementation. The prototype's unrelated `g2` formula
-is not used.
+`build_model` and `build_soc_problem` accept only `:none`, `:min_g0`, and
+`:max_g0`.  `g0 = 3 alpha_00 - 3 alpha_pole`.  `g2` retains its disputed
+source coefficient as diagnostic metadata only and is not a builder objective.
+All rows and tiers are `:sampled_build_only`; held-out grids have
+`heldout_ngrid = 2*ngrid-1` and audits are diagnostic only.  The exact N14
+external receipt strings remain manifest metadata, not a coefficient-matrix
+identity or certificate.  Commit `1541ab4` is recorded only as the SDPX
+import base.
 
-Smoke, train, and production suites are all `:sampled_build_only`. The N=14
-external SDPB interval is provenance metadata only: no independent objective,
-strict witness, SDPX certificate, or continuum/endpoint/spin-tail claim is
-asserted. Held-out audits are regenerated independently on a 599-node grid and
-are diagnostic only.
+The production spec is catalog metadata but is absent from ordinary suites.
+Use the explicit guarded `production_driver.jl` only when intentionally
+building N14/Q2048; production generation is not a normal test or gate.
+
+Run `julia examples/massless_eft_representation.jl soc` or `sdp` for a small
+build/parity probe.  The probe reports build status and a real algebraic parity
+certificate, and exits nonzero if either fails.

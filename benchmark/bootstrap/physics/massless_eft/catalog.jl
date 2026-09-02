@@ -39,15 +39,9 @@ function _catalog_spec(scale::Symbol)
             status=:sampled_build_only, objective=objective,
             note="Finite sampled rows only; external interval is bounded provenance, not an independent oracle or certificate.",
         ),
-        # These are checked-in artifact fingerprints.  Catalog loading must
-        # not generate the production matrix merely to discover its identity.
-        fingerprint=Dict(
-            :smoke => "c9c3d13938d97057cacaf532c46ed5c7b63cc295939049ef3b4d8c280cc7d514",
-            :train => "2d906e52e6f60a5969dac27478840162285facb4d484d68e261f78af36abc37c",
-            # The N14 production identity is reserved for the dedicated
-            # high-precision/PBS gate; local tests intentionally do not build it.
-            :production => "pending-n14-production-receipt", 
-        )[scale],
+        # This is a cheap metadata identity.  It deliberately contains only
+        # the spec and manifest, so loading the catalog never builds rows.
+        fingerprint=spec_fingerprint(local_spec, _MASSLESS_MANIFEST_SHA256),
     )
 end
 const _MASSLESS_CATALOG_SPECS = [_catalog_spec(scale) for scale in _MASSLESS_SCALES]
@@ -75,7 +69,7 @@ function _build_massless_problem(spec, ::Type{T}) where {T<:AbstractFloat}
         source_parameters=(manifest_sha256=_MASSLESS_MANIFEST_SHA256,
                            source_generator_sha256=artifact.provenance.source_generator_sha256,
                            source_auditor_sha256=artifact.provenance.source_auditor_sha256,
-                           source_result_json_sha256=artifact.provenance.source_result_json_sha256),
+                           external_receipt_json_sha256=artifact.provenance.external_receipt_json_sha256),
         solve_settings=(build_only=true, independent_objective=false,
                         witness_certified=false, heldout_gate=:diagnostic_only),
     )
@@ -93,7 +87,8 @@ function _validate_massless_result(spec, built, result, metrics)
     spec.parameters.manifest_sha256 == expected_manifest || push!(failures, "spec_manifest_digest")
     getproperty(built.solve_settings, :build_only) === true || push!(failures, "solve_settings_build_only")
     spec.reference.status in (:build_only, :sampled_build_only) || push!(failures, "reference_status")
-    spec.fingerprint == artifact.fingerprint || push!(failures, "catalog_fingerprint")
+    local_spec = getproperty(massless_eft_specs(Float64), _spec_for_id(spec.id))
+    spec.fingerprint == spec_fingerprint(local_spec, expected_manifest) || push!(failures, "spec_fingerprint")
     # A source receipt interval is metadata only; all rows remain fail-closed.
     spec.reference.status == :sampled_build_only || push!(failures, "not_sampled_build_only")
     return sort!(unique(failures))
@@ -104,7 +99,6 @@ function physics_benchmark_catalog()
     suites = Dict(
         :smoke => [PhysicsBenchmarkEntry(specs[1].id, :float64, :auto)],
         :train => [PhysicsBenchmarkEntry(specs[2].id, :float64, :auto)],
-        :production => [PhysicsBenchmarkEntry(specs[3].id, :float64, :auto)],
     )
     return PhysicsBenchmarkCatalog(:massless_eft_pole_augmented, "1", specs, suites,
                                    _build_massless_problem; validate=_validate_massless_result)

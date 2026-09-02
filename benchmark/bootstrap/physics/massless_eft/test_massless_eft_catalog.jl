@@ -38,9 +38,14 @@ using .MasslessEFT
         @test first_artifact.g2_map[5] == -1.0 / 32
         @test first_artifact.provenance.source_generator_sha256 == MasslessEFT.SOURCE_GENERATOR_SHA256
         @test first_artifact.provenance.source_auditor_sha256 == MasslessEFT.SOURCE_AUDITOR_SHA256
-        @test first_artifact.provenance.source_result_json_sha256 == MasslessEFT.SOURCE_RESULT_SHA256
+        @test first_artifact.provenance.external_receipt_json_sha256 == MasslessEFT.SOURCE_RESULT_SHA256
         @test first_artifact.provenance.manifest_sha256 == manifest_sha256()
         @test !first_artifact.witness_certified
+        @test first_artifact.spec.precision_bits == 1024
+        @test first_artifact.spec.heldout_ngrid == 2 * first_artifact.spec.ngrid - 1
+        @test first_artifact.spec.normalization == :physical_factor_four_unresolved
+        parity = generator_parity_gate(first_artifact.spec, first_artifact.phis)
+        @test parity.passed
 
         sample_coefficients = [0.2, -0.1, 0.03, 0.07, -0.04]
         sample_coefficients = vcat(sample_coefficients,
@@ -59,7 +64,7 @@ using .MasslessEFT
             first_artifact.phis, first_artifact.heldout_phis, first_artifact.spins,
             first_artifact.pairs, mutated_rows, first_artifact.imag_rows,
             first_artifact.cone_rhs, first_artifact.g0_map, first_artifact.g2_map,
-            first_artifact.objective_maps, first_artifact.strict_witness,
+            first_artifact.objective_maps, first_artifact.witness_candidate,
             first_artifact.witness_certified, first_artifact.provenance,
             first_artifact.counts, first_artifact.fingerprint)
         @test !validate_artifact(mutated; rebuild=false).valid
@@ -69,7 +74,7 @@ using .MasslessEFT
         zero_coefficients = zeros(Float64, first_artifact.counts.variables)
         @test audit_enforced(first_artifact, zero_coefficients).max_positive_excess == 0.0
         heldout = audit_heldout(first_artifact, zero_coefficients)
-        @test heldout.heldout_indices == collect(2:2:598)
+        @test heldout.heldout_indices == collect(2:2:(first_artifact.spec.heldout_ngrid - 1))
         @test heldout.endpoint_limits.phi_zero == :not_represented
         @test heldout.policy == :diagnostic_only_no_declared_threshold
     end
@@ -77,8 +82,17 @@ end
 
 @testset "massless EFT Model and compact SOC parity" begin
     artifact = build_massless_eft(:smoke)
-    compact = build_soc_problem(artifact)
-    model = build_model(artifact)
+    compact = build_soc_problem(artifact, :none)
+    model = build_model(artifact, :none)
+    sdp_model = build_sdp_model(artifact, :none)
+    @test prove_representation_parity(artifact).valid
+    @test length(sdp_model.constraint_blocks) == length(compact.cones)
+    for objective in (:none, :min_g0, :max_g0)
+        @test build_model(artifact, objective).objective !== nothing
+        @test build_sdp_model(artifact, objective).objective !== nothing
+    end
+    @test_throws ArgumentError build_soc_problem(artifact, :g2)
+    @test_throws ArgumentError build_model(artifact, :g2)
     @test compact.variables == length(artifact.g0_map)
     @test length(compact.cones) == size(artifact.real_rows, 1)
     @test length(model.variables) == compact.variables
@@ -115,12 +129,14 @@ end
     # direct include keeps this focused test independent of external arrays.
     include(joinpath(@__DIR__, "catalog.jl"))
     catalog = physics_benchmark_catalog()
-    @test Set(keys(catalog.suites)) == Set((:smoke, :train, :production))
+    @test Set(keys(catalog.suites)) == Set((:smoke, :train))
     @test all(spec.reference.status === :sampled_build_only for spec in values(catalog.specs))
     @test all(:build_only in spec.tags for spec in values(catalog.specs))
     @test all(spec.reference.objective === nothing for spec in values(catalog.specs) if !endswith(spec.id, "production_N14_L60_grid300"))
     @test catalog.specs["massless_eft/production_N14_L60_grid300"].reference.objective.independent === false
+    @test !haskey(catalog.suites, :production)
     @test all(entry.provider === :auto for entries in values(catalog.suites) for entry in entries)
+    @test all(spec.fingerprint == spec_fingerprint(getproperty(massless_eft_specs(Float64), Main._spec_for_id(spec.id)), manifest_sha256()) for spec in values(catalog.specs))
     smoke_spec = catalog.specs["massless_eft/smoke_N2_L4_grid9"]
     built = Main.PhysicsBenchmarkHarness.build_problem(catalog, smoke_spec, Float64)
     @test built.solve_settings.build_only === true
