@@ -374,3 +374,5 @@ end
 include(joinpath(@__DIR__, "..", "benchmark", "optimization", "test_profile_catalog.jl"))
 include(joinpath(@__DIR__, "..", "benchmark", "optimization", "test_compare_contract.jl"))
 include(joinpath(@__DIR__, "..", "benchmark", "optimization", "test_measure_target.jl"))
+include(joinpath(@__DIR__, "..", "benchmark", "bootstrap", "physics",
+    "smatrix_4d", "spec_only", "test_smatrix_4d_spec.jl"))
