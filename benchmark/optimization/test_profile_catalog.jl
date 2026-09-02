@@ -24,7 +24,7 @@ end
 @testset "profile target deterministic tie break" begin
     a = ProfileRow(case_key="b", catalog="fixture", id="b", family="lp", tier="small",
         arithmetic="Float64", solve_eligible=true, build_only=false, source="fixture",
-        status="optimal", certificate_valid=true, semantic_pass=true,
+        status="optimal", certificate_valid=true, semantic_pass=true, objective=0.0,
         sample_seconds=[2.0, 2.0, 2.0], sample_core_seconds=[1.0, 1.0, 1.0],
         allocation_bytes=[10, 10, 10], sample_iterations=[2, 2, 2],
         sample_status=["optimal", "optimal", "optimal"], sample_certificate_valid=[true, true, true],
@@ -32,7 +32,7 @@ end
         reference_status="optimal", reference_objective=0.0, objective_tolerance=1e-8)
     b = ProfileRow(case_key="a", catalog="fixture", id="a", family="lp", tier="small",
         arithmetic="Float64", solve_eligible=true, build_only=false, source="fixture",
-        status="optimal", certificate_valid=true, semantic_pass=true,
+        status="optimal", certificate_valid=true, semantic_pass=true, objective=0.0,
         sample_seconds=[2.0, 2.0, 2.0], sample_core_seconds=[1.0, 1.0, 1.0],
         allocation_bytes=[10, 10, 10], sample_iterations=[2, 2, 2],
         sample_status=["optimal", "optimal", "optimal"], sample_certificate_valid=[true, true, true],
