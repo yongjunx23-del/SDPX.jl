@@ -3,6 +3,7 @@ module V2Schema9Adapter
 using SHA
 using TOML
 using Dates
+using Statistics
 import SDPX
 
 const ROOT = normpath(joinpath(@__DIR__, "..", ".."))
@@ -21,6 +22,16 @@ const P = Main.ProfileCatalog
 export profile_v2_target, write_schema9, schema9_row
 
 _sha(value) = bytes2hex(SHA.sha256(codeunits(string(value))))
+_iqr(values) = length(values) < 2 ? 0.0 : quantile(Float64.(values), 0.75) - quantile(Float64.(values), 0.25)
+_mad(values) = isempty(values) ? 0.0 : median(abs.(Float64.(values) .- median(Float64.(values))))
+function _sample_route_key(values)
+    fields = (:execution_mode, :requested_engine, :executed_engine,
+        :scaling, :layout, :conic_formulation, :planned_formulation,
+        :executed_formulation, :planned_backend, :executed_backend,
+        :planned_provider, :executed_provider, :executed_specialization,
+        :psd_lift_used, :fallback_reason, :la_fallback_reason)
+    join((string(values[field]) for field in fields), "|")
+end
 _git(args...) = readchomp(Cmd(vcat(["git", "-C", ROOT], String[string(arg) for arg in args])))
 
 function _environment()
@@ -226,31 +237,71 @@ function schema9_row(row::P.ProfileRow)
                   :environment_fingerprint, :provider_fingerprint)
         values[field] = getproperty(row, field)
     end
-    values[:project_sha256] = get(row.receipt, "project_sha256", missing)
-    values[:manifest_sha256] = get(row.receipt, "manifest_sha256", missing)
-    values[:catalog_source_sha256] = get(row.receipt, "catalog_artifact_sha256", missing)
-    values[:contract_fingerprint] = row.catalog_fingerprint
+    receipt = row.receipt
+    environment = get(receipt, "environment", Dict{String,Any}())
+    values[:source_dirty] = get(receipt, "source_dirty", false)
+    values[:julia_version] = get(environment, "julia", string(VERSION))
+    values[:os] = get(environment, "os", string(Sys.KERNEL))
+    values[:cpu_name] = get(environment, "cpu", "not_declared_by_api")
+    values[:hostname] = get(ENV, "HOSTNAME", "not_declared_by_api")
+    values[:pbs_job_id] = get(receipt, "pbs_job_id", "local")
+    values[:julia_threads] = get(environment, "julia_threads", Threads.nthreads())
+    values[:blas_threads] = get(environment, "blas_threads", "not_declared_by_api")
+    values[:project_sha256] = get(receipt, "project_sha256", missing)
+    values[:manifest_sha256] = get(receipt, "manifest_sha256", missing)
+    values[:benchmark_driver_sha256] = get(receipt, "benchmark_driver_sha256", missing)
+    values[:solver_source_sha256] = get(receipt, "solver_source_sha256", missing)
+    values[:catalog_source_sha256] = get(receipt, "catalog_artifact_sha256", missing)
+    values[:harness_source_sha256] = get(receipt, "harness_source_sha256", missing)
+    values[:schema_source_sha256] = get(receipt, "schema_source_sha256", missing)
+    values[:contract_fingerprint] = get(receipt, "contract_fingerprint", row.catalog_fingerprint)
+    values[:mfla_commit] = "not_applicable"
+    values[:bfla_commit] = "not_applicable"
     values[:solver_name] = "native_hsd"
-    values[:solver_version] = string(Base.pkgversion(SDPX))
+    values[:solver_version] = get(receipt, "solver_version", string(Base.pkgversion(SDPX)))
     values[:catalog_name] = row.catalog
     values[:catalog_version] = 2
     values[:suite] = "general_v2"
     values[:problem_id] = row.id
     values[:name] = row.id
     values[:family] = row.family
+    values[:problem_type] = row.family
+    values[:conic_formulation] = get(receipt, "planned_formulation", "not_declared_by_api")
     values[:source] = row.source
     values[:purpose] = "solve_eligible_train"
+    values[:seed] = "not_applicable"
     values[:arithmetic] = row.arithmetic
     values[:precision_bits] = get(row.receipt, "precision_bits", missing)
-    values[:requested_provider] = get(row.receipt, "requested_provider", missing)
+    values[:requested_provider] = get(receipt, "provider", get(receipt, "requested_provider", missing))
     values[:status] = row.status
     values[:reference_status] = row.reference_status
-    values[:execution_mode] = get(row.receipt, "execution_mode", "same_process_three_sample")
+    values[:campaign_id] = get(receipt, "campaign_id", "not_declared_by_api")
+    values[:shard_id] = get(receipt, "shard_id", "local")
+    values[:shard_index] = get(receipt, "shard_index", 1)
+    values[:shard_count] = get(receipt, "shard_count", 1)
+    values[:pbs_array_index] = get(receipt, "pbs_array_index", 1)
+    values[:pbs_queue] = get(receipt, "pbs_queue", "local")
+    values[:pbs_node] = get(receipt, "pbs_node", get(ENV, "HOSTNAME", "local"))
+    values[:execution_mode] = get(receipt, "execution_mode", "profile")
     values[:requested_engine] = "native_hsd"
     values[:executed_engine] = "native_hsd"
+    values[:scaling] = get(receipt, "scaling", "not_declared_by_api")
+    values[:layout] = get(receipt, "layout", "not_declared_by_api")
     values[:requested_kkt_route] = row.requested_route
     values[:planned_kkt_route] = row.planned_route
     values[:executed_kkt_route] = row.executed_route
+    values[:planned_formulation] = get(receipt, "planned_formulation", "not_declared_by_api")
+    values[:executed_formulation] = get(receipt, "executed_formulation", "not_declared_by_api")
+    values[:planned_backend] = get(receipt, "planned_backend", "not_declared_by_api")
+    values[:executed_backend] = get(receipt, "executed_backend", "not_declared_by_api")
+    values[:planned_provider] = get(receipt, "planned_provider", "not_declared_by_api")
+    values[:executed_provider] = get(receipt, "executed_provider", "not_declared_by_api")
+    values[:executed_specialization] = get(receipt, "executed_kernel", "not_declared_by_api")
+    values[:psd_lift_used] = false
+    values[:fallback_reason] = get(receipt, "fallback_reason", "none")
+    values[:la_fallback_reason] = get(receipt, "la_fallback_reason", "none")
+    values[:reference_absolute_tolerance] = row.objective_tolerance
+    values[:reference_relative_tolerance] = 0.0
     values[:iterations] = row.iterations
     values[:objective] = string(row.objective)
     values[:reference_objective] = string(row.reference_objective)
@@ -261,8 +312,26 @@ function schema9_row(row::P.ProfileRow)
             row.sample_objective)
     values[:objective_error] = row.reference_objective === nothing ? missing :
         maximum(abs.(row.sample_objective .- row.reference_objective))
-    values[:certificate_kind] = get(row.receipt, "certificate_kind", "optimal")
-    values[:certificate_failures] = ""
+    values[:dual_objective] = get(receipt, "dual_objective", missing)
+    values[:absolute_gap] = (row.objective === nothing ||
+        !haskey(receipt, "dual_objective")) ? missing :
+        abs(row.objective - parse(Float64, string(receipt["dual_objective"])))
+    tolerances = get(receipt, "resolved_tolerances", Dict{String,Any}())
+    values[:primal_tolerance] = get(tolerances, "primal", missing)
+    values[:dual_tolerance] = get(tolerances, "dual", missing)
+    values[:gap_tolerance] = get(tolerances, "gap", missing)
+    metrics = isempty(get(receipt, "sample_certificate_metrics", Any[])) ?
+        Dict{String,Any}() : first(receipt["sample_certificate_metrics"])
+    values[:primal_affine_residual] = get(metrics, "primal_affine", missing)
+    values[:dual_affine_residual] = get(metrics, "dual_affine", missing)
+    values[:primal_cone_violation] = get(metrics, "primal_cone", missing)
+    values[:dual_cone_violation] = get(metrics, "dual_cone", missing)
+    values[:relative_complementarity] = get(metrics, "relative_complementarity", missing)
+    values[:primal_residual] = first(get(receipt, "sample_primal_residual", [missing]))
+    values[:dual_residual] = first(get(receipt, "sample_dual_residual", [missing]))
+    values[:relative_gap] = first(get(receipt, "sample_relative_gap", [missing]))
+    values[:certificate_kind] = get(receipt, "certificate_kind", "optimal")
+    values[:certificate_failures] = join(get(receipt, "certificate_failures", String[]), ",")
     values[:certificate_policy] = "strict_original_coordinate"
     values[:certificate_available] = true
     values[:certificate_valid] = row.certificate_valid
@@ -275,6 +344,9 @@ function schema9_row(row::P.ProfileRow)
     values[:semantic_pass] = row.semantic_pass
     values[:semantic_failures] = ""
     values[:total_seconds] = P._median(row.sample_seconds)
+    values[:seconds_per_iteration] = row.iterations > 0 ?
+        values[:total_seconds] / row.iterations : missing
+    values[:total_seconds_iqr] = _iqr(row.sample_seconds)
     core_samples = row.sample_core_seconds
     values[:core_seconds] = (isempty(core_samples) || any(isnothing, core_samples) ||
         any(x -> !isfinite(x), core_samples)) ? missing : P._median(core_samples)
@@ -285,13 +357,17 @@ function schema9_row(row::P.ProfileRow)
     values[:sample_iterations] = row.sample_iterations
     values[:sample_objective] = row.sample_objective
     values[:sample_certificate_valid] = row.sample_certificate_valid
-    values[:sample_route] = [row.executed_route for _ in row.sample_seconds]
+    sample_route = _sample_route_key(values)
+    values[:sample_route] = fill(sample_route, length(row.sample_seconds))
+    values[:sample_semantic_parity] = all(row.sample_semantic_pass)
+    values[:sample_parity_failures] = ""
     values[:sample_median_seconds] = P._median(row.sample_seconds)
     values[:sample_min_seconds] = minimum(row.sample_seconds)
     values[:sample_max_seconds] = maximum(row.sample_seconds)
-    values[:sample_mad_seconds] = 0.0
+    values[:sample_mad_seconds] = _mad(row.sample_seconds)
     values[:sample_spread_seconds] = maximum(row.sample_seconds) - minimum(row.sample_seconds)
     values[:allocated_bytes] = P._median(row.allocation_bytes)
+    values[:allocated_bytes_iqr] = _iqr(row.allocation_bytes)
     # V2 setup_seconds is model-build/frontend time; do not relabel it as
     # solver setup. Native diagnostics provide core separately; exact phase
     # decomposition is unavailable, so these fields remain missing.
@@ -300,12 +376,17 @@ function schema9_row(row::P.ProfileRow)
     values[:core_seconds] = (isempty(core_samples) || any(isnothing, core_samples) ||
         any(x -> !isfinite(x), core_samples)) ? missing : P._median(core_samples)
     values[:process_peak_rss_bytes] = row.peak_rss_bytes
+    values[:rss_bytes] = row.peak_rss_bytes
+    sample_rss = get(receipt, "sample_peak_rss_bytes", Int[])
+    values[:process_peak_rss_bytes_iqr] = isempty(sample_rss) ? missing : _iqr(sample_rss)
+    values[:rss_iqr_bytes] = values[:process_peak_rss_bytes_iqr]
     values[:memory_budget_bytes] = 4 * 1024^3
     values[:phase_consistent] = get(row.receipt, "phase_accounting_complete", missing)
     values[:phase_accounted_seconds] = missing
     values[:phase_unaccounted_seconds] = missing
     values[:attempt_count] = 1
     values[:input_fingerprint] = row.input_fingerprint
+    values[:external_checksum] = get(receipt, "external_checksum", row.input_fingerprint)
     return NamedTuple{RESULT_COLUMNS}(Tuple(values[field] for field in RESULT_COLUMNS))
 end
 

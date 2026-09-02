@@ -1,4 +1,5 @@
 using Test
+using TOML
 using SDPX
 
 if !isdefined(Main, :V2FreshProcessProfile)
@@ -88,8 +89,8 @@ end
         @test row.receipt["warmup_artifact_sha256"] == warmup_hash
         @test row.receipt["sample_certificate_metrics"][1]["dual_cone"] == 0.0
         @test ProfileCatalog.validate_profile_row(row; live=true)
-        @test V2Schema9Adapter.schema9_row(row).execution_mode ==
-            "fresh_process_three_sample"
+        @test row.receipt["process_isolation"] == "fresh_process_three_sample"
+        @test V2Schema9Adapter.schema9_row(row).execution_mode == "profile"
         @test V2Schema9Adapter.schema9_row(row).process_peak_rss_bytes == 1000
         partial_core = [_fresh_fixture(pid=2, core=false),
             _fresh_fixture(pid=3), _fresh_fixture(pid=4)]
@@ -112,5 +113,28 @@ end
         @test_throws ArgumentError V2FreshProcessProfile.aggregate_child_receipts(
             warm, measured, catalog, instance, precision;
             child_paths, child_hashes=bad_hashes, warmup_path, warmup_hash)
+    end
+    dirty_probe = joinpath(V2FreshProcessProfile.ROOT,
+        ".stageb_fresh_dirty_probe_$(getpid())")
+    try
+        write(dirty_probe, "untracked mutation")
+        @test_throws ArgumentError V2FreshProcessProfile._require_clean_source(
+            "test_mutation")
+    finally
+        rm(dirty_probe; force=true)
+    end
+    @test V2FreshProcessProfile._require_clean_source("test_clean")
+    mktempdir() do dir
+        artifact = joinpath(dir, "receipt.toml")
+        V2FreshProcessProfile._atomic_toml(artifact, Dict{String,Any}("ok"=>true))
+        @test TOML.parsefile(artifact)["ok"] === true
+        @test_throws ArgumentError V2FreshProcessProfile._atomic_toml(
+            artifact, Dict{String,Any}("ok"=>false))
+        if !Sys.iswindows()
+            link = joinpath(dir, "source-link")
+            symlink(V2FreshProcessProfile.ROOT, link)
+            @test_throws ArgumentError V2FreshProcessProfile._canonical_destination(
+                joinpath(link, ".ignored-stageb", "escape.toml"))
+        end
     end
 end

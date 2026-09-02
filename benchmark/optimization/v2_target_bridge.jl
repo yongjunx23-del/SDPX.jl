@@ -102,10 +102,10 @@ function readiness_receipt(result)
         "repository_variable" => "SDPX_ENABLE_DEPENDENT_OPTIMIZATION",
         "repository_variable_state" => "disabled_not_mutated_locally",
         "remaining_open" => [
-            "catalog workflow publication on main",
-            "fresh-process samples (current adapter is same_process_three_sample)",
+            "fresh-process runner has only the first V2 box receipt; broaden targets",
+            "the box receipt is process/JIT dominated and cannot support a Stage-C 2% claim",
             "full catalog breadth and external holdout completion",
-            "Stage-B performance and memory gates",
+            "Stage-B production-scale performance and memory gates",
         ],
     )
 end

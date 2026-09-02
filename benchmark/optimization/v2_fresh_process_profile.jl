@@ -12,6 +12,7 @@ using TOML
 using Dates
 using Statistics
 using LinearAlgebra
+using SparseArrays
 import SDPX
 
 const ROOT = normpath(joinpath(@__DIR__, "..", ".."))
@@ -36,7 +37,21 @@ const FRESH_EXECUTION_MODE = "fresh_process_three_sample"
 _sha_bytes(bytes) = bytes2hex(SHA.sha256(bytes))
 _sha(value) = _sha_bytes(codeunits(string(value)))
 _file_sha(path) = isfile(path) ? _sha_bytes(read(path)) : "missing"
+function _directory_sha(root)
+    io = IOBuffer()
+    for (directory, _, names) in walkdir(root), name in sort(names)
+        path = joinpath(directory, name)
+        isfile(path) || continue
+        write(io, relpath(path, root)); write(io, UInt8(0)); write(io, read(path))
+    end
+    _sha_bytes(take!(io))
+end
 _git(args...) = readchomp(Cmd(vcat(["git", "-C", ROOT], String[string(arg) for arg in args])))
+_source_clean() = isempty(_git("status", "--porcelain"))
+function _require_clean_source(stage)
+    _source_clean() || throw(ArgumentError("source worktree became dirty at $stage"))
+    true
+end
 
 function _arg(name::String, default=nothing)
     prefix = "--" * name * "="
@@ -46,14 +61,74 @@ function _arg(name::String, default=nothing)
     return default
 end
 
-function _atomic_toml(path::AbstractString, value::Dict{String,Any})
-    mkpath(dirname(path))
-    temporary = string(path, ".tmp.", getpid(), ".", rand(UInt))
-    open(temporary, "w") do io
-        TOML.print(io, value; sorted=true)
+function _canonical_destination(path::AbstractString)
+    absolute = abspath(path)
+    ispath(absolute) && throw(ArgumentError("refusing to overwrite existing artifact: $absolute"))
+    parent = dirname(absolute)
+    suffix = String[]
+    while !ispath(parent)
+        pushfirst!(suffix, basename(parent))
+        next = dirname(parent)
+        next == parent && throw(ArgumentError("no existing parent for artifact path: $absolute"))
+        parent = next
     end
-    mv(temporary, path; force=true)
-    path
+    resolved = realpath(parent)
+    for component in suffix
+        resolved = joinpath(resolved, component)
+    end
+    candidate = normpath(joinpath(resolved, basename(absolute)))
+    root = realpath(ROOT)
+    relative = relpath(candidate, root)
+    inside = relative == "." || (!isabspath(relative) && relative != ".." &&
+        !startswith(relative, ".." * Base.Filesystem.path_separator))
+    inside && throw(ArgumentError("generated artifact resolves inside source worktree: $candidate"))
+    candidate
+end
+
+function _sync_file(io)
+    flush(io)
+    result = Sys.iswindows() ? ccall(:_commit, Cint, (Cint,), Base.fd(io)) :
+        ccall(:fsync, Cint, (Cint,), Base.fd(io))
+    result == 0 || throw(SystemError("fsync artifact", Libc.errno()))
+end
+
+function _sync_directory(path)
+    Sys.iswindows() && return
+    fd = ccall(:open, Cint, (Cstring, Cint), path, 0)
+    fd >= 0 || throw(SystemError("open artifact directory", Libc.errno()))
+    try
+        ccall(:fsync, Cint, (Cint,), fd) == 0 ||
+            throw(SystemError("fsync artifact directory", Libc.errno()))
+    finally
+        ccall(:close, Cint, (Cint,), fd)
+    end
+end
+
+function _atomic_bytes(path::AbstractString, bytes::Vector{UInt8})
+    canonical = _canonical_destination(path)
+    mkpath(dirname(canonical))
+    # Re-resolve after mkdir so a symlink swap cannot redirect publication.
+    canonical == _canonical_destination(canonical) || throw(ArgumentError(
+        "artifact canonical path changed during preflight"))
+    temporary = string(canonical, ".tmp.", getpid(), ".", rand(UInt))
+    open(temporary, "x") do io
+        write(io, bytes)
+        _sync_file(io)
+    end
+    try
+        mv(temporary, canonical; force=false)
+        _sync_directory(dirname(canonical))
+    catch
+        rm(temporary; force=true)
+        rethrow()
+    end
+    canonical
+end
+
+function _atomic_toml(path::AbstractString, value::Dict{String,Any})
+    io = IOBuffer()
+    TOML.print(io, value; sorted=true)
+    _atomic_bytes(path, take!(io))
 end
 
 function _environment(precision)
@@ -116,8 +191,7 @@ function _catalog_instance(case_id::Symbol)
 end
 
 function _child_receipt(case_id::Symbol)
-    isempty(_git("status", "--porcelain")) || throw(ArgumentError(
-        "fresh-process source worktree must be clean"))
+    _require_clean_source("child_start")
     precision = _precision()
     catalog, instance = _catalog_instance(case_id)
     blas_threads = parse(Int, get(ENV, "SDPX_BLAS_THREADS", "1"))
@@ -135,16 +209,27 @@ function _child_receipt(case_id::Symbol)
     reference = instance.reference.objective_interval
     reference === nothing && throw(ArgumentError("optimal instance lacks independent objective interval"))
     lower, upper = reference
-    provider_version = string(Base.pkgversion(SDPX))
+    solver_version = string(Base.pkgversion(SDPX))
+    provider_version = string("CHOLMOD_BUILD_VERSION=", SparseArrays.CHOLMOD.BUILD_VERSION)
     provider_fp = _sha((precision.provider, precision.name, precision.bits,
                         string(precision.arithmetic), provider_version))
     environment_fp = _sha(env)
+    driver_sha = _file_sha(SCRIPT)
+    solver_source_sha = _directory_sha(joinpath(ROOT, "src"))
+    harness_sha = _file_sha(joinpath(ROOT, "benchmark", "optimization", "profile_catalog.jl"))
+    schema_sha = _file_sha(joinpath(ROOT, "benchmark", "bootstrap", "result_schema.jl"))
+    contract_fp = _sha((instance.id, result.input_fingerprint, instance.reference,
+                        instance.provenance.transform))
+    campaign_id = _sha((commit, tree, catalog_fp, instance.id, precision.name,
+                        FRESH_EXECUTION_MODE))
     validation = result.validation
     semantic = validation.reference && isempty(validation.failures)
+    _require_clean_source("child_after_solve")
     receipt = Dict{String,Any}(
         "protocol_version" => PROTOCOL_VERSION,
         "pid" => getpid(),
         "source_commit" => commit,
+        "source_dirty" => false,
         "tree_fingerprint" => tree,
         "catalog" => String(catalog.name),
         "family" => String(instance.family),
@@ -162,11 +247,22 @@ function _child_receipt(case_id::Symbol)
         "provider_fingerprint" => provider_fp,
         "provider" => string(precision.provider),
         "provider_version" => provider_version,
+        "solver_version" => solver_version,
         "precision_name" => string(precision.name),
         "precision_bits" => precision.bits,
         "solver_tolerance" => precision.solver_tolerance,
         "certificate_limit" => precision.certificate_limit,
         "environment" => env,
+        "benchmark_driver_sha256" => driver_sha,
+        "solver_source_sha256" => solver_source_sha,
+        "harness_source_sha256" => harness_sha,
+        "schema_source_sha256" => schema_sha,
+        "contract_fingerprint" => contract_fp,
+        "campaign_id" => campaign_id,
+        "shard_id" => "local",
+        "shard_index" => 1,
+        "shard_count" => 1,
+        "external_checksum" => result.input_fingerprint,
         "status" => string(result.status),
         "certificate_valid" => result.certificate_valid,
         "validation_certificate" => validation.certificate,
@@ -213,9 +309,11 @@ function _required_identity(receipt)
     keys = ("protocol_version", "source_commit", "tree_fingerprint", "catalog",
             "family", "instance", "case_key", "input_fingerprint",
             "execution_fingerprint", "catalog_artifact_sha256", "project_sha256",
-            "manifest_sha256", "environment", "environment_fingerprint",
-            "provider_fingerprint", "provider", "provider_version",
-            "precision_name", "precision_bits",
+            "manifest_sha256", "benchmark_driver_sha256", "solver_source_sha256",
+            "harness_source_sha256", "schema_source_sha256", "contract_fingerprint",
+            "campaign_id", "shard_id", "shard_index", "shard_count",
+            "environment", "environment_fingerprint", "provider_fingerprint",
+            "provider", "provider_version", "precision_name", "precision_bits",
             "solver_tolerance", "certificate_limit", "route_receipt")
     all(haskey(receipt, key) for key in keys) || return false
     receipt["protocol_version"] == PROTOCOL_VERSION || return false
@@ -223,10 +321,14 @@ function _required_identity(receipt)
     occursin(r"^[0-9a-f]{40}$", receipt["tree_fingerprint"]) || return false
     for key in ("input_fingerprint", "execution_fingerprint",
                 "catalog_artifact_sha256", "project_sha256", "manifest_sha256",
-                "environment_fingerprint", "provider_fingerprint")
+                "benchmark_driver_sha256", "solver_source_sha256",
+                "harness_source_sha256", "schema_source_sha256",
+                "contract_fingerprint", "environment_fingerprint", "provider_fingerprint")
         occursin(r"^[0-9a-f]{64}$", receipt[key]) || return false
     end
     receipt["precision_bits"] isa Integer && receipt["precision_bits"] > 0 || return false
+    receipt["shard_index"] isa Integer && receipt["shard_count"] isa Integer &&
+        1 <= receipt["shard_index"] <= receipt["shard_count"] || return false
     receipt["environment"] isa AbstractDict || return false
     receipt["route_receipt"] isa AbstractDict || return false
     true
@@ -238,9 +340,16 @@ end
 
 function _read_child(path)
     isfile(path) || throw(ArgumentError("child artifact missing: $path"))
-    receipt = TOML.parsefile(path)
-    _required_identity(receipt) || throw(ArgumentError("child artifact failed identity/protocol validation: $path"))
-    receipt
+    bytes = read(path)
+    digest = _sha_bytes(bytes)
+    receipt = try
+        TOML.parse(String(bytes))
+    catch error
+        throw(ArgumentError("child artifact TOML parse failed for $path: $(sprint(showerror, error))"))
+    end
+    _required_identity(receipt) || throw(ArgumentError(
+        "child artifact failed identity/protocol validation: $path"))
+    (receipt=receipt, sha256=digest, path=String(path))
 end
 
 function _launch_child(path, case_id)
@@ -256,6 +365,7 @@ function _launch_child(path, case_id)
         "SDPX_BLAS_THREADS" => blas_threads,
         "OPENBLAS_NUM_THREADS" => blas_threads,
         "OMP_NUM_THREADS" => get(ENV, "OMP_NUM_THREADS", "1")))
+    _require_clean_source("parent_after_child")
 end
 
 function _median_or_nothing(values)
@@ -286,8 +396,10 @@ function aggregate_child_receipts(warmup, measured, catalog, instance, precision
     identities = ("protocol_version", "source_commit", "tree_fingerprint", "catalog",
         "family", "instance", "case_key", "input_fingerprint", "execution_fingerprint",
         "catalog_artifact_sha256", "project_sha256", "manifest_sha256",
-        "environment", "environment_fingerprint", "provider_fingerprint", "provider",
-        "provider_version", "precision_name", "precision_bits",
+        "benchmark_driver_sha256", "solver_source_sha256", "harness_source_sha256",
+        "schema_source_sha256", "contract_fingerprint", "campaign_id", "shard_id",
+        "shard_index", "shard_count", "environment", "environment_fingerprint",
+        "provider_fingerprint", "provider", "provider_version", "precision_name", "precision_bits",
         "solver_tolerance", "certificate_limit", "route_receipt")
     for key in identities
         first_value = measured[1][key]
@@ -340,7 +452,10 @@ function aggregate_child_receipts(warmup, measured, catalog, instance, precision
     first_result = measured[1]
     route = first_result["route_receipt"]
     row_receipt = Dict{String,Any}(first_result)
-    row_receipt["execution_mode"] = FRESH_EXECUTION_MODE
+    # Schema-v9 execution_mode is the semantic operation; process isolation
+    # is a separate receipt fact.
+    row_receipt["execution_mode"] = "profile"
+    row_receipt["process_isolation"] = FRESH_EXECUTION_MODE
     row_receipt["fresh_process"] = true
     row_receipt["warmup_excluded"] = 1
     row_receipt["sample_count"] = 3
@@ -423,13 +538,26 @@ end
 has_key_or_missing(r, key) = haskey(r, key) ? r[key] : "not_declared_by_api"
 route_value(route, key) = get(route, key, "not_declared_by_api")
 
+function _validate_schema_semantics(path)
+    if !isdefined(Main, :PhysicsBenchmarkHarness)
+        Base.include(Main, joinpath(ROOT, "benchmark", "bootstrap", "PhysicsBenchmarkHarness.jl"))
+    end
+    harness = Main.PhysicsBenchmarkHarness
+    rows = Base.invokelatest(getfield(harness, :compare_result_files), path, path)
+    length(rows) == 1 || throw(ArgumentError("schema semantic validator returned unexpected row count"))
+    getproperty(only(rows), :comparison_valid) === true || throw(ArgumentError(
+        "schema-v9 row failed repository semantic comparison validation"))
+    true
+end
+
 function parent_main()
-    isempty(_git("status", "--porcelain")) || throw(ArgumentError(
-        "fresh-process parent requires a clean source worktree"))
+    _require_clean_source("parent_start")
     case_id = Symbol(_arg("case-id", "v2_lp_box_small"))
-    prefix = abspath(_arg("prefix", joinpath(tempdir(), "SDPX_STAGE_B_FRESH_PROFILE")))
-    startswith(prefix, abspath(ROOT) * Base.Filesystem.path_separator) && throw(ArgumentError(
-        "generated Stage-B artifacts must be outside the source worktree"))
+    requested_prefix = _arg("prefix", joinpath(tempdir(), "SDPX_STAGE_B_FRESH_PROFILE"))
+    receipt_path = _canonical_destination(string(requested_prefix, ".receipt.toml"))
+    prefix = chop(receipt_path; tail=length(".receipt.toml"))
+    final_tsv = _canonical_destination(string(prefix, ".tsv"))
+    final_toml = _canonical_destination(string(prefix, ".toml"))
     catalog, instance = _catalog_instance(case_id)
     precision = _precision()
     work = string(prefix, ".children")
@@ -438,28 +566,40 @@ function parent_main()
     warmup_path = joinpath(work, "warmup.toml")
     measured_paths = [joinpath(work, "sample_$(i).toml") for i in 1:3]
     _launch_child(warmup_path, case_id)
-    warmup = _read_child(warmup_path)
+    warmup_snapshot = _read_child(warmup_path)
     for path in measured_paths
         _launch_child(path, case_id)
     end
-    measured = [_read_child(path) for path in measured_paths]
-    hashes = [_child_hash(path) for path in measured_paths]
-    warmup_hash = _child_hash(warmup_path)
-    row = aggregate_child_receipts(warmup, measured, catalog, instance, precision;
-        child_paths=measured_paths, child_hashes=hashes,
-        warmup_path=warmup_path, warmup_hash=warmup_hash)
+    measured_snapshots = [_read_child(path) for path in measured_paths]
+    # Bind aggregation to the exact bytes parsed above; fail if any artifact
+    # changes before publication.
+    _child_hash(warmup_path) == warmup_snapshot.sha256 || throw(ArgumentError(
+        "warmup artifact changed after parse"))
+    all(_child_hash(snapshot.path) == snapshot.sha256 for snapshot in measured_snapshots) ||
+        throw(ArgumentError("measured child artifact changed after parse"))
+    measured = [snapshot.receipt for snapshot in measured_snapshots]
+    hashes = [snapshot.sha256 for snapshot in measured_snapshots]
+    row = aggregate_child_receipts(warmup_snapshot.receipt, measured,
+        catalog, instance, precision; child_paths=measured_paths,
+        child_hashes=hashes, warmup_path=warmup_path,
+        warmup_hash=warmup_snapshot.sha256)
     Base.invokelatest(getfield(P, :validate_profile_row), row; live=true) ||
         throw(ArgumentError("fresh aggregate failed the live ProfileRow validator"))
-    receipt_path = string(prefix, ".receipt.toml")
-    schema_prefix = string(prefix, ".schema9")
-    _atomic_toml(receipt_path, row.receipt)
-    schema_paths = A.write_schema9(schema_prefix, [row])
-    schema_document = TOML.parsefile(schema_paths.toml)
+    schema_stage = mktempdir()
+    staged_schema = A.write_schema9(joinpath(schema_stage, "profile"), [row])
+    schema_document = TOML.parsefile(staged_schema.toml)
     schema_document["schema_version"] == 9 || throw(ArgumentError(
         "fresh aggregate emitted a non-schema-v9 document"))
     length(get(schema_document, "result", Any[])) == 1 || throw(ArgumentError(
         "fresh aggregate emitted an unexpected schema row count"))
-    println("STAGE_B_FRESH_RECEIPT receipt=$(receipt_path) tsv=$(schema_paths.tsv) toml=$(schema_paths.toml)")
+    _validate_schema_semantics(staged_schema.toml)
+    _require_clean_source("parent_before_publication")
+    published_receipt = _atomic_toml(receipt_path, row.receipt)
+    published_tsv = _atomic_bytes(final_tsv, read(staged_schema.tsv))
+    published_toml = _atomic_bytes(final_toml, read(staged_schema.toml))
+    rm(schema_stage; recursive=true, force=true)
+    _require_clean_source("parent_after_publication")
+    println("STAGE_B_FRESH_RECEIPT receipt=$(published_receipt) tsv=$(published_tsv) toml=$(published_toml)")
     println("STAGE_B_FRESH_SUMMARY pid=", row.receipt["sample_pids"],
         " iterations=", row.sample_iterations, " objectives=", row.sample_objective,
         " peak_rss=", row.peak_rss_bytes)
