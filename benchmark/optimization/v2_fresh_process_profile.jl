@@ -10,6 +10,8 @@ module V2FreshProcessProfile
 using SHA
 using TOML
 using Dates
+using Statistics
+using LinearAlgebra
 import SDPX
 
 const ROOT = normpath(joinpath(@__DIR__, "..", ".."))
@@ -55,20 +57,30 @@ function _atomic_toml(path::AbstractString, value::Dict{String,Any})
 end
 
 function _environment(precision)
-    project = joinpath(ROOT, "Project.toml")
-    manifest = joinpath(ROOT, "Manifest.toml")
-    active = Base.active_project()
+    source_project = joinpath(ROOT, "Project.toml")
+    source_manifest = joinpath(ROOT, "Manifest.toml")
+    active_project = Base.active_project()
+    active_project === nothing && throw(ArgumentError("fresh runner requires an active project"))
+    active_manifest = joinpath(dirname(active_project), "Manifest.toml")
+    isfile(active_project) || throw(ArgumentError("active Project.toml is missing"))
+    isfile(active_manifest) || throw(ArgumentError("active Manifest.toml is missing"))
     return Dict{String,Any}(
-        "project_sha256" => _file_sha(project),
-        "manifest_sha256" => _file_sha(manifest),
-        "active_project_sha256" => isfile(active) ? _file_sha(active) : "missing",
+        # Canonical runtime environment identity: the temp/developed project
+        # and manifest used by every child. Source-project hashes are retained
+        # separately; a missing repository Manifest is not misrepresented.
+        "project_sha256" => _file_sha(active_project),
+        "manifest_sha256" => _file_sha(active_manifest),
+        "source_project_sha256" => _file_sha(source_project),
+        "source_manifest_sha256" => _file_sha(source_manifest),
         "julia" => string(VERSION),
         "os" => string(Sys.KERNEL),
-        "cpu" => string(Sys.MACHINE),
+        "cpu" => string(Sys.CPU_NAME),
+        "machine" => string(Sys.MACHINE),
         "julia_threads" => Threads.nthreads(),
-        "gc_threads" => get(ENV, "JULIA_NUM_GC_THREADS", "unknown"),
-        "blas_threads" => get(ENV, "OPENBLAS_NUM_THREADS", "unknown"),
-        "omp_threads" => get(ENV, "OMP_NUM_THREADS", "unknown"),
+        "gc_threads" => (isdefined(Threads, :ngcthreads) ? Threads.ngcthreads() :
+            parse(Int, get(ENV, "JULIA_NUM_GC_THREADS", "1"))),
+        "blas_threads" => LinearAlgebra.BLAS.get_num_threads(),
+        "omp_threads" => get(ENV, "OMP_NUM_THREADS", "unset"),
         "arithmetic" => string(precision.arithmetic),
         "precision_bits" => precision.bits,
         "provider" => string(precision.provider),
@@ -104,8 +116,12 @@ function _catalog_instance(case_id::Symbol)
 end
 
 function _child_receipt(case_id::Symbol)
+    isempty(_git("status", "--porcelain")) || throw(ArgumentError(
+        "fresh-process source worktree must be clean"))
     precision = _precision()
     catalog, instance = _catalog_instance(case_id)
+    blas_threads = parse(Int, get(ENV, "SDPX_BLAS_THREADS", "1"))
+    SDPX.set_blas_threads!(blas_threads)
     outputs = SDPX.Outputs(:all, :all, :all; diagnostics=:full,
         certificate=:summary, objectives=true, history=false, trace=false)
     started = time_ns()
@@ -119,8 +135,9 @@ function _child_receipt(case_id::Symbol)
     reference = instance.reference.objective_interval
     reference === nothing && throw(ArgumentError("optimal instance lacks independent objective interval"))
     lower, upper = reference
+    provider_version = string(Base.pkgversion(SDPX))
     provider_fp = _sha((precision.provider, precision.name, precision.bits,
-                        string(precision.arithmetic)))
+                        string(precision.arithmetic), provider_version))
     environment_fp = _sha(env)
     validation = result.validation
     semantic = validation.reference && isempty(validation.failures)
@@ -135,12 +152,16 @@ function _child_receipt(case_id::Symbol)
         "case_key" => join((catalog.name, instance.family, instance.tier.name,
                               instance.id, precision.name), "|"),
         "input_fingerprint" => result.input_fingerprint,
+        "execution_fingerprint" => result.execution_fingerprint,
         "catalog_artifact_sha256" => catalog_fp,
         "project_sha256" => env["project_sha256"],
         "manifest_sha256" => env["manifest_sha256"],
+        "source_project_sha256" => env["source_project_sha256"],
+        "source_manifest_sha256" => env["source_manifest_sha256"],
         "environment_fingerprint" => environment_fp,
         "provider_fingerprint" => provider_fp,
         "provider" => string(precision.provider),
+        "provider_version" => provider_version,
         "precision_name" => string(precision.name),
         "precision_bits" => precision.bits,
         "solver_tolerance" => precision.solver_tolerance,
@@ -152,14 +173,20 @@ function _child_receipt(case_id::Symbol)
         "validation_reference" => validation.reference,
         "semantic_pass" => semantic,
         "validation_failures" => string.(validation.failures),
+        "certificate_kind" => "optimal",
+        "certificate_failures" => string.(validation.failures),
         "objective" => result.objective,
         "dual_objective" => result.dual_objective,
+        "primal_residual" => result.primal_residual,
+        "dual_residual" => result.dual_residual,
+        "relative_gap" => result.relative_gap,
+        "certificate_metrics" => Dict(string(name) => value
+            for (name, value) in pairs(result.certificate_metrics)),
         "objective_interval" => Dict("lower" => lower, "upper" => upper),
         "reference_objective" => string((parse(BigFloat, lower) + parse(BigFloat, upper)) / BigFloat(2)),
         "iterations" => result.iterations,
         "total_seconds" => total_seconds,
         "route_receipt" => route,
-        "input_fingerprint" => result.input_fingerprint,
         "maxrss_bytes" => Int(Sys.maxrss()),
         "execution_mode" => "single_child_process",
     )
@@ -185,17 +212,23 @@ end
 function _required_identity(receipt)
     keys = ("protocol_version", "source_commit", "tree_fingerprint", "catalog",
             "family", "instance", "case_key", "input_fingerprint",
-            "catalog_artifact_sha256", "project_sha256", "manifest_sha256",
-            "environment_fingerprint", "provider_fingerprint", "provider",
-            "precision_name", "precision_bits", "solver_tolerance",
-            "certificate_limit", "route_receipt")
+            "execution_fingerprint", "catalog_artifact_sha256", "project_sha256",
+            "manifest_sha256", "environment", "environment_fingerprint",
+            "provider_fingerprint", "provider", "provider_version",
+            "precision_name", "precision_bits",
+            "solver_tolerance", "certificate_limit", "route_receipt")
     all(haskey(receipt, key) for key in keys) || return false
     receipt["protocol_version"] == PROTOCOL_VERSION || return false
     occursin(r"^[0-9a-f]{40}$", receipt["source_commit"]) || return false
     occursin(r"^[0-9a-f]{40}$", receipt["tree_fingerprint"]) || return false
-    occursin(r"^[0-9a-f]{64}$", receipt["input_fingerprint"]) || return false
-    occursin(r"^[0-9a-f]{64}$", receipt["environment_fingerprint"]) || return false
-    occursin(r"^[0-9a-f]{64}$", receipt["provider_fingerprint"]) || return false
+    for key in ("input_fingerprint", "execution_fingerprint",
+                "catalog_artifact_sha256", "project_sha256", "manifest_sha256",
+                "environment_fingerprint", "provider_fingerprint")
+        occursin(r"^[0-9a-f]{64}$", receipt[key]) || return false
+    end
+    receipt["precision_bits"] isa Integer && receipt["precision_bits"] > 0 || return false
+    receipt["environment"] isa AbstractDict || return false
+    receipt["route_receipt"] isa AbstractDict || return false
     true
 end
 
@@ -216,7 +249,13 @@ function _launch_child(path, case_id)
     julia = Base.julia_cmd()
     cmd = `$julia --startup-file=no --gcthreads=1 --project=$active $SCRIPT --child --case-id=$(String(case_id)) --output=$path`
     threads = get(ENV, "JULIA_NUM_THREADS", string(Threads.nthreads()))
-    run(setenv(cmd, "JULIA_NUM_THREADS" => threads))
+    blas_threads = get(ENV, "SDPX_BLAS_THREADS", "1")
+    run(setenv(cmd,
+        "JULIA_NUM_THREADS" => threads,
+        "JULIA_NUM_GC_THREADS" => "1",
+        "SDPX_BLAS_THREADS" => blas_threads,
+        "OPENBLAS_NUM_THREADS" => blas_threads,
+        "OMP_NUM_THREADS" => get(ENV, "OMP_NUM_THREADS", "1")))
 end
 
 function _median_or_nothing(values)
@@ -226,15 +265,29 @@ function _median_or_nothing(values)
 end
 
 function aggregate_child_receipts(warmup, measured, catalog, instance, precision;
-                                  child_paths=String[], child_hashes=String[])
+                                  child_paths=String[], child_hashes=String[],
+                                  warmup_path::String="", warmup_hash::String="")
     length(measured) == 3 || throw(ArgumentError("exactly three measured child receipts are required"))
     all(_required_identity, [warmup; measured]) || throw(ArgumentError("invalid child protocol receipt"))
     pids = [Int(r["pid"]) for r in [warmup; measured]]
     length(unique(pids)) == 4 || throw(ArgumentError("warmup and measured child PIDs must be distinct"))
+    length(child_paths) == 3 && length(child_hashes) == 3 || throw(ArgumentError(
+        "three durable measured child artifacts and hashes are required"))
+    all(isfile, child_paths) || throw(ArgumentError("measured child artifact path is not durable"))
+    all(hash -> occursin(r"^[0-9a-f]{64}$", hash), child_hashes) || throw(ArgumentError(
+        "invalid measured child artifact hash"))
+    all(_child_hash(path) == hash for (path, hash) in zip(child_paths, child_hashes)) ||
+        throw(ArgumentError("measured child artifact hash mismatch"))
+    isfile(warmup_path) || throw(ArgumentError("warmup child artifact path is not durable"))
+    occursin(r"^[0-9a-f]{64}$", warmup_hash) || throw(ArgumentError(
+        "invalid warmup child artifact hash"))
+    _child_hash(warmup_path) == warmup_hash || throw(ArgumentError(
+        "warmup child artifact hash mismatch"))
     identities = ("protocol_version", "source_commit", "tree_fingerprint", "catalog",
-        "family", "instance", "case_key", "input_fingerprint", "catalog_artifact_sha256",
-        "project_sha256", "manifest_sha256", "environment_fingerprint",
-        "provider_fingerprint", "provider", "precision_name", "precision_bits",
+        "family", "instance", "case_key", "input_fingerprint", "execution_fingerprint",
+        "catalog_artifact_sha256", "project_sha256", "manifest_sha256",
+        "environment", "environment_fingerprint", "provider_fingerprint", "provider",
+        "provider_version", "precision_name", "precision_bits",
         "solver_tolerance", "certificate_limit", "route_receipt")
     for key in identities
         first_value = measured[1][key]
@@ -242,6 +295,10 @@ function aggregate_child_receipts(warmup, measured, catalog, instance, precision
             throw(ArgumentError("measured child identity differs for $key"))
         warmup[key] == first_value || throw(ArgumentError("warmup identity differs for $key"))
     end
+    warmup["status"] == "optimal" && warmup["certificate_valid"] === true &&
+        warmup["validation_certificate"] === true && warmup["validation_reference"] === true &&
+        warmup["semantic_pass"] === true && isempty(warmup["validation_failures"]) ||
+        throw(ArgumentError("excluded warmup child failed status/certificate/reference/semantic gates"))
     all(r -> r["status"] == "optimal" && r["certificate_valid"] === true &&
             r["validation_certificate"] === true && r["validation_reference"] === true &&
             r["semantic_pass"] === true && isempty(r["validation_failures"]), measured) ||
@@ -250,16 +307,23 @@ function aggregate_child_receipts(warmup, measured, catalog, instance, precision
     iterations = [Int(r["iterations"]) for r in measured]
     objectives == fill(objectives[1], 3) || throw(ArgumentError("measured objective strings are nondeterministic"))
     iterations == fill(iterations[1], 3) || throw(ArgumentError("measured iterations are nondeterministic"))
+    String(warmup["objective"]) == objectives[1] || throw(ArgumentError(
+        "warmup objective differs from measured children"))
+    Int(warmup["iterations"]) == iterations[1] || throw(ArgumentError(
+        "warmup iterations differ from measured children"))
     interval = measured[1]["objective_interval"]
     lower, upper = String(interval["lower"]), String(interval["upper"])
     expected_interval = instance.reference.objective_interval
     expected_interval === nothing && throw(ArgumentError("instance lacks independent reference interval"))
     (lower, upper) == (String(expected_interval[1]), String(expected_interval[2])) ||
         throw(ArgumentError("child reference interval differs from immutable catalog reference"))
+    public_half_width = abs(parse(BigFloat, upper) - parse(BigFloat, lower)) / BigFloat(2)
+    allowance = max(public_half_width, parse(BigFloat, precision.certificate_limit))
+    center = (parse(BigFloat, lower) + parse(BigFloat, upper)) / BigFloat(2)
     all(r -> begin
         value = parse(BigFloat, String(r["objective"]))
-        parse(BigFloat, lower) <= value <= parse(BigFloat, upper)
-    end, measured) || throw(ArgumentError("measured objectives leave the independent reference interval"))
+        center - allowance <= value <= center + allowance
+    end, measured) || throw(ArgumentError("measured objectives leave the independent reference interval/precision allowance"))
     totals = Float64[r["total_seconds"] for r in measured]
     all(x -> isfinite(x) && x > 0, totals) || throw(ArgumentError("measured total timings are invalid"))
     get_optional(r, key) = haskey(r, key) ? Float64(r[key]) : nothing
@@ -275,7 +339,6 @@ function aggregate_child_receipts(warmup, measured, catalog, instance, precision
     all(>(0), rss) || throw(ArgumentError("measured peak RSS must be positive"))
     first_result = measured[1]
     route = first_result["route_receipt"]
-    samples = [_route_to_namedtuple(route)]
     row_receipt = Dict{String,Any}(first_result)
     row_receipt["execution_mode"] = FRESH_EXECUTION_MODE
     row_receipt["fresh_process"] = true
@@ -288,21 +351,32 @@ function aggregate_child_receipts(warmup, measured, catalog, instance, precision
     row_receipt["sample_core_seconds"] = Any[has_key_or_missing(r, "core_seconds") for r in measured]
     row_receipt["sample_recovery_seconds"] = Any[has_key_or_missing(r, "recovery_seconds") for r in measured]
     row_receipt["sample_allocated_bytes"] = Any[has_key_or_missing(r, "allocated_bytes") for r in measured]
+    row_receipt["sample_peak_rss_bytes"] = rss
     row_receipt["process_peak_rss_bytes"] = maximum(rss)
     row_receipt["child_artifact_sha256"] = child_hashes
     row_receipt["child_artifact_paths"] = child_paths
+    row_receipt["warmup_artifact_sha256"] = warmup_hash
+    row_receipt["warmup_artifact_path"] = warmup_path
     row_receipt["phase_accounting_complete"] = false
     row_receipt["production_invariants_valid"] = "not_declared_by_api"
     row_receipt["full_numerical_gate_valid"] = true
     row_receipt["catalog_validation_pass"] = true
     row_receipt["reference_objective"] = first_result["reference_objective"]
     row_receipt["actual_objective"] = objectives
+    row_receipt["certificate_kind"] = "optimal"
+    row_receipt["certificate_failures"] = String[]
+    row_receipt["sample_certificate_metrics"] = [r["certificate_metrics"] for r in measured]
+    row_receipt["sample_primal_residual"] = [r["primal_residual"] for r in measured]
+    row_receipt["sample_dual_residual"] = [r["dual_residual"] for r in measured]
+    row_receipt["sample_relative_gap"] = [r["relative_gap"] for r in measured]
     row_receipt["objective_error"] = [string(abs(parse(BigFloat, x) - parse(BigFloat, first_result["reference_objective"]))) for x in objectives]
     row_receipt["requested_route"] = route_value(route, "requested_route")
     row_receipt["planned_route"] = route_value(route, "planned_route")
     row_receipt["executed_route"] = route_value(route, "executed_route")
     reference_objective = Float64(parse(BigFloat, first_result["reference_objective"]))
     sample_allocs = Union{Nothing,Int}[x for x in allocs]
+    transform_fingerprint = _sha(instance.provenance.transform)
+    row_receipt["transform_fingerprint"] = transform_fingerprint
     P.ProfileRow(case_key=String(first_result["case_key"]), catalog=String(catalog.name),
         id=String(instance.id), family=String(instance.family), tier=String(instance.tier.name),
         arithmetic=String(precision.name), solve_eligible=true, build_only=false,
@@ -314,7 +388,7 @@ function aggregate_child_receipts(warmup, measured, catalog, instance, precision
         reference_objective=reference_objective,
         objective_tolerance=parse(Float64, precision.certificate_limit),
         transform_exactness=String(instance.provenance.transform.exactness),
-        transform_fingerprint=String(instance.checksum), requested_route=route_value(route,"requested_route"),
+        transform_fingerprint=transform_fingerprint, requested_route=route_value(route,"requested_route"),
         planned_route=route_value(route,"planned_route"), executed_route=route_value(route,"executed_route"),
         input_fingerprint=String(first_result["input_fingerprint"]), source_commit=String(first_result["source_commit"]),
         tree_fingerprint=String(first_result["tree_fingerprint"]), catalog_fingerprint=String(first_result["catalog_artifact_sha256"]),
@@ -333,29 +407,43 @@ end
 # ProfileRow/schema-v9 aggregation; they are never replaced by zero.
 has_key_or_missing(r, key) = haskey(r, key) ? r[key] : "not_declared_by_api"
 route_value(route, key) = get(route, key, "not_declared_by_api")
-_route_to_namedtuple(route) = NamedTuple{Tuple(Symbol.(keys(route)))}(Tuple(values(route)))
 
 function parent_main()
+    isempty(_git("status", "--porcelain")) || throw(ArgumentError(
+        "fresh-process parent requires a clean source worktree"))
     case_id = Symbol(_arg("case-id", "v2_lp_box_small"))
-    prefix = _arg("prefix", joinpath(ROOT, "docs", "reviews", "STAGE_B_FRESH_PROFILE"))
+    prefix = abspath(_arg("prefix", joinpath(tempdir(), "SDPX_STAGE_B_FRESH_PROFILE")))
+    startswith(prefix, abspath(ROOT) * Base.Filesystem.path_separator) && throw(ArgumentError(
+        "generated Stage-B artifacts must be outside the source worktree"))
     catalog, instance = _catalog_instance(case_id)
     precision = _precision()
-    work = mktempdir()
+    work = string(prefix, ".children")
+    ispath(work) && throw(ArgumentError("refusing to overwrite existing child artifact directory: $work"))
+    mkpath(work)
     warmup_path = joinpath(work, "warmup.toml")
     measured_paths = [joinpath(work, "sample_$(i).toml") for i in 1:3]
     _launch_child(warmup_path, case_id)
     warmup = _read_child(warmup_path)
-    for (i, path) in enumerate(measured_paths)
+    for path in measured_paths
         _launch_child(path, case_id)
     end
     measured = [_read_child(path) for path in measured_paths]
     hashes = [_child_hash(path) for path in measured_paths]
+    warmup_hash = _child_hash(warmup_path)
     row = aggregate_child_receipts(warmup, measured, catalog, instance, precision;
-                                   child_paths=measured_paths, child_hashes=hashes)
+        child_paths=measured_paths, child_hashes=hashes,
+        warmup_path=warmup_path, warmup_hash=warmup_hash)
+    Base.invokelatest(getfield(P, :validate_profile_row), row; live=true) ||
+        throw(ArgumentError("fresh aggregate failed the live ProfileRow validator"))
     receipt_path = string(prefix, ".receipt.toml")
     schema_prefix = string(prefix, ".schema9")
     _atomic_toml(receipt_path, row.receipt)
     schema_paths = A.write_schema9(schema_prefix, [row])
+    schema_document = TOML.parsefile(schema_paths.toml)
+    schema_document["schema_version"] == 9 || throw(ArgumentError(
+        "fresh aggregate emitted a non-schema-v9 document"))
+    length(get(schema_document, "result", Any[])) == 1 || throw(ArgumentError(
+        "fresh aggregate emitted an unexpected schema row count"))
     println("STAGE_B_FRESH_RECEIPT receipt=$(receipt_path) tsv=$(schema_paths.tsv) toml=$(schema_paths.toml)")
     println("STAGE_B_FRESH_SUMMARY pid=", row.receipt["sample_pids"],
         " iterations=", row.sample_iterations, " objectives=", row.sample_objective,
