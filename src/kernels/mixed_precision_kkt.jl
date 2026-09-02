@@ -37,6 +37,10 @@ loads an optional arithmetic dependency merely to construct the workspace.
 """
 mixed_intermediate_arithmetic(::Type) = Nothing
 
+struct IntermediateCholeskyFactor{M<:AbstractMatrix}
+    L::M
+end
+
 mutable struct IntermediatePrecisionKKTWorkspace{U}
     S::Matrix{U}
     Btil::Matrix{U}
@@ -46,13 +50,13 @@ mutable struct IntermediatePrecisionKKTWorkspace{U}
     p::Vector{U}
     dx::Vector{U}
     dy::Vector{U}
-    Sfactor::Any
-    Qfactor::Any
+    # Narrowed from `Any` (TASK-P0-TYPED-CORE): `_blocked_intermediate_cholesky!`
+    # returns `IntermediateCholeskyFactor`, `_factor_float64_preconditioner!`
+    # returns `LinearAlgebra.Cholesky`, both exposing `.L`; `nothing` is the
+    # pre-factorization state.
+    Sfactor::Union{Nothing,IntermediateCholeskyFactor,LinearAlgebra.Cholesky}
+    Qfactor::Union{Nothing,IntermediateCholeskyFactor,LinearAlgebra.Cholesky}
     thread_count::Int
-end
-
-struct IntermediateCholeskyFactor{M<:AbstractMatrix}
-    L::M
 end
 
 mutable struct MixedPrecisionKKTWorkspace
@@ -84,9 +88,9 @@ mutable struct MixedPrecisionKKTWorkspace
     p64::Vector{Float64}
     dx64::Vector{Float64}
     dy64::Vector{Float64}
-    Sfactor::Any
-    Qfactor::Any
-    intermediate::Any
+    Sfactor::Union{Nothing,IntermediateCholeskyFactor,LinearAlgebra.Cholesky}
+    Qfactor::Union{Nothing,IntermediateCholeskyFactor,LinearAlgebra.Cholesky}
+    intermediate::Union{Nothing,IntermediatePrecisionKKTWorkspace}
     intermediate_active::Bool
 end
 

@@ -397,6 +397,8 @@ provider-selected factor object.  Float64 uses CHOLMOD while BigFloat and
 MultiFloat use the generic provider; no arithmetic type has a parallel legacy
 workspace or an implicit dense fallback.
 """
+abstract type AbstractSparseFactor end
+
 mutable struct GenericSparseSchurSDPWorkspace{T}
     storage::SparseKKTStorage{T}
     assembly_map::SchurAssemblyMap{T}
@@ -404,7 +406,10 @@ mutable struct GenericSparseSchurSDPWorkspace{T}
     primal_diagonal_values::Vector{T}
     constraint_rhs::Matrix{T}
     equality_scaling::Vector{T}
-    factor::Any
+    # Narrowed from `Any` (TASK-P0-TYPED-CORE): `instantiate_sparse_factor`
+    # returns `GenericSparseCholeskyFactor` or `CHOLMODSparseFactor`, both
+    # `<: AbstractSparseFactor`; `nothing` is the pre-factorization state.
+    factor::Union{Nothing,AbstractSparseFactor}
     equality_requires_pivoting::Bool
     regularization::T
     factorization_quality::T
@@ -711,7 +716,6 @@ function assemble_sparse_gram!(
     return storage.matrix
 end
 
-abstract type AbstractSparseFactor end
 
 mutable struct GenericSparseCholeskyFactor{T} <: AbstractSparseFactor
     symbolic::SparseSymbolicAnalysis

@@ -184,7 +184,10 @@ mutable struct ProviderLPLUCache{T} <: AbstractFactorCache{T}
     factor_epoch::Int
     status::FactorCacheState
     backend::Union{Nothing,AbstractLABackend}
-    provider_factor::Any
+    # Narrowed from `Any` (TASK-P0-TYPED-CORE): both the MFLA and BFLA
+    # `la_lu_factor!` methods return `ProviderLALUFactor`, whose payload
+    # type varies by provider, so the field admits the abstract handle.
+    provider_factor::Union{Nothing,AbstractLAFactorization{T}}
 end
 
 function _lp_lu_provider_backend(
