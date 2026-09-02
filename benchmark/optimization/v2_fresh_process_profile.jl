@@ -110,10 +110,12 @@ function _atomic_bytes(path::AbstractString, bytes::Vector{UInt8})
     # Re-resolve after mkdir so a symlink swap cannot redirect publication.
     canonical == _canonical_destination(canonical) || throw(ArgumentError(
         "artifact canonical path changed during preflight"))
-    temporary = string(canonical, ".tmp.", getpid(), ".", rand(UInt))
-    open(temporary, "x") do io
+    temporary, io = mktemp(dirname(canonical); cleanup=false)
+    try
         write(io, bytes)
         _sync_file(io)
+    finally
+        close(io)
     end
     try
         mv(temporary, canonical; force=false)
