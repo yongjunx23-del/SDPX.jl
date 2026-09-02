@@ -9,6 +9,8 @@
 using SDPX
 using SparseArrays
 using MultiFloats
+using MultiFloatLinearAlgebra
+using BigFloatLinearAlgebra
 using Printf
 
 function allocation_problem(::Type{T}) where {T<:AbstractFloat}
