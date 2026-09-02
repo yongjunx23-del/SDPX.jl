@@ -363,6 +363,17 @@ function aggregate_child_receipts(warmup, measured, catalog, instance, precision
     row_receipt["catalog_validation_pass"] = true
     row_receipt["reference_objective"] = first_result["reference_objective"]
     row_receipt["actual_objective"] = objectives
+    row_receipt["catalog_run_id"] = _sha((first_result["source_commit"],
+        first_result["tree_fingerprint"], first_result["catalog_artifact_sha256"],
+        first_result["case_key"], FRESH_EXECUTION_MODE))
+    environment = first_result["environment"]
+    for key in ("cpu", "julia_threads", "blas_threads", "omp_threads", "gc_threads")
+        row_receipt[key] = environment[key]
+    end
+    row_receipt["resolved_tolerances"] = Dict("primal"=>precision.solver_tolerance,
+        "dual"=>precision.solver_tolerance, "gap"=>precision.solver_tolerance)
+    row_receipt["trajectory_semantics"] = "not_applicable"
+    row_receipt["trajectory_reason"] = "V2 target has no published per-iterate trajectory"
     row_receipt["certificate_kind"] = "optimal"
     row_receipt["certificate_failures"] = String[]
     row_receipt["sample_certificate_metrics"] = [r["certificate_metrics"] for r in measured]
@@ -370,9 +381,13 @@ function aggregate_child_receipts(warmup, measured, catalog, instance, precision
     row_receipt["sample_dual_residual"] = [r["dual_residual"] for r in measured]
     row_receipt["sample_relative_gap"] = [r["relative_gap"] for r in measured]
     row_receipt["objective_error"] = [string(abs(parse(BigFloat, x) - parse(BigFloat, first_result["reference_objective"]))) for x in objectives]
-    row_receipt["requested_route"] = route_value(route, "requested_route")
-    row_receipt["planned_route"] = route_value(route, "planned_route")
-    row_receipt["executed_route"] = route_value(route, "executed_route")
+    for key in ("requested_route", "planned_route", "executed_route",
+                "requested_formulation", "planned_formulation", "executed_formulation",
+                "requested_backend", "planned_backend", "executed_backend",
+                "requested_provider", "planned_provider", "executed_provider",
+                "requested_kernel", "planned_kernel", "executed_kernel", "reuse")
+        row_receipt[key] = route_value(route, key)
+    end
     reference_objective = Float64(parse(BigFloat, first_result["reference_objective"]))
     sample_allocs = Union{Nothing,Int}[x for x in allocs]
     transform_fingerprint = _sha(instance.provenance.transform)

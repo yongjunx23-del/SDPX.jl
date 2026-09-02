@@ -30,8 +30,9 @@ function _fresh_fixture(; pid=100, objective="-5.0",
         "input_fingerprint" => "c"^64, "execution_fingerprint" => "3"^64,
         "catalog_artifact_sha256" => "d"^64,
         "project_sha256" => "e"^64, "manifest_sha256" => "f"^64,
-        "environment" => Dict{String,Any}("julia_threads"=>4, "gc_threads"=>1,
-            "blas_threads"=>1, "provider"=>"cholmod"),
+        "environment" => Dict{String,Any}("cpu"=>"fixture", "julia_threads"=>4,
+            "gc_threads"=>1, "blas_threads"=>1, "omp_threads"=>1,
+            "provider"=>"cholmod"),
         "environment_fingerprint" => "1"^64, "provider_fingerprint" => "2"^64,
         "provider" => "cholmod", "provider_version" => "0.6.0",
         "precision_name" => "Float64", "precision_bits" => 53,
@@ -86,6 +87,7 @@ end
         @test row.receipt["child_artifact_sha256"] == child_hashes
         @test row.receipt["warmup_artifact_sha256"] == warmup_hash
         @test row.receipt["sample_certificate_metrics"][1]["dual_cone"] == 0.0
+        @test ProfileCatalog.validate_profile_row(row; live=true)
         @test V2Schema9Adapter.schema9_row(row).execution_mode ==
             "fresh_process_three_sample"
         @test V2Schema9Adapter.schema9_row(row).process_peak_rss_bytes == 1000
