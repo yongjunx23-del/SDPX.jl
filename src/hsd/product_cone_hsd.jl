@@ -894,18 +894,32 @@ counting in mixed products.
 @inline function _product_hsd_apply_symmetric_G!(runtime, dst, src)
     fill!(dst, zero(eltype(dst)))
     @inbounds for block in runtime.orthant
-        _runtime_copy_in!(block.input, src, block.offset, block.dim)
-        SymmetricCones.g_apply!(
-            block.cone, block.output, block.state, block.input,
-        )
-        _runtime_copy_out!(dst, block.offset, block.output, block.dim)
+        offset = block.offset
+        g = block.state.g
+        for i in 1:block.dim
+            dst[offset + i - 1] = g[i] * src[offset + i - 1]
+        end
     end
     @inbounds for block in runtime.soc
-        _runtime_copy_in!(block.input, src, block.offset, block.dim)
-        SymmetricCones.g_apply!(
-            block.cone, block.output, block.state, block.input,
-        )
-        _runtime_copy_out!(dst, block.offset, block.output, block.dim)
+        offset = block.offset
+        dim = block.dim
+        w = block.state.winv
+        w0 = w[1]
+        z0 = src[offset]
+        ww = zero(eltype(dst))
+        wz = zero(eltype(dst))
+        for i in 2:dim
+            wi = w[i]
+            ww += wi * wi
+            wz += wi * src[offset + i - 1]
+        end
+        two = one(eltype(dst)) + one(eltype(dst))
+        dst[offset] = (w0 * w0 + ww) * z0 + two * w0 * wz
+        tail_diag = w0 * w0 - ww
+        for i in 2:dim
+            wi = w[i]
+            dst[offset + i - 1] = two * w0 * z0 * wi + tail_diag * src[offset + i - 1] + two * wi * wz
+        end
     end
     @inbounds for block in runtime.psd
         _runtime_copy_in!(block.input, src, block.offset, block.len)
