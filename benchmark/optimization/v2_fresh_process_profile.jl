@@ -27,12 +27,122 @@ end
 if !isdefined(Main, :V2Schema9Adapter)
     Base.include(Main, joinpath(ROOT, "benchmark", "optimization", "v2_schema9_adapter.jl"))
 end
+if !isdefined(Main, :GenericConicBenchmark)
+    Base.include(Main, joinpath(ROOT, "benchmark", "general", "GenericConicBenchmark.jl"))
+end
 const V2 = Main.GeneralBenchmarkV2
 const P = Main.ProfileCatalog
 const A = Main.V2Schema9Adapter
+const G = Main.GenericConicBenchmark
+
+# The Stage-B runner is intentionally explicit about the eight registered V2
+# tranche catalogs.  A catalog builder is used rather than a mutable global
+# catalog cache so every fresh child reconstructs the same source registry.
+const _V2_CATALOG_BUILDERS = (
+    (:general_v2_lp_tranche, V2.lp_tranche_catalog),
+    (:general_v2_ill_conditioned_tranche, V2.ill_conditioned_tranche_catalog),
+    (:general_v2_socp_tranche, V2.socp_tranche_catalog),
+    (:general_v2_rsoc_tranche, V2.rsoc_tranche_catalog),
+    (:general_v2_sdp_tranche, V2.sdp_tranche_catalog),
+    (:general_v2_exp_tranche, V2.exp_tranche_catalog),
+    (:general_v2_power_tranche, V2.power_tranche_catalog),
+    (:general_v2_mixed_tranche, V2.mixed_tranche_catalog),
+)
+
+struct GenericOracle
+    generic_module::Module
+    spec::Any
+end
+
+function (oracle::GenericOracle)(built, certificate)
+    spec = oracle.spec
+    built.source_artifact === spec || return false
+    certificate.valid || return false
+    # Status is deliberately absent here: GeneralBenchmarkV2 binds the real
+    # SDPX.status(solved) independently.  This oracle retains only the legacy
+    # Generic target's source-owned objective contract and never constructs a
+    # status-bearing result from the expected status.
+    T = typeof(certificate.primal_objective)
+    expected = T(spec.known_objective)
+    allowance = T(spec.objective_tolerance)
+    isapprox(certificate.primal_objective, expected;
+        atol=allowance, rtol=allowance)
+end
+
+function _generic_catalog()
+    specs = Base.invokelatest(getproperty(G, :inventory); tier=:large, family=:lp)
+    matches = filter(spec -> spec.id === :lp_random_large, specs)
+    length(matches) == 1 || throw(ArgumentError(
+        "GenericConicBenchmark production target lp_random_large is not unique"))
+    spec = only(matches)
+    spec.expected_status === :optimal && spec.known_objective !== nothing ||
+        throw(ArgumentError("Generic target lacks an independent optimal objective contract"))
+    transform = V2.V2Transform(:generic_conic_model, :sdpx_cone_program,
+        :generic_identity, 1, :identity;
+        validation_receipts=(coefficient_match=true, source_reconstruction=true))
+    lower, upper = setprecision(BigFloat, 256) do
+        value = BigFloat(spec.known_objective)
+        allowance = BigFloat(spec.objective_tolerance)
+        (string(value - allowance), string(value + allowance))
+    end
+    reference = V2.V2Reference(:optimal, :optimal, (lower, upper),
+        GenericOracle(G, spec),
+        "GenericConicBenchmark inventory objective and production validator";
+        expected_status=:optimal, disposition=:PASS)
+    family = V2.V2Family(:lp, V2.V2Axis[],
+        (instance, precision) -> begin
+            params = precision.arithmetic === BigFloat ?
+                merge(instance.payload.params, (precision_bits=precision.bits,)) :
+                instance.payload.params
+            model = Base.invokelatest(getproperty(G, :build),
+                instance.payload.problem, precision.arithmetic, params)
+            V2.V2Built(model, nothing, instance.payload,
+                V2.input_fingerprint(instance), transform,
+                (source_spec=instance.payload.id, source=instance.source),
+                (setup_seconds=nothing,))
+        end,
+        (built, certificate) -> GenericOracle(G, spec)(built, certificate),
+        (instance, result) -> result.validation, (:identity,))
+    instance = V2.V2Instance(spec.id, :lp,
+        only(filter(t -> t.name === :large, V2.resource_tiers())), spec.params,
+        :train, spec.source,
+        (source=spec.source, production_api=:GenericConicBenchmark,
+         transform=transform, solve_eligible=true),
+        V2._hex((source=spec.source, id=spec.id, params=spec.params,
+                 known_objective=spec.known_objective)),
+        (wall_seconds=V2.resource_tiers()[3].wall_seconds,
+         memory_bytes=V2.resource_tiers()[3].memory_bytes), reference, spec)
+    V2.V2Catalog(:generic_lp_random_large, V2.V2_SCHEMA_VERSION,
+        [family], [instance],
+        (train=[instance.id], holdout=Symbol[], sentinel=Symbol[]))
+end
+
+function _registered_v2_catalogs()
+    catalogs = V2.V2Catalog[]
+    for (name, builder) in _V2_CATALOG_BUILDERS
+        catalog = builder()
+        catalog.name === name || throw(ArgumentError(
+            "registered V2 catalog name mismatch: expected $name, got $(catalog.name)"))
+        push!(catalogs, catalog)
+    end
+    length(unique(c.name for c in catalogs)) == length(catalogs) ||
+        throw(ArgumentError("registered V2 catalog names are not unique"))
+    catalogs
+end
+
+function _registered_target_catalogs()
+    [_registered_v2_catalogs(); _generic_catalog()]
+end
 
 const PROTOCOL_VERSION = 1
 const FRESH_EXECUTION_MODE = "fresh_process_three_sample"
+const REQUIRED_ROUTE_IDENTITY = (
+    "requested_route", "planned_route", "executed_route",
+    "requested_formulation", "planned_formulation", "executed_formulation",
+    "planned_backend", "executed_backend", "planned_provider",
+    "executed_provider", "planned_kernel",
+    "executed_kernel", "reuse",
+)
 
 _sha_bytes(bytes) = bytes2hex(SHA.sha256(bytes))
 _sha(value) = _sha_bytes(codeunits(string(value)))
@@ -190,11 +300,18 @@ function _precision()
     spec
 end
 
-function _catalog_instance(case_id::Symbol)
-    catalog = V2.lp_tranche_catalog()
-    matches = filter(instance -> instance.id === case_id, catalog.instances)
-    length(matches) == 1 || throw(ArgumentError("unknown or non-unique V2 case $case_id"))
-    instance = only(matches)
+function _catalog_instance(case_id::Symbol; catalog_name=nothing)
+    requested = catalog_name === nothing ? nothing : Symbol(catalog_name)
+    matches = Tuple{V2.V2Catalog,V2.V2Instance}[]
+    for catalog in _registered_target_catalogs()
+        requested !== nothing && catalog.name !== requested && continue
+        for instance in catalog.instances
+            instance.id === case_id && push!(matches, (catalog, instance))
+        end
+    end
+    length(matches) == 1 || throw(ArgumentError(
+        "unknown or non-unique profile target $(catalog_name === nothing ? case_id : "$(catalog_name)/$(case_id)")"))
+    catalog, instance = only(matches)
     instance.split === :train || throw(ArgumentError("fresh profile requires a train instance"))
     get(instance.provenance, :solve_eligible, false) === true ||
         throw(ArgumentError("fresh profile requires a solve-eligible instance"))
@@ -203,16 +320,20 @@ function _catalog_instance(case_id::Symbol)
     catalog, instance
 end
 
-function _child_receipt(case_id::Symbol)
+function _child_receipt(case_id::Symbol; catalog_name=nothing)
     _require_clean_source("child_start")
     precision = _precision()
-    catalog, instance = _catalog_instance(case_id)
+    catalog, instance = _catalog_instance(case_id; catalog_name)
     blas_threads = parse(Int, get(ENV, "SDPX_BLAS_THREADS", "1"))
     SDPX.set_blas_threads!(blas_threads)
     outputs = SDPX.Outputs(:all, :all, :all; diagnostics=:full,
         certificate=:summary, objectives=true, history=false, trace=false)
     started = time_ns()
-    result = V2.run_instance(catalog, instance, precision; outputs)
+    settings = catalog.name === :generic_lp_random_large ?
+        Base.invokelatest(getproperty(G, :_settings), precision.arithmetic; threads=1) : nothing
+    result = settings === nothing ?
+        V2.run_instance(catalog, instance, precision; outputs) :
+        V2.run_instance(catalog, instance, precision; settings, outputs)
     total_seconds = (time_ns() - started) * 1e-9
     env = _environment(precision)
     commit = _git("rev-parse", "HEAD")
@@ -311,9 +432,10 @@ end
 function child_main()
     output = _arg("output")
     case_text = _arg("case-id", "v2_lp_box_small")
+    catalog_text = _arg("catalog")
     output === nothing && throw(ArgumentError("--output=PATH is required in child mode"))
     case_id = Symbol(case_text)
-    receipt = _child_receipt(case_id)
+    receipt = _child_receipt(case_id; catalog_name=catalog_text)
     _atomic_toml(output, receipt)
     println("CHILD_RECEIPT_WRITTEN path=", output, " pid=", receipt["pid"])
 end
@@ -343,7 +465,10 @@ function _required_identity(receipt)
     receipt["shard_index"] isa Integer && receipt["shard_count"] isa Integer &&
         1 <= receipt["shard_index"] <= receipt["shard_count"] || return false
     receipt["environment"] isa AbstractDict || return false
-    receipt["route_receipt"] isa AbstractDict || return false
+    route = receipt["route_receipt"]
+    route isa AbstractDict || return false
+    all(key -> haskey(route, key) && route[key] != "not_declared_by_api",
+        REQUIRED_ROUTE_IDENTITY) || return false
     true
 end
 
@@ -396,11 +521,13 @@ function _validate_completion(path)
     document
 end
 
-function _launch_child(path, case_id)
+function _launch_child(path, case_id, catalog_name=nothing)
     active = Base.active_project()
     active === nothing && throw(ArgumentError("parent must run under an active project"))
     julia = Base.julia_cmd()
-    cmd = `$julia --startup-file=no --gcthreads=1 --project=$active $SCRIPT --child --case-id=$(String(case_id)) --output=$path`
+    cmd = catalog_name === nothing ?
+        `$julia --startup-file=no --gcthreads=1 --project=$active $SCRIPT --child --case-id=$(String(case_id)) --output=$path` :
+        `$julia --startup-file=no --gcthreads=1 --project=$active $SCRIPT --child --case-id=$(String(case_id)) --catalog=$(String(catalog_name)) --output=$path`
     threads = get(ENV, "JULIA_NUM_THREADS", string(Threads.nthreads()))
     blas_threads = get(ENV, "SDPX_BLAS_THREADS", "1")
     run(setenv(cmd,
@@ -560,7 +687,11 @@ function aggregate_child_receipts(warmup, measured, catalog, instance, precision
         setup_seconds=_median_or_nothing(setups), allocation_bytes=Int[x for x in sample_allocs],
         sample_iterations=iterations, peak_rss_bytes=maximum(rss), reference_status="optimal",
         reference_objective=reference_objective,
-        objective_tolerance=parse(Float64, precision.certificate_limit),
+        # Preserve the Generic source/spec's wider independent objective
+        # allowance when its public interval is wider than the arithmetic
+        # certificate allowance. This changes only the reference display gate;
+        # original-coordinate residual and certificate gates remain strict.
+        objective_tolerance=Float64(allowance),
         transform_exactness=String(instance.provenance.transform.exactness),
         transform_fingerprint=transform_fingerprint, requested_route=route_value(route,"requested_route"),
         planned_route=route_value(route,"planned_route"), executed_route=route_value(route,"executed_route"),
@@ -598,6 +729,7 @@ end
 function parent_main()
     _require_clean_source("parent_start")
     case_id = Symbol(_arg("case-id", "v2_lp_box_small"))
+    catalog_name = _arg("catalog")
     requested_prefix = _arg("prefix", joinpath(tempdir(), "SDPX_STAGE_B_FRESH_PROFILE"))
     completion_path = _canonical_destination(string(requested_prefix, ".complete.toml"))
     canonical_prefix = chop(completion_path; tail=length(".complete.toml"))
@@ -606,16 +738,16 @@ function parent_main()
     receipt_path = joinpath(bundle, "receipt.toml")
     final_tsv = joinpath(bundle, "schema.tsv")
     final_toml = joinpath(bundle, "schema.toml")
-    catalog, instance = _catalog_instance(case_id)
+    catalog, instance = _catalog_instance(case_id; catalog_name)
     precision = _precision()
     work = joinpath(bundle, "children")
     mkpath(work)
     warmup_path = joinpath(work, "warmup.toml")
     measured_paths = [joinpath(work, "sample_$(i).toml") for i in 1:3]
-    _launch_child(warmup_path, case_id)
+    _launch_child(warmup_path, case_id, catalog.name)
     warmup_snapshot = _read_child(warmup_path)
     for path in measured_paths
-        _launch_child(path, case_id)
+        _launch_child(path, case_id, catalog.name)
     end
     measured_snapshots = [_read_child(path) for path in measured_paths]
     # Bind aggregation to the exact bytes parsed above; fail if any artifact

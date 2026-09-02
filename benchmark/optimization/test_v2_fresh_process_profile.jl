@@ -67,6 +67,88 @@ function _fresh_fixture(; pid=100, objective="-5.0",
     r
 end
 
+@testset "registered V2 catalogs and strict target lookup" begin
+    catalogs = V2FreshProcessProfile._registered_v2_catalogs()
+    @test length(catalogs) == 8
+    @test [c.name for c in catalogs] == [
+        :general_v2_lp_tranche, :general_v2_ill_conditioned_tranche,
+        :general_v2_socp_tranche, :general_v2_rsoc_tranche,
+        :general_v2_sdp_tranche, :general_v2_exp_tranche,
+        :general_v2_power_tranche, :general_v2_mixed_tranche]
+    optimal_count = 0
+    for catalog in catalogs
+        optimal = filter(instance -> instance.reference.status === :optimal,
+            catalog.instances)
+        optimal_count += length(optimal)
+        for instance in optimal
+            selected_catalog, selected = V2FreshProcessProfile._catalog_instance(instance.id)
+            @test selected_catalog.name === catalog.name
+            @test selected.id === instance.id
+            @test selected.reference.oracle !== nothing
+            @test selected.provenance.transform.exactness === :identity
+        end
+    end
+    @test optimal_count == 17
+    @test_throws ArgumentError V2FreshProcessProfile._catalog_instance(
+        :v2_lp_box_small; catalog_name="general_v2_sdp_tranche")
+    @test_throws ArgumentError V2FreshProcessProfile._catalog_instance(
+        :not_a_registered_case)
+
+    generic_catalog, generic = V2FreshProcessProfile._catalog_instance(
+        :lp_random_large; catalog_name="generic_lp_random_large")
+    @test generic_catalog.name === :generic_lp_random_large
+    @test generic.source == "NETLIB LP/Data conventions plus seeded primal-dual planted standard-form LPs"
+    @test generic.payload.params.m == 400
+    @test generic.payload.params.n == 1200
+    @test generic.reference.status === :optimal
+    @test generic.provenance.production_api === :GenericConicBenchmark
+    oracle = generic.reference.oracle
+    built = (source_artifact=generic.payload,)
+    objective = generic.payload.known_objective
+    @test oracle(built, (valid=true, primal_objective=objective))
+    @test !oracle(built, (valid=false, primal_objective=objective))
+    @test !oracle(built, (valid=true, primal_objective=objective + 1.0))
+    @test !oracle((source_artifact=nothing,),
+        (valid=true, primal_objective=objective))
+    @test_throws ArgumentError V2FreshProcessProfile._catalog_instance(
+        :lp_random_large; catalog_name="general_v2_lp_tranche")
+end
+
+@testset "route aliases are extracted and required" begin
+    selected = (
+        requested_kkt_route=:bordered, planned_kkt_route=:bordered,
+        executed_kkt_route=:bordered, requested_kkt_formulation=:auto,
+        planned_kkt_formulation=:symmetric_augmented_hsd_core,
+        executed_kkt_formulation=:symmetric_augmented_hsd_core,
+        planned_backend=:symmetric_augmented_core,
+        executed_backend=:symmetric_augmented_core, requested_provider=:auto,
+        planned_la_provider=:cholmod, la_executed_provider=:native_disconnected_ldlt,
+        planned_factorization_kernel=:cholmod_symmetric_ldl,
+        executed_factorization_kernel=:generic_ldlt,
+        executed_factorization_reuse=:factor_once_homogeneous_predictor_corrector,
+    )
+    route = GeneralBenchmarkV2._route_receipt((selected_algorithms=selected,))
+    @test route.requested_route == "bordered"
+    @test route.executed_provider == "native_disconnected_ldlt"
+    @test route.executed_kernel == "generic_ldlt"
+    @test route.reuse == "factor_once_homogeneous_predictor_corrector"
+    algorithm_only = (
+        requested_kkt_route=:bordered, planned_kkt_route=:bordered,
+        executed_kkt_route=:bordered, requested_kkt_formulation=:auto,
+        planned_kkt_formulation=:symmetric_augmented_hsd_core,
+        executed_kkt_formulation=:symmetric_augmented_hsd_core,
+        planned_algorithm=:native_hsd, executed_algorithm=:native_hsd,
+    )
+    missing_backend = GeneralBenchmarkV2._route_receipt(
+        (selected_algorithms=algorithm_only,))
+    @test missing_backend.planned_backend == "not_declared_by_api"
+    @test missing_backend.executed_backend == "not_declared_by_api"
+    receipt = _fresh_fixture()
+    @test V2FreshProcessProfile._required_identity(receipt)
+    receipt["route_receipt"]["executed_route"] = "not_declared_by_api"
+    @test !V2FreshProcessProfile._required_identity(receipt)
+end
+
 @testset "fresh-process aggregator and protocol negatives" begin
     catalog = GeneralBenchmarkV2.lp_tranche_catalog()
     instance = only(filter(x -> x.id === :v2_lp_box_small, catalog.instances))

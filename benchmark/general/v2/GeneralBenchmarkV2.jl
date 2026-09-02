@@ -1029,8 +1029,8 @@ function _route_receipt(diagnostics)
         :planned_formulation => (:planned_kkt_formulation, :planned_formulation),
         :executed_formulation => (:executed_kkt_formulation, :executed_formulation),
         :requested_backend => (:requested_backend,),
-        :planned_backend => (:planned_backend, :planned_algorithm, :planned_backend),
-        :executed_backend => (:executed_backend, :executed_algorithm, :executed_backend),
+        :planned_backend => (:planned_backend,),
+        :executed_backend => (:executed_backend,),
         :requested_provider => (:requested_provider,),
         :planned_provider => (:planned_la_provider, :planned_provider),
         :executed_provider => (:la_executed_provider, :executed_provider),
@@ -1039,14 +1039,19 @@ function _route_receipt(diagnostics)
         :executed_kernel => (:executed_factorization_kernel, :executed_kernel),
         :reuse => (:executed_factorization_reuse, :factorization_reuse, :reuse),
     )
-    pick(name) = selected === nothing ? "not_declared_by_api" :
-        try
-            value = first((getproperty(selected, alias) for alias in aliases[name]
-                           if hasproperty(selected, alias)), nothing)
-            value === nothing ? "not_declared_by_api" : string(value)
-        catch
-            "not_declared_by_api"
+    function pick(name)
+        selected === nothing && return "not_declared_by_api"
+        for alias in aliases[name]
+            hasproperty(selected, alias) || continue
+            value = try
+                getproperty(selected, alias)
+            catch
+                nothing
+            end
+            return value === nothing ? "not_declared_by_api" : string(value)
         end
+        return "not_declared_by_api"
+    end
     return NamedTuple{names}(Tuple(pick(name) for name in names))
 end
 
