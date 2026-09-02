@@ -48,3 +48,16 @@ invokes a solver while native Power-cone HSD support is under development.
 The semantic fingerprint covers the source/version and claim boundary, every
 energy and analytic witness, the exact cone parameter, dimensions, and
 expected objective. Validation deterministically rebuilds all fields.
+
+## Catalog contract
+
+- **Physical assumptions/conventions:** finite diagonal density operator, fixed mean energy, and maximum-Renyi order `alpha_R=4`.
+- **Primary equations/version:** Giudice, Cakan, Cirac, and Banuls, arXiv:2012.12848v2, Eq. (7); the finite spectrum is benchmark-derived.
+- **Truncation/discretization:** equally spaced finite energy grids with 8/32/128/512 levels and one power epigraph per level.
+- **Convex variables/objective/cones:** probabilities/epigraph variables, two affine equalities, `K_power(1/4)` blocks, and `min sum(t)`.
+- **Strict witness:** uniform probabilities with the arithmetic-mean target energy; epigraph values can be chosen strictly above the boundary.
+- **Reference status:** `:build_only`, `paper_equivalent=false`.
+- **Excluded claims:** no tensor-network/Ising reproduction, thermodynamic-limit result, or published numerical bound.
+- **Scaling tiers:** tiny/small/medium/stress as listed above; build-only scaling.
+
+The shared checklist is [`../PHYSICS_CATALOG_TEMPLATE.md`](../PHYSICS_CATALOG_TEMPLATE.md).

@@ -50,3 +50,16 @@ both analytic witnesses, cone counts, and expected objective.  Validation
 rebuilds these fields deterministically.  The catalog builder's problem
 payload is an `SDPX.CanonicalConicProgram`; it never calls a solver or chooses
 a provider.
+
+## Catalog contract
+
+- **Physical assumptions/conventions:** finite diagonal Gibbs state, fixed `beta=2`, normalized probabilities, and relative entropy.
+- **Primary equations/version:** Jaynes and Kullback--Leibler/Gibbs relative-information conventions; this is a finite benchmark transcription.
+- **Truncation/discretization:** finite energy grids with 8/32/128/512 levels.
+- **Convex variables/objective/cones:** `p,t`, one normalization equality, exponential cones `(-t,p,q)`, and `min sum(t)`.
+- **Strict witness:** `p=q,t=q` is strict; `p=q,t=0` is the analytic boundary optimum.
+- **Reference status:** `:build_only`, `paper_equivalent=false`.
+- **Excluded claims:** no thermodynamic-limit result, spectrum inference, or external numerical bound.
+- **Scaling tiers:** tiny/small/medium/stress as listed above; build-only scaling.
+
+The shared checklist is [`../PHYSICS_CATALOG_TEMPLATE.md`](../PHYSICS_CATALOG_TEMPLATE.md).

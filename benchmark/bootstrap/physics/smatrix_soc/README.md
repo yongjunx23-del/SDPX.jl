@@ -51,3 +51,16 @@ is introduced. The artifact fixes `reference_status=:sampled_build_only` and
 The injected catalog likewise uses the runner's construction-only path until a
 nontrivial paper-grounded optimization objective is added and independently
 validated.
+
+## Catalog contract
+
+- **Physical assumptions/conventions:** identical massive scalars in 1+1D, real rapidity, crossing and elastic sampled unitarity.
+- **Primary equations/version:** Paulos et al., arXiv:1607.06110v2, Eqs. (1)--(2), (10); the basis is explicitly benchmark-derived.
+- **Truncation/discretization:** finite `z` polynomial degree and 16/64/256/1024 rapidity samples.
+- **Convex variables/objective/cones:** real polynomial coefficients, no objective, one Q3/Lorentz cone per sample.
+- **Strict witness:** zero coefficients give strict margin one; `S=+/-1` are boundary witnesses.
+- **Reference status:** `:sampled_build_only`, `paper_equivalent=false`.
+- **Excluded claims:** no continuous unitarity proof, pole/residue bound, or paper numerical result.
+- **Scaling tiers:** tiny/small/medium/stress as listed above; build-only scaling only.
+
+The shared checklist is [`../PHYSICS_CATALOG_TEMPLATE.md`](../PHYSICS_CATALOG_TEMPLATE.md).

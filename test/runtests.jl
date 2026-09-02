@@ -17,6 +17,8 @@ include(joinpath(
     @__DIR__, "..", "benchmark", "optimization", "test_v2_schema9_adapter.jl",
 ))
 
+include(joinpath(@__DIR__, "physics_catalog_contracts.jl"))
+
 const E2E_CASE_IDS = (
     :lp_afiro_style,
     :lp_infeasible,
