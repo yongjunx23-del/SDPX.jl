@@ -1261,10 +1261,14 @@ function _public_native_hsd_core(
         end
 
         product_rank = row_reduction.rank
-        core_dimension = fixed_trace_plan === nothing ? saturating_sum_bytes(
+        full_core_dimension = fixed_trace_plan === nothing ? saturating_sum_bytes(
             product_rank, canonical_num_slack(solve_reduced),
         ) : length(fixed_trace_plan.zero_rows) +
             length(fixed_trace_plan.reduction.free_ids)
+        compact_dimension = saturating_sum_bytes(product_rank, 1)
+        use_compact_schur = fixed_trace_plan === nothing &&
+            full_core_dimension > 4 * compact_dimension
+        core_dimension = use_compact_schur ? compact_dimension : full_core_dimension
         block_sizes=_product_hsd_core_block_sizes(
             solve_reduced,fixed_trace_plan,
         )
@@ -1307,8 +1311,8 @@ function _public_native_hsd_core(
             (row_reduction.V isa SparseMatrixCSC ?
              nnz(row_reduction.V) : length(row_reduction.V))
         if fixed_trace_plan === nothing
-            symmetric_core_state_preflight(
-                T, core_dimension, block_sizes, effective_precision,
+            use_compact_schur || symmetric_core_state_preflight(
+                T, full_core_dimension, block_sizes, effective_precision,
                 memory_limit, peak_rss;
                 ar_nnz=nnz(row_reduction.Ar),
                 variable_dimension=canonical_num_variables(solve_reduced),
@@ -1328,11 +1332,15 @@ function _public_native_hsd_core(
         base = _hsd_state_from_reduction(
             solve_reduced, driver, row_reduction;
             retain_dense_operator=false,
-            retain_dense_schur=false,
+            retain_dense_schur=use_compact_schur,
         )
-        core_estimate_bytes = fixed_trace_plan === nothing ?
+        scalar_bytes = ExtendedPrecisionBLAS._element_storage_bytes(T)
+        core_estimate_bytes = use_compact_schur ? saturating_sum_bytes(
+            saturating_bytes(8, scalar_bytes, compact_dimension, compact_dimension),
+            saturating_bytes(24, scalar_bytes, compact_dimension),
+        ) : fixed_trace_plan === nothing ?
             symmetric_core_state_prepare_bytes(
-                T, core_dimension, block_sizes;
+                T, full_core_dimension, block_sizes;
                 ar_nnz=nnz(row_reduction.Ar),
                 variable_dimension=canonical_num_variables(solve_reduced),
                 basis_nnz,
@@ -1355,7 +1363,7 @@ function _public_native_hsd_core(
         state = _product_cone_hsd_state(
             base;
             kkt_route=:bordered,
-            prepare_symmetric_core=true,
+            prepare_symmetric_core=!use_compact_schur,
             fixed_trace_plan,
             symmetric_core_memory_limit=memory_limit,
             symmetric_core_current_rss=peak_rss,
