@@ -27,6 +27,9 @@ using .V2Schema9Adapter
     @test length(row.sample_iterations) == 3
     @test length(unique(row.sample_iterations)) == 1
     @test length(unique(row.sample_objective)) == 1
+    @test row.objective == row.sample_objective[1]
+    @test row.reference_objective == -5.0
+    @test row.objective != row.reference_objective
     @test all(row.sample_certificate_valid)
     @test all(row.sample_semantic_pass)
     @test length(row.sample_core_seconds) == 3
@@ -47,9 +50,24 @@ using .V2Schema9Adapter
     @test schema.frontend_seconds == row.setup_seconds
     doctored = ProfileRow(; merge(NamedTuple{fieldnames(ProfileRow)}(
         Tuple(getfield(row, name) for name in fieldnames(ProfileRow))),
-        (; objective=123.0))...)
+        (; objective=123.0, sample_objective=[123.0, 123.0, 123.0]))...)
+    @test schema9_row(doctored).objective == "123.0"
     @test schema9_row(doctored).reference_objective == "-5.0"
     @test schema9_row(doctored).objective_error == abs(123.0 - row.reference_objective)
+    missing_core = ProfileRow(; merge(NamedTuple{fieldnames(ProfileRow)}(
+        Tuple(getfield(row, name) for name in fieldnames(ProfileRow))),
+        (; sample_core_seconds=Union{Nothing,Float64}[nothing, nothing, nothing]))...)
+    @test validate_profile_row(missing_core)
+    @test schema9_row(missing_core).core_seconds === missing
+    @test schema9_row(missing_core).phase_accounted_seconds === missing
+    @test schema9_row(missing_core).phase_unaccounted_seconds === missing
+    partial_core = ProfileRow(; merge(NamedTuple{fieldnames(ProfileRow)}(
+        Tuple(getfield(row, name) for name in fieldnames(ProfileRow))),
+        (; sample_core_seconds=Union{Nothing,Float64}[nothing, row.sample_core_seconds[2],
+            row.sample_core_seconds[3]]))...)
+    @test validate_profile_row(partial_core)
+    @test schema9_row(partial_core).core_seconds === missing
+    @test schema9_row(partial_core).phase_accounted_seconds === missing
     @test Set(keys(row.receipt["route_receipt"])) == Set((
         "requested_route", "planned_route", "executed_route",
         "requested_formulation", "planned_formulation", "executed_formulation",
@@ -79,6 +97,14 @@ end
     precision = GeneralBenchmarkV2.V2Precision(:Float64, Float64, 53,
         "1e-8", "5e-7", :cholmod)
     @test_throws ArgumentError profile_v2_target(badcatalog, holdout, precision)
+
+    # A forged holdout with the same ID as a real training row must not be
+    # accepted merely because an ID search finds a training instance.
+    forged_holdout = GeneralBenchmarkV2.V2Instance(original.id, original.family,
+        original.tier, original.axis_values, :holdout, original.source,
+        original.provenance, original.checksum, original.resource,
+        original.reference, original.payload)
+    @test_throws ArgumentError profile_v2_target(catalog, forged_holdout, precision)
 end
 
 @testset "V2 schema-v9 adapter rejects malformed samples" begin

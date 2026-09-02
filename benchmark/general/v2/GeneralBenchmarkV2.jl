@@ -986,7 +986,9 @@ function _run_instance_impl(catalog::V2Catalog, instance::V2Instance,
         cert_ok, reference_ok, failures)
     diagnostics = try SDPX.diagnostics(solved) catch; nothing end
     timings = diagnostics === nothing ? nothing : getproperty(diagnostics, :timings)
-    core_seconds = timings === nothing ? measurement.time : get(timings, :core, measurement.time)
+    # Missing diagnostics must remain missing.  Total optimize wall time is
+    # not a core-phase measurement and must never be relabeled as one.
+    core_seconds = timings === nothing ? nothing : get(timings, :core, nothing)
     recovery_seconds = timings === nothing ? nothing : get(timings, :reconstruction, nothing)
     return V2RunResult(
         instance.id, instance.family, instance.tier.name, precision.name, precision.bits,
