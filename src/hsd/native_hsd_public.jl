@@ -321,18 +321,29 @@ end
     return scale <= 128 ? :small : scale <= 2_000 ? :medium : :large
 end
 
-# Sparse QR rank authority is deliberately Float64-only.  For a bounded
+# Sparse QR rank authority is deliberately Float64-only. For a bounded
 # high-precision bordered setup, an exact-arithmetic dense RRQR is instead a
-# valid rank authority: it neither downcasts nor selects another solver.  The
-# cap prevents a generic sparse high-precision model from silently becoming a
-# dense one; fixed-trace structural reduction keeps its specialized route.
-const _NATIVE_HSD_DENSE_HIGH_PRECISION_RANK_MAX_ENTRIES = 250_000
-
+# valid rank authority: it neither downcasts nor selects another solver.
+# Admit it from an explicit conservative memory estimate rather than a fixed
+# entry-count cutoff: tall, few-column bootstrap operators are cheap to rank
+# reveal even when their sparse logical length exceeds a small global cap.
 @inline function _native_hsd_dense_rank_fallback_allowed(
     A::SparseMatrixCSC{T,Int},
 ) where {T<:AbstractFloat}
-    return T !== Float64 && length(A) <=
-           _NATIVE_HSD_DENSE_HIGH_PRECISION_RANK_MAX_ENTRIES
+    T === Float64 && return false
+    m, n = size(A)
+    # Owned A, transposed QR storage, materialized R, and one additional
+    # matrix-sized workspace. Pivot and norm vectors are lower order; the
+    # usable-memory helper independently reserves half of reported free RAM.
+    scalar_bytes = ExtendedPrecisionBLAS._element_storage_bytes(T)
+    required = saturating_sum_bytes(
+        saturating_bytes(4, scalar_bytes, m, n),
+        saturating_bytes(4, scalar_bytes, n, n),
+        saturating_bytes(4, sizeof(Int), max(m, n)),
+    )
+    free_bytes = ExtendedPrecisionBLAS._system_free_memory_bytes()
+    usable = ExtendedPrecisionBLAS._conservative_usable_memory_bytes(free_bytes)
+    return required <= usable
 end
 
 @inline _native_hsd_dense_rank_fallback_allowed(::AbstractMatrix) = false
