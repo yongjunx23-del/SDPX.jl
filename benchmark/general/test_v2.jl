@@ -210,7 +210,9 @@ end
 
     # Real row-cone injection: solve an actual SOC-row model, then mutate its
     # retained row-dual vector. The first coordinate is constant, so the
-    # unambiguous invalid dual [-1,0,0] changes no stationarity component.
+    # unambiguous invalid dual [-10,0,0] changes no stationarity component.
+    # Its raw cone violation is 10 and dual_scale is 10; the reported metric
+    # must therefore be the public-contract scaled value 1, not raw 10.
     row_model = SDPX.Model(Float64)
     row_x = SDPX.variable!(row_model, :row_x, 1; domain=SDPX.Reals())
     SDPX.constraint!(row_model, :row_soc,
@@ -226,8 +228,8 @@ end
     row_clean = GeneralBenchmarkV2._certificate_metrics(row_model, row_solved, row_certificate)
     @test certificate_gate(row_clean, execution)
     row_data = getfield(row_solved, :constraint_dual_data)
-    row_data.values[1:3] .= [-1.0, 0.0, 0.0]
-    @test SDPX.dual(row_solved) == [-1.0, 0.0, 0.0]
+    row_data.values[1:3] .= [-10.0, 0.0, 0.0]
+    @test SDPX.dual(row_solved) == [-10.0, 0.0, 0.0]
     row_injected = GeneralBenchmarkV2._certificate_metrics(row_model, row_solved, row_certificate)
     # These are the old variable-only components: they remain zero, proving
     # the rejection below comes from the newly reconstructed row dual cone.
@@ -236,6 +238,7 @@ end
     @test row_injected.dual_affine == 0.0
     @test row_injected.relative_gap == 0.0
     @test row_injected.relative_complementarity == 0.0
+    @test row_injected.dual_cone == 1.0
     @test row_injected.dual_cone > BigFloat(execution.certificate_limit)
     @test !certificate_gate(row_injected, execution)
 

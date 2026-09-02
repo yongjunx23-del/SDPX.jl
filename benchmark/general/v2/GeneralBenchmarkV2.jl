@@ -872,6 +872,7 @@ function _certificate_metrics(model, solved, certificate)
         primal_scale = max(one(T), maximum(abs, primal; init=zero(T)),
                            maximum(abs, row_values; init=zero(T)))
         dual_affine = maximum(abs, stationarity; init=zero(T)) / dual_scale
+        dual_cone /= dual_scale
         primal_affine /= primal_scale
         primal_cone /= primal_scale
         objective_scale = max(one(T), abs(certificate.primal_objective),
