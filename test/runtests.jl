@@ -17,6 +17,9 @@ include(joinpath(
 include(joinpath(
     @__DIR__, "..", "benchmark", "optimization", "test_v2_schema9_adapter.jl",
 ))
+include(joinpath(
+    @__DIR__, "..", "benchmark", "optimization", "test_v2_fresh_process_profile.jl",
+))
 
 include(joinpath(@__DIR__, "..", "benchmark", "bootstrap", "physics",
     "test_physics_catalog_contracts.jl"))
