@@ -156,7 +156,7 @@ no open row is promoted by metadata alone.
 | Inventory tiers: medium; large; extreme | open | Current tranche is small/partial; larger dimensions and resource receipts are not yet available. |
 | External holdouts and parity receipts | open | Holdout rows with pending parity are ineligible; independent parity checksums/receipts must pass before promotion. |
 | Lifecycle evidence: fresh-process samples; peak RSS | open | Schema shape exists, but complete fresh-process orchestration and measured peak-RSS evidence remain required. |
-| Provider matrix: Float64x3; BigFloat512; BigFloat1024 | open | Current final matrix covers Float64x2 17/17, Float64x4 17/17 per-case with documented process instability, and BigFloat256 16/17 (only EXP breakdown). |
+| Provider matrix: Float64x3; BigFloat512; BigFloat1024 | open | Current final matrix covers Float64x2 17/17, Float64x4 16/17 per-case (Chebyshev process-crash; provider instability), and BigFloat256 16/17 (only EXP solver breakdown). |
 
 No placeholder rows were added. This is a **partial additive tranche**: 17
 optimal-path cases plus two rays are solve-eligible across all eight catalog
@@ -171,9 +171,10 @@ Power heterogeneous/boundary/alpha, weighted and budgeted means; mixed
 direct-product/many-block; ill-conditioned PSD; medium/large/extreme tiers;
 external parity receipts; complete fresh-process/peak-RSS lifecycle evidence;
 and Float64x3/BigFloat512/1024 provider qualification. The final provider
-receipts already obtained are Float64x2 17/17, Float64x4 17/17 using per-case
-fresh processes with documented SIGSEGV/retry instability, and BigFloat256
-16/17 with only the EXP unit epigraph in native numerical breakdown.
+receipts already obtained are Float64x2 17/17, Float64x4 16/17 using per-case
+fresh processes (Chebyshev is a 3/3 process-crash; other retry instability is
+recorded), and BigFloat256 16/17 with only the EXP unit epigraph in native
+numerical breakdown.
 
 These open items remain fail-closed and cannot be unlocked by synthetic rows,
 metadata, or a solver status without an independent source/oracle and
