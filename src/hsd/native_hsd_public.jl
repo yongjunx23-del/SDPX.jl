@@ -326,13 +326,12 @@ end
 # valid rank authority: it neither downcasts nor selects another solver.  The
 # cap prevents a generic sparse high-precision model from silently becoming a
 # dense one; fixed-trace structural reduction keeps its specialized route.
-const _NATIVE_HSD_DENSE_HIGH_PRECISION_RANK_MAX_ENTRIES = 4_096
+const _NATIVE_HSD_DENSE_HIGH_PRECISION_RANK_MAX_ENTRIES = 250_000
 
 @inline function _native_hsd_dense_rank_fallback_allowed(
     A::SparseMatrixCSC{T,Int},
 ) where {T<:AbstractFloat}
-    return T !== Float64 && length(A) <=
-           _NATIVE_HSD_DENSE_HIGH_PRECISION_RANK_MAX_ENTRIES
+    return length(A) <= _NATIVE_HSD_DENSE_HIGH_PRECISION_RANK_MAX_ENTRIES
 end
 
 @inline _native_hsd_dense_rank_fallback_allowed(::AbstractMatrix) = false

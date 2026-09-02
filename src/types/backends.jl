@@ -9,6 +9,7 @@
 # ---------------------------------------------------------------------------
 
 abstract type AbstractLABackend end
+abstract type KKTBackend end
 
 """
     LAProviderCapabilities
