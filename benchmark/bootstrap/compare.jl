@@ -1,6 +1,6 @@
 #!/usr/bin/env julia
 length(ARGS) in (2, 3) || error(
-    "usage: julia --project=. benchmark/compare.jl BASELINE.toml CANDIDATE.toml [OUTPUT.tsv]",
+    "usage: julia --project=. benchmark/bootstrap/compare.jl BASELINE.toml CANDIDATE.toml [OUTPUT.tsv]",
 )
 include(joinpath(@__DIR__, "PhysicsBenchmarkHarness.jl"))
 using .PhysicsBenchmarkHarness
