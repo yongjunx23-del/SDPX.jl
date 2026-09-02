@@ -334,38 +334,36 @@ end
 
 """Fail-closed validation of the reviewed precision contract."""
 function _validate_precision_spec(precision::V2Precision)
-    expected = Dict(
-        :Float64 => (53, "1e-8", "5e-7", :cholmod),
-        :Float64x2 => (104, "1e-15", "5e-13", :multifloat_linear_algebra),
-        :Float64x3 => (156, "1e-21", "5e-18", :multifloat_linear_algebra),
-        :Float64x4 => (208, "1e-28", "5e-22", :multifloat_linear_algebra),
-        :BigFloat256 => (256, "1e-32", "5e-28", :bigfloat_linear_algebra),
-        :BigFloat512 => (512, "1e-50", "5e-46", :bigfloat_linear_algebra),
-        :BigFloat1024 => (1024, "1e-80", "5e-74", :bigfloat_linear_algebra),
-    )
-    haskey(expected, precision.name) || throw(ArgumentError(
-        "unsupported reviewed precision $(precision.name)"))
-    bits, solver, cert, provider = expected[precision.name]
-    precision.bits == bits || throw(ArgumentError(
+    reviewed = only(filter(spec -> spec.name === precision.name,
+                           reviewed_precision_specs()))
+    precision.bits == reviewed.bits || throw(ArgumentError(
         "precision $(precision.name) does not match the reviewed bit width"))
-    # Test-only specifications must still have a concrete arithmetic backend
-    # and parseable positive tolerances; they cannot use a symbolic backend or
-    # bypass the declaration checks merely by changing the provider label.
+    precision.solver_tolerance == reviewed.solver_tolerance || throw(ArgumentError(
+        "precision $(precision.name) solver tolerance is not reviewed"))
+    precision.certificate_limit == reviewed.certificate_limit || throw(ArgumentError(
+        "precision $(precision.name) certificate limit is not reviewed"))
+    precision.provider === reviewed.provider || throw(ArgumentError(
+        "precision $(precision.name) provider is not reviewed"))
     precision.arithmetic isa Type{<:AbstractFloat} || throw(ArgumentError(
         "precision $(precision.name) requires a concrete arithmetic backend"))
-    precision.provider in (:standard, :test, :generic) ||
-        ((precision.solver_tolerance, precision.certificate_limit,
-          precision.provider) == (solver, cert, provider) || throw(ArgumentError(
-            "precision $(precision.name) does not match the reviewed arithmetic matrix")))
-    _parse_precision_decimal(precision.arithmetic, precision.solver_tolerance) > zero(precision.arithmetic) ||
-        throw(ArgumentError("precision $(precision.name) has invalid solver tolerance"))
-    _parse_precision_decimal(precision.arithmetic, precision.certificate_limit) > zero(precision.arithmetic) ||
-        throw(ArgumentError("precision $(precision.name) has invalid certificate limit"))
-    precision.arithmetic === Float64 || precision.arithmetic === BigFloat ||
-        (SDPX._multifloats_loaded() && nameof(precision.arithmetic) === :MultiFloat &&
-         52 * (sizeof(precision.arithmetic) ÷ sizeof(Float64)) == precision.bits &&
-         SDPX._multifloat_type_available(precision.arithmetic)) ||
-        throw(ArgumentError("precision $(precision.name) provider is unavailable"))
+    arithmetic_ok = if reviewed.arithmetic isa Type
+        precision.arithmetic === reviewed.arithmetic
+    elseif reviewed.arithmetic === precision.name
+        nameof(precision.arithmetic) === :MultiFloat &&
+        SDPX._multifloats_loaded() &&
+        SDPX._multifloat_type_available(precision.arithmetic) &&
+        SDPX.ArithmeticSpec(precision.arithmetic).precision_bits == reviewed.bits
+    else
+        false
+    end
+    arithmetic_ok || throw(ArgumentError(
+        "precision $(precision.name) arithmetic type is not the reviewed execution type"))
+    solver = _parse_precision_decimal(precision.arithmetic, precision.solver_tolerance)
+    cert = _parse_precision_decimal(precision.arithmetic, precision.certificate_limit)
+    solver > zero(precision.arithmetic) || throw(ArgumentError(
+        "precision $(precision.name) has invalid solver tolerance"))
+    cert > zero(precision.arithmetic) || throw(ArgumentError(
+        "precision $(precision.name) has invalid certificate limit"))
     return true
 end
 
@@ -819,7 +817,13 @@ function _certificate_metrics(model, solved, certificate)
         primal_cone = zero(T)
         dual_cone = zero(T)
         row_values = T[]
+        row_dual_cone = zero(T)
+        row_pairing = zero(T)
+        total_rows = sum(length(block.expressions) for block in model.constraint_blocks)
+        length(row_dual) == total_rows || return bad
+        row_offset = 0
         for block in model.constraint_blocks
+            block_start = length(row_values) + 1
             for expression in block.expressions
                 value_ = expression.constant
                 @inbounds for (index, coefficient) in zip(expression.indices, expression.coefficients)
@@ -827,9 +831,15 @@ function _certificate_metrics(model, solved, certificate)
                 end
                 push!(row_values, value_)
             end
-            values = view(row_values, (length(row_values) - length(block.expressions) + 1):length(row_values))
+            block_stop = length(row_values)
+            values = view(row_values, block_start:block_stop)
+            dual_values = view(row_dual, (row_offset + 1):(row_offset + length(values)))
             primal_affine = max(primal_affine,
                 SDPX._public_primal_cone_residual(values, block.domain, block.shape))
+            row_dual_cone = max(row_dual_cone,
+                SDPX._public_dual_cone_residual(dual_values, block.domain, block.shape))
+            row_pairing += dot(values, dual_values)
+            row_offset += length(values)
         end
         for block in model.variable_blocks
             indices = block.offset:(block.offset + block.length - 1)
@@ -838,6 +848,7 @@ function _certificate_metrics(model, solved, certificate)
             dual_cone = max(dual_cone,
                 SDPX._public_dual_cone_residual(view(dual_slack, indices), block.domain, block.shape))
         end
+        dual_cone = max(dual_cone, row_dual_cone)
         c = zeros(T, n)
         objective = model.objective.expression
         @inbounds for (index, coefficient) in zip(objective.indices, objective.coefficients)
@@ -867,9 +878,10 @@ function _certificate_metrics(model, solved, certificate)
                               abs(certificate.dual_objective))
         relative_gap = abs(certificate.primal_objective - certificate.dual_objective) /
                        objective_scale
-        relative_complementarity = abs(dot(primal, dual_slack)) / objective_scale
+        relative_complementarity = abs(dot(primal, dual_slack) + row_pairing) / objective_scale
         finite = isfinite(certificate.primal_objective) &&
                  isfinite(certificate.dual_objective) && all(isfinite, primal) &&
+                 all(isfinite, row_values) && isfinite(row_dual_cone) && isfinite(row_pairing) &&
                  all(isfinite, row_dual) && all(isfinite, dual_slack) &&
                  isfinite(primal_affine) && isfinite(primal_cone) &&
                  isfinite(dual_affine) && isfinite(dual_cone) &&

@@ -216,7 +216,8 @@ function _apply_v2_metadata(cases)
     specs = [c.payload.spec for c in generic]
     try
         cat = Base.invokelatest(v2.adapt_generic_specs, specs; generic_module=g)
-        precision = Base.invokelatest(v2.V2Precision, :Float64, Float64, 53, "1e-8", "5e-7", :auto)
+        precision = only(filter(spec -> spec.name === :Float64,
+            Base.invokelatest(v2.reviewed_precision_specs)))
         metadata = Dict{Symbol,NamedTuple}()
         for instance in cat.instances
             built, _ = Base.invokelatest(v2.build_instance, cat, instance, precision)

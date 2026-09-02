@@ -7,6 +7,16 @@ isdefined(Main, :GenericConicBenchmark) ||
 include(joinpath(@__DIR__, "v2", "GeneralBenchmarkV2.jl"))
 using .GeneralBenchmarkV2
 
+# Execution tests must use the reviewed declaration, never a symbolic
+# :test/:standard/:generic provider alias.
+_reviewed_float64_execution() = only(filter(s -> s.name === :Float64,
+    reviewed_precision_specs()))
+_reviewed_bigfloat_execution(bits) = begin
+    s = only(filter(x -> x.name === Symbol(:BigFloat, bits), reviewed_precision_specs()))
+    V2Precision(s.name, BigFloat, s.bits, s.solver_tolerance,
+        s.certificate_limit, s.provider)
+end
+
 @testset "typed small-tranche artifact contracts" begin
     # Exact rational source data and independent witnesses are retained by the
     # artifact layer; these are not catalog rows until a family builder and
@@ -68,7 +78,7 @@ end
 @testset "typed SOCP lowering has an independent certified oracle" begin
     catalog = socp_tranche_catalog()
     @test length(catalog.instances) == 2
-    precision = V2Precision(:Float64, Float64, 53, "1e-8", "5e-7", :test)
+    precision = _reviewed_float64_execution()
     @test all(instance.payload isa SOCPArtifact for instance in catalog.instances)
     for instance in catalog.instances
         artifact = instance.payload
@@ -136,8 +146,7 @@ end
         (train=[:unit], holdout=Symbol[], sentinel=Symbol[]))
     @test validate_catalog(catalog)
     @test length(catalog_fingerprint(catalog)) == 64
-    @test build_instance(catalog, instance, V2Precision(:Float64, Float64, 53,
-        "1e-8", "5e-7", :test))[2] >= 0
+    @test build_instance(catalog, instance, _reviewed_float64_execution())[2] >= 0
 
     # IDs and generator metadata must not mask identical mathematics across
     # train/holdout splits.
@@ -168,14 +177,24 @@ end
     @test length(reviewed) == 7
     @test reviewed[1].bits == 53
     @test reviewed[end].bits == 1024
-    # Reviewed declarations intentionally carry symbolic arithmetic names;
-    # only concrete execution specifications may enter the validator.
+    # Static multifloat declarations are symbolic; execution declarations
+    # must resolve to concrete arithmetic and exactly match every reviewed
+    # field. Test-only provider aliases are rejected, never executed.
     @test_throws ArgumentError GeneralBenchmarkV2._validate_precision_spec(reviewed[2])
+    @test_throws ArgumentError GeneralBenchmarkV2._validate_precision_spec(
+        V2Precision(:Float64, BigFloat, 53, "1e-8", "5e-7", :cholmod))
     @test_throws ArgumentError GeneralBenchmarkV2._validate_precision_spec(
         V2Precision(:Float64, Float64, 52, "1e-8", "5e-7", :cholmod))
     @test_throws ArgumentError GeneralBenchmarkV2._validate_precision_spec(
-        V2Precision(:Float64, Float64, 53, "not-a-number", "5e-7", :cholmod))
-    execution = V2Precision(:Float64, Float64, 53, "1e-8", "5e-7", :cholmod)
+        V2Precision(:Float64, Float64, 53, "1e-9", "5e-7", :cholmod))
+    @test_throws ArgumentError GeneralBenchmarkV2._validate_precision_spec(
+        V2Precision(:Float64, Float64, 53, "1e-8", "5e-7", :test))
+    # A Float32 backend cannot masquerade as the reviewed Float64x2 limb type,
+    # even when the declaration's nominal bits field is forged to 104.
+    @test_throws ArgumentError GeneralBenchmarkV2._validate_precision_spec(
+        V2Precision(:Float64x2, Float32, 104, "1e-15", "5e-13",
+            :multifloat_linear_algebra))
+    execution = _reviewed_float64_execution()
     @test GeneralBenchmarkV2._validate_precision_spec(execution)
 
     metrics = (finite_objectives=true, primal_affine=BigFloat("1e-8"),
@@ -188,6 +207,56 @@ end
         primal_affine=BigFloat("0"), primal_cone=BigFloat("0"),
         dual_affine=BigFloat("0"), dual_cone=BigFloat("0"),
         relative_gap=BigFloat("0")), execution)
+
+    # Real row-cone injection: solve an actual SOC-row model, then mutate its
+    # retained row-dual vector. The first coordinate is constant, so the
+    # unambiguous invalid dual [-1,0,0] changes no stationarity component.
+    row_model = SDPX.Model(Float64)
+    row_x = SDPX.variable!(row_model, :row_x, 1; domain=SDPX.Reals())
+    SDPX.constraint!(row_model, :row_soc,
+        (0.0, row_x[1], row_x[1]), SDPX.LorentzCone())
+    SDPX.objective!(row_model, SDPX.Minimize(), row_x[1] - row_x[1])
+    row_settings = SDPX.Settings{Float64}(
+        tolerances=SDPX.Tolerances{Float64}(primal=1e-8, dual=1e-8, gap=1e-8),
+        limits=SDPX.Limits(threads=1), verbosity=0, certification=true)
+    row_outputs = SDPX.Outputs(:all, :all, :all; diagnostics=:full,
+        certificate=:summary, objectives=true, history=false, trace=false)
+    row_solved = SDPX.optimize!(row_model; settings=row_settings, outputs=row_outputs)
+    row_certificate = SDPX.certificate(row_solved)
+    row_clean = GeneralBenchmarkV2._certificate_metrics(row_model, row_solved, row_certificate)
+    @test certificate_gate(row_clean, execution)
+    row_data = getfield(row_solved, :constraint_dual_data)
+    row_data.values[1:3] .= [-1.0, 0.0, 0.0]
+    @test SDPX.dual(row_solved) == [-1.0, 0.0, 0.0]
+    row_injected = GeneralBenchmarkV2._certificate_metrics(row_model, row_solved, row_certificate)
+    # These are the old variable-only components: they remain zero, proving
+    # the rejection below comes from the newly reconstructed row dual cone.
+    @test row_injected.primal_affine == 0.0
+    @test row_injected.primal_cone == 0.0
+    @test row_injected.dual_affine == 0.0
+    @test row_injected.relative_gap == 0.0
+    @test row_injected.relative_complementarity == 0.0
+    @test row_injected.dual_cone > BigFloat(execution.certificate_limit)
+    @test !certificate_gate(row_injected, execution)
+
+    # Separate feasible-row injection: [1,0,0] is Lorentz-dual feasible while
+    # its pairing with the constant row value 1 is nonzero; row complementarity
+    # must therefore reject it even though variable-only metrics stay zero.
+    pair_model = SDPX.Model(Float64)
+    pair_x = SDPX.variable!(pair_model, :pair_x, 1; domain=SDPX.Reals())
+    SDPX.constraint!(pair_model, :pair_soc,
+        (1.0, pair_x[1], pair_x[1]), SDPX.LorentzCone())
+    SDPX.objective!(pair_model, SDPX.Minimize(), pair_x[1] - pair_x[1])
+    pair_solved = SDPX.optimize!(pair_model; settings=row_settings, outputs=row_outputs)
+    pair_certificate = SDPX.certificate(pair_solved)
+    getfield(pair_solved, :constraint_dual_data).values[1:3] .= [1.0, 0.0, 0.0]
+    pair_injected = GeneralBenchmarkV2._certificate_metrics(pair_model, pair_solved, pair_certificate)
+    @test pair_injected.dual_cone == 0.0
+    @test pair_injected.primal_cone == 0.0
+    @test pair_injected.dual_affine == 0.0
+    @test pair_injected.relative_complementarity > BigFloat(execution.certificate_limit)
+    @test !certificate_gate(pair_injected, execution)
+
     # The effective objective allowance is precision-specific: a 1e-20 error
     # is accepted by Float64 but rejected by BigFloat512's 5e-46 limit.
     exact_ref = V2Reference(:optimal, :optimal,
@@ -302,7 +371,7 @@ end
     @test all(length(i.checksum) == 64 for i in catalog.instances)
     @test all(length(input_fingerprint(i)) == 64 for i in catalog.instances)
     @test all(length(execution_fingerprint(i,
-        V2Precision(:Float64, Float64, 53, "1e-8", "5e-7", :test))) == 64
+        _reviewed_float64_execution())) == 64
         for i in catalog.instances)
     @test all(i.reference.status === :build_only for i in catalog.instances)
     @test all(i -> get(i.provenance, :compatibility_only, false) === true &&
@@ -310,11 +379,11 @@ end
                    haskey(i.provenance, :v1_expected_status),
               catalog.instances)
     @test_throws ArgumentError run_instance(catalog, first(catalog.instances),
-        V2Precision(:Float64, Float64, 53, "1e-8", "5e-7", :test))
+        _reviewed_float64_execution())
 
     # Build one representative instance through the additive adapter for each
     # public scalar/conic family; V1 builders and IDs remain the source of truth.
-    precision = V2Precision(:Float64, Float64, 53, "1e-8", "5e-7", :test)
+    precision = _reviewed_float64_execution()
     for family in (:lp, :socp, :sdp, :exp, :power)
         instance = first(filter(i -> i.family === family, catalog.instances))
         built, elapsed = build_instance(catalog, instance, precision)
@@ -328,7 +397,7 @@ end
     catalog = lp_tranche_catalog()
     @test length(catalog.instances) == 6
     @test all(instance.payload isa LPArtifact for instance in catalog.instances)
-    precision = V2Precision(:Float64, Float64, 53, "1e-8", "5e-7", :test)
+    precision = _reviewed_float64_execution()
     expected = Dict(:box => -5.0, :sparse_planted_kkt => -4.0,
         :nonpositive => -2.0, :chebyshev => 1.0)
     for instance in catalog.instances
@@ -387,7 +456,7 @@ end
     @test validate_catalog(catalog)
     expected = Dict(:diagonal_scale_ladder => -5.0,
         :near_rank_loss_lp => -2.0)
-    precision = V2Precision(:Float64, Float64, 53, "1e-8", "5e-7", :test)
+    precision = _reviewed_float64_execution()
     for instance in catalog.instances
         artifact = instance.payload
         @test artifact isa IllConditionedArtifact
@@ -493,7 +562,7 @@ end
             GeneralBenchmarkV2._hex((holdout.payload.coefficients, holdout.payload.dimension,
                 holdout.payload.cone_parameter, holdout.payload.infeasible))
     end, (:lp, :nonpositive, :soc, :rsoc, :sdp, :exp, :power, :mixed))
-    precision = V2Precision(:Float64, Float64, 53, "1e-8", "1e-8", :standard)
+    precision = _reviewed_float64_execution()
     for family in (:lp, :nonpositive, :soc, :rsoc, :sdp, :exp, :power, :mixed)
         instance = only(filter(i -> i.family === family && i.split === :train, catalog.instances))
         result = run_instance(catalog, instance, precision)
@@ -612,7 +681,7 @@ end
     for bits in (256, 512)
         built_big = setprecision(BigFloat, 79) do
             build_instance(catalog, train_lp,
-                V2Precision(:BigFloat, BigFloat, bits, "1e-8", "1e-8", :standard))[1]
+                _reviewed_bigfloat_execution(bits))[1]
         end
         @test built_big.facts.model_precision_bits == bits
         @test built_big.facts.model_fingerprint ==
@@ -626,9 +695,9 @@ end
     # fingerprints are intentionally distinct even when rational coefficients
     # happen to be exactly representable at both precisions.
     bf256 = build_instance(catalog, train_sdp,
-        V2Precision(:BigFloat256, BigFloat, 256, "1e-8", "1e-8", :generic))[1]
+        _reviewed_bigfloat_execution(256))[1]
     bf512 = build_instance(catalog, train_sdp,
-        V2Precision(:BigFloat512, BigFloat, 512, "1e-8", "1e-8", :generic))[1]
+        _reviewed_bigfloat_execution(512))[1]
     @test bf256.facts.model_precision_bits == 256
     @test bf512.facts.model_precision_bits == 512
     @test bf256.problem.arithmetic.precision_bits == 256
@@ -641,7 +710,7 @@ end
 @testset "typed RSOC lowering has independent exact epigraph oracles" begin
     catalog = rsoc_tranche_catalog()
     @test length(catalog.instances) == 3
-    precision = V2Precision(:Float64, Float64, 53, "1e-8", "5e-7", :test)
+    precision = _reviewed_float64_execution()
     expected = Dict(:quadratic_epigraph => 1.5, :perspective_ls => 0.5,
         :many_qr3 => 24.0)
     for instance in catalog.instances
@@ -664,7 +733,7 @@ end
 @testset "typed SDP lowering has independent Gram/dual oracles" begin
     catalog = sdp_tranche_catalog()
     @test length(catalog.instances) == 3
-    precision = V2Precision(:Float64, Float64, 53, "1e-8", "5e-7", :test)
+    precision = _reviewed_float64_execution()
     expected = Dict(:weighted_trace => 1.0, :maxcut_k4 => -4.0,
         :multiblock => 8.0)
     for instance in catalog.instances
@@ -685,7 +754,7 @@ end
 end
 
 @testset "typed EXP and Power small tranche" begin
-    precision = V2Precision(:Float64, Float64, 53, "1e-8", "5e-7", :test)
+    precision = _reviewed_float64_execution()
     expcat = exp_tranche_catalog()
     @test length(expcat.instances) == 1
     @test expcat.instances[1].payload isa ExpArtifact
@@ -760,7 +829,7 @@ end
         artifact.primal_witness.rsoc[1], artifact.primal_witness.psd[1, 1],
         artifact.primal_witness.exponential[1], artifact.primal_witness.power[1]]) ==
         artifact.coupling_rhs
-    precision = V2Precision(:Float64, Float64, 53, "1e-8", "5e-7", :test)
+    precision = _reviewed_float64_execution()
     built, elapsed = build_instance(catalog, instance, precision)
     @test elapsed >= 0
     @test built.facts.artifact_fingerprint == instance.checksum
