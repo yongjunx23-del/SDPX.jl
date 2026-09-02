@@ -12,7 +12,6 @@ SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
 TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
 Serialization = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
 SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
-TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
 
 [weakdeps]
 AppleAccelerate = "13e28ba4-7ad8-5781-acae-3021b1ed3924"
@@ -48,7 +47,6 @@ SHA = "0.7"
 TOML = "1"
 Serialization = "1"
 SparseArrays = "1"
-TOML = "1"
 Test = "1"
 julia = "1.10"
 
