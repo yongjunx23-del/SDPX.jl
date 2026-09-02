@@ -1,7 +1,7 @@
 #!/usr/bin/env julia
 using TOML
 using Printf
-include(joinpath(@__DIR__, "profile_catalog.jl"))
+isdefined(Main, :ProfileCatalog) || include(joinpath(@__DIR__, "profile_catalog.jl"))
 using .ProfileCatalog
 
 function _args(args)

@@ -1,10 +1,10 @@
 using Test
 using TOML
-include(joinpath(@__DIR__, "profile_catalog.jl"))
+isdefined(Main, :ProfileCatalog) || include(joinpath(@__DIR__, "profile_catalog.jl"))
 using .ProfileCatalog
 
 @testset "profile catalog fixture and selector" begin
-    rows = fixture_rows()
+    rows = ProfileCatalog.fixture_rows()
     selected, ordered = select_max_target(rows; metric=:core_seconds)
     @test selected.id == "slow"
     @test first(ordered).id == "slow"
@@ -60,7 +60,7 @@ end
 end
 
 @testset "exact three-sample correctness contract" begin
-    good = only(filter(r -> r.id == "slow", fixture_rows()))
+    good = only(filter(r -> r.id == "slow", ProfileCatalog.fixture_rows()))
     @test validate_profile_row(good)
     @test !validate_profile_row(good; live=true)
     function altered(row; kwargs...)

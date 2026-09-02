@@ -1,7 +1,7 @@
 using Test
 using TOML
 
-include(joinpath(@__DIR__, "profile_catalog.jl"))
+isdefined(Main, :ProfileCatalog) || include(joinpath(@__DIR__, "profile_catalog.jl"))
 using .ProfileCatalog
 include(joinpath(@__DIR__, "v2_target_bridge.jl"))
 using .V2TargetBridge
