@@ -1,0 +1,875 @@
+using Test
+using LinearAlgebra
+using SHA
+using SDPX
+isdefined(Main, :GenericConicBenchmark) ||
+    include(joinpath(@__DIR__, "GenericConicBenchmark.jl"))
+include(joinpath(@__DIR__, "v2", "GeneralBenchmarkV2.jl"))
+using .GeneralBenchmarkV2
+
+# Execution tests must use the reviewed declaration, never a symbolic
+# :test/:standard/:generic provider alias.
+_reviewed_float64_execution() = only(filter(s -> s.name === :Float64,
+    reviewed_precision_specs()))
+_reviewed_bigfloat_execution(bits) = begin
+    s = only(filter(x -> x.name === Symbol(:BigFloat, bits), reviewed_precision_specs()))
+    V2Precision(s.name, BigFloat, s.bits, s.solver_tolerance,
+        s.certificate_limit, s.provider)
+end
+
+@testset "typed small-tranche artifact contracts" begin
+    # Exact rational source data and independent witnesses are retained by the
+    # artifact layer; these are not catalog rows until a family builder and
+    # Float64 certificate gate have passed.
+    lp = LPArtifact(:lp_box_probe, :box, Rational{Int}[1 0; 0 1],
+        Rational{Int}[1, 1], Rational{Int}[1, 1];
+        primal_witness=Rational{Int}[1, 1],
+        dual_witness=Rational{Int}[1, 1], objective=2//1)
+    @test lp isa AbstractV2SmallArtifact
+    @test lp.A == Rational{Int}[1 0; 0 1]
+    @test lp.b == Rational{Int}[1, 1]
+    @test lp.c == Rational{Int}[1, 1]
+    @test length(GeneralBenchmarkV2._hex(lp)) == 64
+    @test GeneralBenchmarkV2._hex(lp) == GeneralBenchmarkV2._hex(lp)
+    lp_changed = LPArtifact(:lp_box_probe, :box, lp.A, lp.b,
+        Rational{Int}[1, 2]; primal_witness=lp.primal_witness,
+        dual_witness=lp.dual_witness, objective=3//1)
+    @test GeneralBenchmarkV2._hex(lp_changed) != GeneralBenchmarkV2._hex(lp)
+    @test_throws ArgumentError LPArtifact(:bad, :unknown, lp.A, lp.b, lp.c)
+    @test_throws ArgumentError LPArtifact(:bad, :box, lp.A, lp.b, lp.c;
+        cone_partition=[:nonnegative])
+
+    soc = SOCPArtifact(:soc_probe, :simplex_projection,
+        Rational{Int}[1 0; 0 1], Rational{Int}[1, 1], Rational{Int}[1, 1];
+        cone_partition=[2], primal_witness=Rational{Int}[1, 1],
+        objective=2//1)
+    @test soc isa AbstractV2SmallArtifact
+    @test sum(soc.cone_partition) == 2
+    @test length(GeneralBenchmarkV2._hex(soc)) == 64
+
+    ill = IllConditionedArtifact(:ill_probe, :diagonal_scale_ladder, :lp,
+        Rational{Int}[1 0; 0 1], Rational{Int}[1, 1], Rational{Int}[1, 1];
+        scale_exponent=6, primal_witness=Rational{Int}[1, 1], objective=2//1)
+    @test ill isa AbstractV2SmallArtifact
+    @test ill.scale_exponent == 6
+    @test_throws ArgumentError IllConditionedArtifact(:bad, :hilbert6_sdp, :exp,
+        Rational{Int}[1;;], Rational{Int}[1], Rational{Int}[1])
+end
+
+@testset "V1 result storage preserves requested arithmetic" begin
+    spec = only(filter(s -> s.id === :lp_afiro_style,
+        GenericConicBenchmark.inventory(; tier=:small)))
+    float_result = GenericConicBenchmark.run_one(spec, Float64)
+    @test float_result isa GenericConicBenchmark.BenchmarkResult{Float64}
+    @test float_result.objective isa Float64
+    # A typed legacy result retains the backend and validates against a
+    # reference after converting only the reference allowance into that
+    # backend. This guards against reintroducing Float64 field narrowing.
+    exact = GenericConicBenchmark.BenchmarkResult{BigFloat}(
+        :typed_probe, :lp, :small, :optimal,
+        BigFloat("1.25"), BigFloat("1.25"), BigFloat("0"),
+        BigFloat("0"), BigFloat("0"), true, 1, 0.0, 0, 0.0, false)
+    typed_spec = GenericConicBenchmark.BenchmarkSpec(
+        :typed_probe, :lp, :small, GenericConicBenchmark.LPProblem(),
+        (name=:typed_probe,), :optimal, 1.25, 1e-20, "test")
+    @test GenericConicBenchmark.validate_result(typed_spec, exact)
+end
+
+@testset "typed SOCP lowering has an independent certified oracle" begin
+    catalog = socp_tranche_catalog()
+    @test length(catalog.instances) == 2
+    precision = _reviewed_float64_execution()
+    @test all(instance.payload isa SOCPArtifact for instance in catalog.instances)
+    for instance in catalog.instances
+        artifact = instance.payload
+        @test instance.reference.oracle isa V2SOCOracle
+        @test sum(artifact.cone_partition) == length(artifact.c)
+        built, elapsed = build_instance(catalog, instance, precision)
+        @test elapsed >= 0
+        @test built.facts.artifact_fingerprint == instance.checksum
+        # The values agree only because the contract fingerprint is computed
+        # independently from the exact source artifact, then compared against
+        # the receipt extracted from the lowered model.
+        @test built.facts.model_fingerprint == built.facts.model_contract_fingerprint
+        @test built.facts.model_contract_fingerprint ==
+              GeneralBenchmarkV2._hex(GeneralBenchmarkV2._source_model_receipt(
+                  artifact, built.problem))
+        @test GeneralBenchmarkV2._model_matches_source_receipt(artifact, built.problem)
+        result = run_instance(catalog, instance, precision)
+        @test result.status === :optimal
+        @test result.certificate_valid
+        @test result.validation.reference
+        @test result.validation.failures == Symbol[]
+        @test result.core_seconds !== nothing
+        @test isapprox(parse(Float64, result.objective), Float64(artifact.objective); atol=5e-7, rtol=0)
+    end
+    q3 = only(filter(i -> i.payload.kind === :q3_load_sharing, catalog.instances))
+    @test q3.payload.cone_partition == fill(3, 16)
+    @test q3.payload.A[1, 1] == 1//1
+end
+
+@testset "general benchmark V2 schema and deterministic identity" begin
+    axes = [V2Axis(:z, [2, 1]), V2Axis(:a, ["b", "a"])]
+    expanded = expand(axes)
+    @test [x.a for x in expanded] == ["a", "a", "b", "b"]
+    @test [x.z for x in expanded] == [1, 2, 1, 2]
+
+    exact = V2Transform(:scalar_polynomial, :sdpx_sdp, :halfline_sos,
+        1, :exact_univariate_halfline;
+        positive_prefactor_factored=true,
+        positive_prefactor_proof="positive factor is exp(-2pi*Delta)>0",
+        lifting_dimensions=(source=4, target=10, gram_blocks=2),
+        validation_receipts=(coefficient_match=true, source_reconstruction=true))
+    @test length(exact.fingerprint) == 64
+    @test exact.lifting_dimensions.target == 10
+    @test_throws ArgumentError V2Transform(:x, :y, :bad, 1, :sos_relaxation;
+        positive_prefactor_factored=true)
+
+    tier = only(filter(t -> t.name === :small, resource_tiers()))
+    ref = V2Reference(:optimal, :optimal, ("0", "1"),
+        (built, cert) -> cert.valid, "unit test")
+    instance = V2Instance(:unit, :unit, tier, (dimension=1,), :train,
+        "unit-test", (equations=("test",), transform=exact), "unit-checksum",
+        (wall_seconds=1, memory_bytes=1024), ref, nothing)
+    @test length(input_fingerprint(instance)) == 64
+    mutated = V2Instance(:unit, :unit, tier, (dimension=2,), :train,
+        "unit-test", (equations=("test",), transform=exact), "unit-checksum",
+        (wall_seconds=1, memory_bytes=1024), ref, nothing)
+    @test input_fingerprint(instance) != input_fingerprint(mutated)
+
+    family = V2Family(:unit, V2Axis[],
+        (i, p) -> V2Built(nothing, nothing, nothing, input_fingerprint(i),
+            exact, (source_dimension=1, target_dimension=1),
+            (setup_seconds=nothing,)), nothing,
+        (i, r) -> V2Validation(:optimal, true, true, Symbol[]), (:halfline_sos,))
+    catalog = V2Catalog(:unit_catalog, 1, [family], [instance],
+        (train=[:unit], holdout=Symbol[], sentinel=Symbol[]))
+    @test validate_catalog(catalog)
+    @test length(catalog_fingerprint(catalog)) == 64
+    @test build_instance(catalog, instance, _reviewed_float64_execution())[2] >= 0
+
+    # IDs and generator metadata must not mask identical mathematics across
+    # train/holdout splits.
+    base = lp_tranche_catalog().instances[1]
+    source = base.payload
+    duplicate = LPArtifact(:math_duplicate, source.kind, source.A, source.b, source.c;
+        cone_partition=source.cone_partition, primal_witness=source.primal_witness,
+        dual_witness=source.dual_witness, objective=source.objective,
+        generator_id=:different_generator, generator_version=99)
+    duplicate_instance = V2Instance(:math_duplicate, base.family, base.tier,
+        base.axis_values, :holdout, base.source, base.provenance, GeneralBenchmarkV2._hex(duplicate),
+        base.resource, V2Reference(:optimal, :optimal, base.reference.objective_interval,
+            V2LPOracle(duplicate), "duplicate math test"), duplicate)
+    @test mathematical_fingerprint(base) == mathematical_fingerprint(duplicate_instance)
+    @test_throws ArgumentError V2Catalog(:duplicate_math, 1, [lp_tranche_catalog().families[1]],
+        [base, duplicate_instance], (train=[base.id], holdout=[duplicate_instance.id], sentinel=Symbol[]))
+
+    # The compatibility CLI preserves the retired names without silently
+    # changing the canonical four-tier taxonomy.
+    @test compatibility_tier(:instant) === :small
+    @test compatibility_tier(:heavy) === :large
+    @test compatibility_tier(:extreme) === :extreme
+    @test_throws ArgumentError compatibility_tier(:unknown)
+    @test GenericConicBenchmark.canonical_tier(:instant) === :small
+    @test GenericConicBenchmark.canonical_tier(:heavy) === :large
+
+    reviewed = reviewed_precision_specs()
+    @test length(reviewed) == 7
+    @test reviewed[1].bits == 53
+    @test reviewed[end].bits == 1024
+    # Static multifloat declarations are symbolic; execution declarations
+    # must resolve to concrete arithmetic and exactly match every reviewed
+    # field. Test-only provider aliases are rejected, never executed.
+    @test_throws ArgumentError GeneralBenchmarkV2._validate_precision_spec(reviewed[2])
+    @test_throws ArgumentError GeneralBenchmarkV2._validate_precision_spec(
+        V2Precision(:Float64, BigFloat, 53, "1e-8", "5e-7", :cholmod))
+    @test_throws ArgumentError GeneralBenchmarkV2._validate_precision_spec(
+        V2Precision(:Float64, Float64, 52, "1e-8", "5e-7", :cholmod))
+    @test_throws ArgumentError GeneralBenchmarkV2._validate_precision_spec(
+        V2Precision(:Float64, Float64, 53, "1e-9", "5e-7", :cholmod))
+    @test_throws ArgumentError GeneralBenchmarkV2._validate_precision_spec(
+        V2Precision(:Float64, Float64, 53, "1e-8", "5e-7", :test))
+    # A Float32 backend cannot masquerade as the reviewed Float64x2 limb type,
+    # even when the declaration's nominal bits field is forged to 104.
+    @test_throws ArgumentError GeneralBenchmarkV2._validate_precision_spec(
+        V2Precision(:Float64x2, Float32, 104, "1e-15", "5e-13",
+            :multifloat_linear_algebra))
+    execution = _reviewed_float64_execution()
+    @test GeneralBenchmarkV2._validate_precision_spec(execution)
+
+    metrics = (finite_objectives=true, primal_affine=BigFloat("1e-8"),
+        primal_cone=BigFloat("2e-8"), dual_affine=BigFloat("1e-8"),
+        dual_cone=BigFloat("2e-8"), relative_gap=BigFloat("3e-8"),
+        relative_complementarity=BigFloat("4e-8"))
+    @test certificate_gate(metrics, execution)
+    @test !certificate_gate(merge(metrics, (relative_complementarity=BigFloat("1"),)), execution)
+    @test !certificate_gate((finite_objectives=true,
+        primal_affine=BigFloat("0"), primal_cone=BigFloat("0"),
+        dual_affine=BigFloat("0"), dual_cone=BigFloat("0"),
+        relative_gap=BigFloat("0")), execution)
+
+    # Real row-cone injection: solve an actual SOC-row model, then mutate its
+    # retained row-dual vector. The first coordinate is constant, so the
+    # unambiguous invalid dual [-10,0,0] changes no stationarity component.
+    # Its raw cone violation is 10 and dual_scale is 10; the reported metric
+    # must therefore be the public-contract scaled value 1, not raw 10.
+    row_model = SDPX.Model(Float64)
+    row_x = SDPX.variable!(row_model, :row_x, 1; domain=SDPX.Reals())
+    SDPX.constraint!(row_model, :row_soc,
+        (0.0, row_x[1], row_x[1]), SDPX.LorentzCone())
+    SDPX.objective!(row_model, SDPX.Minimize(), row_x[1] - row_x[1])
+    row_settings = SDPX.Settings{Float64}(
+        tolerances=SDPX.Tolerances{Float64}(primal=1e-8, dual=1e-8, gap=1e-8),
+        limits=SDPX.Limits(threads=1), verbosity=0, certification=true)
+    row_outputs = SDPX.Outputs(:all, :all, :all; diagnostics=:full,
+        certificate=:summary, objectives=true, history=false, trace=false)
+    row_solved = SDPX.optimize!(row_model; settings=row_settings, outputs=row_outputs)
+    row_certificate = SDPX.certificate(row_solved)
+    row_clean = GeneralBenchmarkV2._certificate_metrics(row_model, row_solved, row_certificate)
+    @test certificate_gate(row_clean, execution)
+    row_data = getfield(row_solved, :constraint_dual_data)
+    row_data.values[1:3] .= [-10.0, 0.0, 0.0]
+    @test SDPX.dual(row_solved) == [-10.0, 0.0, 0.0]
+    row_injected = GeneralBenchmarkV2._certificate_metrics(row_model, row_solved, row_certificate)
+    # These are the old variable-only components: they remain zero, proving
+    # the rejection below comes from the newly reconstructed row dual cone.
+    @test row_injected.primal_affine == 0.0
+    @test row_injected.primal_cone == 0.0
+    @test row_injected.dual_affine == 0.0
+    @test row_injected.relative_gap == 0.0
+    @test row_injected.relative_complementarity == 0.0
+    @test row_injected.dual_cone == 1.0
+    @test row_injected.dual_cone > BigFloat(execution.certificate_limit)
+    @test !certificate_gate(row_injected, execution)
+
+    # Separate feasible-row injection: [1,0,0] is Lorentz-dual feasible while
+    # its pairing with the constant row value 1 is nonzero; row complementarity
+    # must therefore reject it even though variable-only metrics stay zero.
+    pair_model = SDPX.Model(Float64)
+    pair_x = SDPX.variable!(pair_model, :pair_x, 1; domain=SDPX.Reals())
+    SDPX.constraint!(pair_model, :pair_soc,
+        (1.0, pair_x[1], pair_x[1]), SDPX.LorentzCone())
+    SDPX.objective!(pair_model, SDPX.Minimize(), pair_x[1] - pair_x[1])
+    pair_solved = SDPX.optimize!(pair_model; settings=row_settings, outputs=row_outputs)
+    pair_certificate = SDPX.certificate(pair_solved)
+    getfield(pair_solved, :constraint_dual_data).values[1:3] .= [1.0, 0.0, 0.0]
+    pair_injected = GeneralBenchmarkV2._certificate_metrics(pair_model, pair_solved, pair_certificate)
+    @test pair_injected.dual_cone == 0.0
+    @test pair_injected.primal_cone == 0.0
+    @test pair_injected.dual_affine == 0.0
+    @test pair_injected.relative_complementarity > BigFloat(execution.certificate_limit)
+    @test !certificate_gate(pair_injected, execution)
+
+    # The effective objective allowance is precision-specific: a 1e-20 error
+    # is accepted by Float64 but rejected by BigFloat512's 5e-46 limit.
+    exact_ref = V2Reference(:optimal, :optimal,
+        ("1", "1"), (built, certificate) -> true, "synthetic interval"; expected_status=:optimal)
+    x64 = V2Precision(:Float64, Float64, 53, "1e-8", "5e-7", :cholmod)
+    bf512 = V2Precision(:BigFloat512, BigFloat, 512, "1e-50", "5e-46", :bigfloat_linear_algebra)
+    @test GeneralBenchmarkV2._objective_interval_ok(exact_ref, "1.0", x64)
+    @test !GeneralBenchmarkV2._objective_interval_ok(exact_ref, "1.00000000000000000001", bf512)
+
+    # Manifest verification hashes file bytes, not host-endian decoded values,
+    # and rejects missing, malformed, duplicate, or escaping entries.
+    mktempdir() do root
+        data = joinpath(root, "case.dat")
+        write(data, UInt8[0x00, 0x01, 0xff])
+        digest = bytes2hex(SHA.sha256(read(data)))
+        manifest = joinpath(root, "MANIFEST.sha256")
+        write(manifest, digest * "  case.dat\n")
+        @test length(validate_manifest(manifest; root)) == 1
+        @test length(manifest_fingerprint(manifest; root)) == 64
+        write(manifest, digest * "  missing.dat\n")
+        @test_throws ArgumentError validate_manifest(manifest; root)
+        write(manifest, digest * "  ../escape.dat\n")
+        @test_throws ArgumentError validate_manifest(manifest; root)
+    end
+
+    @test_throws ArgumentError V2Reference(:build_only, :optimal, nothing, nothing)
+    @test_throws ArgumentError V2Reference(:xfail, :interval_or_bound, nothing,
+        (built, cert) -> true)
+    @test_throws ArgumentError V2Reference(:optimal, :optimal, nothing, nothing)
+    @test_throws ArgumentError V2Catalog(:bad, 1, [family],
+        [instance, instance], (train=[:unit], holdout=Symbol[], sentinel=Symbol[]))
+
+    # Every disposition transition is explicit and certificate-kind aware.
+    @test classify_disposition(:optimal, false, :optimal, true, true, true, true) === :PASS
+    @test classify_disposition(:optimal, true, :optimal, true, true, true, true) === :RESOLVED
+    @test classify_disposition(:optimal, false, :numerical_breakdown, true, true, true, true) === :FAIL
+    @test classify_disposition(:numerical_breakdown, false, :numerical_breakdown, true, true, false, true, [:certificate]) === :XFAIL
+    @test classify_disposition(:numerical_breakdown, false, :numerical_breakdown, true, true, false, false, [:certificate]) === :FAIL
+    @test classify_disposition(:numerical_breakdown, false, :optimal, true, true, true, true) === :XPASS
+    @test classify_disposition(:numerical_breakdown, true, :optimal, true, true, true, true) === :RESOLVED
+    @test classify_disposition(:numerical_breakdown, false, :numerical_breakdown, true, true, true, false) === :FAIL
+    @test classify_disposition(:build_only, false, :build_only, true, true, false, true) === :PASS
+end
+
+@testset "external holdout provenance and fail-closed inventory" begin
+    data_root = joinpath(@__DIR__, "data")
+    manifest = joinpath(data_root, "EXTERNAL_HOLDOUTS.toml")
+    receipt = GenericConicBenchmark.validate_external_holdout_manifest(
+        manifest; root=data_root)
+    @test receipt.rows == 9
+    @test isempty(receipt.eligible)
+    @test Set(receipt.eligible) == Set(string(spec.id) for spec in
+        GenericConicBenchmark.external_holdout_inventory(; eligible_only=true))
+    afiro = only(filter(spec -> spec.id === :netlib_afiro,
+        GenericConicBenchmark.external_holdout_inventory()))
+    @test afiro.split === :train
+    @test afiro.parity_pending
+    @test !afiro.solve_eligible
+    @test isempty(afiro.parity_sha256)
+    @test length(afiro.sha256) == 64
+    @test length(afiro.parsed_fingerprint) == 64
+    # Eligibility is recomputed from metadata, not trusted from the stored bit.
+    forged_pending = GenericConicBenchmark.ExternalHoldoutSpec(
+        afiro.id, afiro.library, afiro.family, afiro.tier, afiro.split,
+        afiro.relative_path, afiro.source_url, afiro.license_note, afiro.sha256,
+        afiro.parsed_fingerprint, afiro.official_status, afiro.objective_interval,
+        true, afiro.parity_sha256, true, afiro.note)
+    @test !GenericConicBenchmark.external_case_complete(forged_pending)
+    @test_throws ArgumentError GenericConicBenchmark.validate_external_holdout_spec(forged_pending)
+    forged_missing = GenericConicBenchmark.ExternalHoldoutSpec(
+        afiro.id, afiro.library, afiro.family, afiro.tier, afiro.split,
+        afiro.relative_path, afiro.source_url, afiro.license_note, afiro.sha256,
+        afiro.parsed_fingerprint, afiro.official_status, afiro.objective_interval,
+        false, "", true, afiro.note)
+    @test !GenericConicBenchmark.external_case_complete(forged_missing)
+    @test_throws ArgumentError GenericConicBenchmark.validate_external_holdout_spec(forged_missing)
+    forged_malformed = GenericConicBenchmark.ExternalHoldoutSpec(
+        afiro.id, afiro.library, afiro.family, afiro.tier, afiro.split,
+        afiro.relative_path, afiro.source_url, afiro.license_note, afiro.sha256,
+        afiro.parsed_fingerprint, afiro.official_status, afiro.objective_interval,
+        false, repeat("z", 64), true, afiro.note)
+    @test !GenericConicBenchmark.external_case_complete(forged_malformed)
+    @test_throws ArgumentError GenericConicBenchmark.validate_external_holdout_spec(forged_malformed)
+    forged_path = GenericConicBenchmark.ExternalHoldoutSpec(
+        afiro.id, afiro.library, afiro.family, afiro.tier, :invalid_split,
+        "../outside.mps", afiro.source_url, afiro.license_note, afiro.sha256,
+        afiro.parsed_fingerprint, afiro.official_status, afiro.objective_interval,
+        false, afiro.parity_sha256, true, afiro.note)
+    @test !GenericConicBenchmark.external_case_complete(forged_path)
+    @test_throws ArgumentError GenericConicBenchmark.validate_external_holdout_spec(forged_path)
+    deferred = only(filter(spec -> spec.id === :netlib_share2b,
+        GenericConicBenchmark.external_holdout_inventory()))
+    @test !deferred.solve_eligible
+    @test deferred.parsed_fingerprint == ""
+    @test occursin("legacy encoding", deferred.note)
+
+    # Incomplete metadata is retained for audit but cannot enter the solve set.
+    mktempdir() do root
+        payload = joinpath(root, "case.dat")
+        write(payload, UInt8[0x01, 0x02])
+        digest = bytes2hex(SHA.sha256(read(payload)))
+        write(joinpath(root, "EXTERNAL_HOLDOUTS.toml"), """
+[[case]]
+id = \"deferred\"
+library = \"NETLIB\"
+family = \"lp\"
+tier = \"small\"
+split = \"holdout\"
+relative_path = \"case.dat\"
+source_url = \"https://example.invalid/case\"
+license_note = \"test provenance\"
+sha256 = \"$digest\"
+parsed_fingerprint = \"\"
+official_status = \"optimal\"
+objective_interval = []
+parity_pending = true
+parity_sha256 = ""
+solve_eligible = false
+""")
+        result = GenericConicBenchmark.validate_external_holdout_manifest(
+            joinpath(root, "EXTERNAL_HOLDOUTS.toml"); root)
+        @test result.rows == 1
+        @test isempty(result.eligible)
+        write(joinpath(root, "EXTERNAL_HOLDOUTS.toml"), replace(
+            read(joinpath(root, "EXTERNAL_HOLDOUTS.toml"), String),
+            "solve_eligible = false" => "solve_eligible = true"))
+        @test_throws ArgumentError GenericConicBenchmark.validate_external_holdout_manifest(
+            joinpath(root, "EXTERNAL_HOLDOUTS.toml"); root)
+    end
+end
+
+@testset "general benchmark V2 adapter preserves V1 inventory" begin
+    # The adapter is intentionally additive: it consumes V1 specs but does not
+    # mutate the include-time V1 registry or rename any existing IDs.
+    v1 = GenericConicBenchmark.inventory()
+    catalog = adapt_generic_specs(v1; generic_module=GenericConicBenchmark)
+    families = Set(f.name for f in catalog.families)
+    @test Set((:lp, :socp, :sdp, :exp, :power)) ⊆ families
+    @test length(catalog.instances) == length(v1)
+    @test Set(i.id for i in catalog.instances) == Set(s.id for s in v1)
+    @test all(length(i.checksum) == 64 for i in catalog.instances)
+    @test all(length(input_fingerprint(i)) == 64 for i in catalog.instances)
+    @test all(length(execution_fingerprint(i,
+        _reviewed_float64_execution())) == 64
+        for i in catalog.instances)
+    @test all(i.reference.status === :build_only for i in catalog.instances)
+    @test all(i -> get(i.provenance, :compatibility_only, false) === true &&
+                   get(i.provenance, :solve_eligible, true) === false &&
+                   haskey(i.provenance, :v1_expected_status),
+              catalog.instances)
+    @test_throws ArgumentError run_instance(catalog, first(catalog.instances),
+        _reviewed_float64_execution())
+
+    # Build one representative instance through the additive adapter for each
+    # public scalar/conic family; V1 builders and IDs remain the source of truth.
+    precision = _reviewed_float64_execution()
+    for family in (:lp, :socp, :sdp, :exp, :power)
+        instance = first(filter(i -> i.family === family, catalog.instances))
+        built, elapsed = build_instance(catalog, instance, precision)
+        @test built.problem !== nothing
+        @test built.transform.transform_id === :identity
+        @test elapsed >= 0
+    end
+end
+
+@testset "typed LP lowering has an independent certified oracle" begin
+    catalog = lp_tranche_catalog()
+    @test length(catalog.instances) == 6
+    @test all(instance.payload isa LPArtifact for instance in catalog.instances)
+    precision = _reviewed_float64_execution()
+    expected = Dict(:box => -5.0, :sparse_planted_kkt => -4.0,
+        :nonpositive => -2.0, :chebyshev => 1.0)
+    for instance in catalog.instances
+        @test instance.reference.oracle isa V2LPOracle
+        built, elapsed = build_instance(catalog, instance, precision)
+        @test elapsed >= 0
+        @test built.source_artifact === instance.payload
+        @test built.facts.artifact_fingerprint == instance.checksum
+        @test built.facts.model_fingerprint == built.facts.model_contract_fingerprint
+        result = run_instance(catalog, instance, precision)
+        if instance.payload.expected_status === :optimal
+            @test result.status === :optimal
+            @test result.certificate_valid
+            @test result.validation.reference
+            @test result.validation.failures == Symbol[]
+            @test isapprox(parse(Float64, result.objective), expected[instance.payload.kind]; atol=5e-7, rtol=0)
+        end
+        @test result.core_seconds !== nothing
+    end
+    # The sign-oriented case must use the public Nonpositive domain rather
+    # than a silently flipped objective or a generic real variable.
+    nonpositive = only(filter(instance -> instance.payload.kind === :nonpositive, catalog.instances))
+    @test nonpositive.payload.cone_partition == [:nonpositive]
+    @test run_instance(catalog, nonpositive, precision).validation.failures == Symbol[]
+
+    # Non-optimal LPs use explicit ray/Farkas contracts, never an objective
+    # interval. Their public result must carry the matching status and valid
+    # original-coordinate certificate.
+    infeasible = only(filter(instance -> instance.payload.kind === :primal_infeasible, catalog.instances))
+    @test infeasible.reference.certificate_kind === :farkas
+    infeasible_result = run_instance(catalog, infeasible, precision)
+    @test infeasible_result.status === :primal_infeasible
+    @test infeasible_result.certificate_valid
+    @test infeasible_result.validation.reference
+    @test infeasible_result.validation.failures == Symbol[]
+    unbounded = only(filter(instance -> instance.payload.kind === :unbounded, catalog.instances))
+    @test unbounded.reference.expected_status === :dual_infeasible
+    @test unbounded.reference.certificate_kind === :ray
+    unbounded_result = run_instance(catalog, unbounded, precision)
+    @test unbounded_result.status === :dual_infeasible
+    @test unbounded_result.certificate_valid
+    @test unbounded_result.validation.reference
+    @test unbounded_result.validation.failures == Symbol[]
+
+    # A mutation of the lowered objective must fail the independent oracle,
+    # even if a caller supplies a certificate with the expected objective.
+    box = only(filter(instance -> instance.payload.kind === :box, catalog.instances))
+    built2, _ = build_instance(catalog, box, precision)
+    built2.problem.objective.expression.coefficients[1] += 1.0
+    @test !built2.oracle(built2, (primal_objective=BigFloat(-5),))
+end
+
+@testset "ill-conditioned typed LP lowering has an independent certified oracle" begin
+    catalog = ill_conditioned_tranche_catalog()
+    @test length(catalog.instances) == 2
+    @test validate_catalog(catalog)
+    expected = Dict(:diagonal_scale_ladder => -5.0,
+        :near_rank_loss_lp => -2.0)
+    precision = _reviewed_float64_execution()
+    for instance in catalog.instances
+        artifact = instance.payload
+        @test artifact isa IllConditionedArtifact
+        @test artifact.base_family === :lp
+        @test haskey(expected, artifact.kind)
+        if artifact.kind === :diagonal_scale_ladder
+            @test artifact.scale_exponent == 6
+            nonzero_coefficients = filter(!iszero, vec(artifact.coefficients))
+            @test minimum(abs, nonzero_coefficients) == Rational{Int}(1, 1_000_000)
+            @test maximum(abs, nonzero_coefficients) == Rational{Int}(1_000_000)
+        elseif artifact.kind === :near_rank_loss_lp
+            @test artifact.coefficients[3, 2] == Rational{Int}(1, 100_000_000)
+            @test artifact.coefficients[3, :] == artifact.coefficients[1, :] +
+                Rational{Int}(1, 100_000_000) .* artifact.coefficients[2, :]
+        end
+        built, elapsed = build_instance(catalog, instance, precision)
+        @test elapsed >= 0
+        @test built.source_artifact === artifact
+        @test built.facts.artifact_fingerprint == instance.checksum
+        @test built.facts.model_fingerprint == built.facts.model_contract_fingerprint
+        result = run_instance(catalog, instance, precision)
+        @test result.status === :optimal
+        @test result.certificate_valid
+        @test result.validation.reference
+        @test result.validation.failures == Symbol[]
+        @test isapprox(parse(Float64, result.objective), expected[artifact.kind]; atol=5e-7, rtol=0)
+        @test result.core_seconds !== nothing
+    end
+end
+
+@testset "native V2 corpus owns typed artifacts and disjoint suites" begin
+    catalog = native_v2_catalog()
+    @test !isempty(catalog.suites.train)
+    @test !isempty(catalog.suites.holdout)
+    @test !isempty(catalog.suites.sentinel)
+    @test isempty(intersect(Set(catalog.suites.train), Set(catalog.suites.holdout)))
+    @test isempty(intersect(Set(catalog.suites.train), Set(catalog.suites.sentinel)))
+    @test all(i -> i.payload isa V2ConicArtifact, catalog.instances)
+    @test all(i -> i.payload isa V2ConicArtifact && i.payload.family == i.family,
+              catalog.instances)
+    @test all(i -> i.reference.oracle !== nothing, catalog.instances)
+    @test all(i -> i.split === :train && i.reference.status !== :build_only &&
+                   i.reference.status !== :xfail &&
+                   get(i.provenance, :solve_eligible, false) === true,
+              training_instances(catalog))
+    sent = only(filter(i -> i.split === :sentinel && i.family === :lp, catalog.instances))
+    @test sent.reference.status === :xfail
+    @test sent.reference.expected_status === :primal_infeasible
+    @test sent.reference.prior_observed_status === :numerical_breakdown
+    @test sent.reference.disposition === :XFAIL
+    @test sent.reference.oracle.dual_ray == Rational{Int}[1, -1]
+    @test sent.reference.certificate_kind === :farkas
+    train_lp = only(filter(i -> i.family === :lp && i.split === :train, catalog.instances))
+    train_soc = only(filter(i -> i.family === :soc && i.split === :train, catalog.instances))
+    train_rsoc = only(filter(i -> i.family === :rsoc && i.split === :train, catalog.instances))
+    train_sdp = only(filter(i -> i.family === :sdp && i.split === :train, catalog.instances))
+    @test train_lp.reference.oracle.primal_witness == Rational{Int}[1//2]
+    @test train_lp.reference.oracle.dual_multipliers == Rational{Int}[-1]
+    @test train_lp.reference.oracle.cone_dual_slacks == Rational{Int}[0]
+    @test train_lp.reference.oracle.dual_bound == train_lp.reference.oracle.objective == 1//2
+    @test train_lp.reference.oracle.dual_multipliers == Rational{Int}[-1]
+    @test train_rsoc.reference.oracle.primal_witness == Rational{Int}[1, 1]
+    @test train_sdp.reference.oracle.primal_witness == Rational{Int}[1, 0, 1]
+    @test train_sdp.reference.oracle.dual_multipliers == Rational{Int}[-1, 0, 0, -1]
+    @test length(train_sdp.reference.oracle.cone_dual_slacks) == 3
+    @test_throws ArgumentError V2ConicArtifact(:sdp, :asymmetric,
+        Rational{Int}[1, 1//2, 1//3, 1], 2, 1//2, false, :x, 1)
+    # Pure mathematical identity excludes ID/split/provenance metadata.
+    same_math_a = V2Instance(:a, :soc, train_soc.tier, train_soc.axis_values,
+        :train, "source-a", train_soc.provenance, train_soc.checksum,
+        train_soc.resource, train_soc.reference, train_soc.payload)
+    same_math_b = V2Instance(:b, :soc, train_soc.tier, train_soc.axis_values,
+        :holdout, "source-b", train_soc.provenance, train_soc.checksum,
+        train_soc.resource, train_soc.reference, train_soc.payload)
+    @test mathematical_fingerprint(same_math_a) == mathematical_fingerprint(same_math_b)
+    @test input_fingerprint(same_math_a) == input_fingerprint(same_math_b)
+    bad_id = V2Instance(:wrong_id, :soc, train_soc.tier, train_soc.axis_values,
+        :train, train_soc.source, train_soc.provenance, train_soc.checksum,
+        train_soc.resource, train_soc.reference, train_soc.payload)
+    @test_throws ArgumentError V2Catalog(:bad_id, 2, catalog.families, [bad_id],
+        (train=[:wrong_id], holdout=Symbol[], sentinel=Symbol[]))
+    bad_family = V2Instance(:wrong_family, :lp, train_soc.tier, train_soc.axis_values,
+        :train, train_soc.source, train_soc.provenance, train_soc.checksum,
+        train_soc.resource, train_soc.reference, train_soc.payload)
+    @test_throws ArgumentError V2Catalog(:bad_family, 2, catalog.families, [bad_family],
+        (train=[:wrong_family], holdout=Symbol[], sentinel=Symbol[]))
+    @test all(i -> i.split == :train ? i.id in catalog.suites.train :
+                   (i.split == :holdout ? i.id in catalog.suites.holdout : i.id in catalog.suites.sentinel),
+              catalog.instances)
+    training = training_instances(catalog)
+    @test length(training) == 8
+    @test all(i -> i.split === :train &&
+                   get(i.provenance, :solve_eligible, false) === true &&
+                   i.reference.status !== :xfail &&
+                   i.reference.status !== :build_only,
+              training)
+    @test all(family -> begin
+        train = only(filter(i -> i.family === family && i.split === :train, catalog.instances))
+        holdout = only(filter(i -> i.family === family && i.split === :holdout, catalog.instances))
+        train.checksum != holdout.checksum &&
+            GeneralBenchmarkV2._hex((train.payload.coefficients, train.payload.dimension,
+                train.payload.cone_parameter, train.payload.infeasible)) !=
+            GeneralBenchmarkV2._hex((holdout.payload.coefficients, holdout.payload.dimension,
+                holdout.payload.cone_parameter, holdout.payload.infeasible))
+    end, (:lp, :nonpositive, :soc, :rsoc, :sdp, :exp, :power, :mixed))
+    precision = _reviewed_float64_execution()
+    for family in (:lp, :nonpositive, :soc, :rsoc, :sdp, :exp, :power, :mixed)
+        instance = only(filter(i -> i.family === family && i.split === :train, catalog.instances))
+        result = run_instance(catalog, instance, precision)
+        @test result.status === :optimal
+        @test result.certificate_valid
+        @test result.validation.reference
+        @test result.validation.failures == Symbol[]
+        @test result.setup_seconds !== nothing
+        @test result.core_seconds !== nothing
+    end
+
+    # Oracle checks actual packed model coordinates and actual model records,
+    # not just source-artifact formulas. Mutating objective/row/cone data is
+    # rejected even when the fake certificate reports the expected objective.
+    soc_original = only(filter(i -> i.family === :soc && i.split === :train, catalog.instances))
+    soc_built, _ = build_instance(catalog, soc_original, precision)
+    fake_certificate = (primal_objective=BigFloat(0),)
+    @test soc_built.oracle(soc_built, fake_certificate)
+    soc_built.problem.objective.expression.coefficients[1] += 1.0
+    @test !soc_built.oracle(soc_built, fake_certificate)
+    soc_built, _ = build_instance(catalog, soc_original, precision)
+    old_expr = soc_built.problem.constraint_blocks[1].expressions[1]
+    soc_built.problem.constraint_blocks[1].expressions[1] =
+        SDPX.ScalarAffine(old_expr.model, old_expr.precision_bits,
+            old_expr.indices, old_expr.coefficients, old_expr.constant + 1.0)
+    @test !soc_built.oracle(soc_built, fake_certificate)
+    soc_built, _ = build_instance(catalog, soc_original, precision)
+    soc_built.problem.constraint_blocks[1].expressions[2].coefficients[1] += 1.0
+    @test !soc_built.oracle(soc_built, fake_certificate)
+    soc_built, _ = build_instance(catalog, soc_original, precision)
+    soc_built.oracle.primal_witness[1] += 1//1
+    @test !soc_built.oracle(soc_built, fake_certificate)
+    soc_built, _ = build_instance(catalog, soc_original, precision)
+    soc_built.oracle.dual_multipliers[1] += 1//1
+    @test !soc_built.oracle(soc_built, fake_certificate)
+    sdp_built, _ = build_instance(catalog, train_sdp, precision)
+    sdp_built.oracle.primal_witness[2] += 1//1
+    @test !sdp_built.oracle(sdp_built, (primal_objective=BigFloat(2),))
+    sdp_built, _ = build_instance(catalog, train_sdp, precision)
+    sdp_built.oracle.dual_multipliers[2] += 1//1
+    @test !sdp_built.oracle(sdp_built, (primal_objective=BigFloat(2),))
+
+    # Every exact coefficient is semantic input, not decorative metadata.
+    original = only(filter(i -> i.family === :soc && i.split === :train, catalog.instances))
+    changed_artifact = V2ConicArtifact(:soc, original.id,
+        Rational{Int}[1//3, 2//3], 2, 1//2, false, :changed, 1)
+    changed = V2Instance(original.id, original.family, original.tier,
+        original.axis_values, original.split, original.source, original.provenance,
+        GeneralBenchmarkV2._hex(changed_artifact), original.resource, original.reference, changed_artifact)
+    @test input_fingerprint(changed) != input_fingerprint(original)
+    changed_built, _ = build_instance(catalog, changed, precision)
+    @test changed_built.facts.coefficients == changed_artifact.coefficients
+    @test changed_built.facts.cone_parameter == changed_artifact.cone_parameter
+    @test changed_built.input_fingerprint == input_fingerprint(changed)
+    @test changed_built.input_fingerprint != input_fingerprint(original)
+    @test changed_built.facts.model_fingerprint !=
+          build_instance(catalog, original, precision)[1].facts.model_fingerprint
+    @test_throws ArgumentError V2ConicArtifact(:soc, :extra,
+        Rational{Int}[1//2, 1//2, 1//3], 2, 1//2, false, :x, 1)
+    sentinel = only(filter(i -> i.family === :soc && i.split === :sentinel, catalog.instances))
+    sentinel_result = run_instance(catalog, sentinel, precision)
+    @test sentinel_result.status === :numerical_breakdown
+    @test sentinel_result.validation.status === :XFAIL
+    @test sentinel_result.validation.observed_status == sentinel_result.status
+    @test sentinel_result.validation.disposition === :XFAIL
+    @test sentinel_result.validation.reference
+    sentinel_built, _ = build_instance(catalog, sentinel, precision)
+    @test GeneralBenchmarkV2._farkas_valid(sentinel.payload, sentinel_built)
+    @test classify_disposition(:primal_infeasible, true,
+        :numerical_breakdown, true, true, false, true, [:certificate];
+        prior_observed_status=:numerical_breakdown) === :XFAIL
+    @test classify_disposition(:primal_infeasible, true,
+        :primal_infeasible, true, true, true, true, Symbol[];
+        prior_observed_status=:numerical_breakdown) === :RESOLVED
+    @test classify_disposition(:primal_infeasible, true,
+        :optimal, true, true, true, true, Symbol[];
+        prior_observed_status=:numerical_breakdown) === :FAIL
+    @test classify_disposition(:primal_infeasible, true,
+        :numerical_breakdown, true, true, false, false, [:certificate];
+        prior_observed_status=:numerical_breakdown) === :FAIL
+    # The canonical encoder is explicit for exact rational coefficients and
+    # does not depend on host-endian or struct string formatting.
+    metadata_variant = V2ConicArtifact(:soc, train_soc.id,
+        train_soc.payload.coefficients, train_soc.payload.dimension,
+        train_soc.payload.cone_parameter, train_soc.payload.infeasible,
+        :different_generator, 99)
+    metadata_instance = V2Instance(train_soc.id, train_soc.family, train_soc.tier,
+        train_soc.axis_values, train_soc.split, train_soc.source, train_soc.provenance,
+        GeneralBenchmarkV2._hex(metadata_variant), train_soc.resource,
+        train_soc.reference, metadata_variant)
+    @test mathematical_fingerprint(metadata_instance) == mathematical_fingerprint(train_soc)
+    @test input_fingerprint(metadata_instance) == input_fingerprint(train_soc)
+    @test catalog_fingerprint(catalog) != catalog_fingerprint(V2Catalog(
+        :general_v2_native, 2, catalog.families,
+        [metadata_instance; filter(i -> i !== train_soc, catalog.instances)], catalog.suites))
+    @test GeneralBenchmarkV2._hex(Rational{Int}[1//2, 1//3]) !=
+          GeneralBenchmarkV2._hex(Rational{Int}[1//2, 1//4])
+    @test GeneralBenchmarkV2._canonical_bytes(:x) != GeneralBenchmarkV2._canonical_bytes("x")
+    compat_a = (problem=:fixed, params=(x=1,), id=:a, source="source-a")
+    compat_b = (problem=:fixed, params=(x=1,), id=:b, source="source-b")
+    @test GeneralBenchmarkV2._math_payload(compat_a) ==
+          GeneralBenchmarkV2._math_payload(compat_b)
+    @test GeneralBenchmarkV2._canonical_bytes(Float32(1)) != GeneralBenchmarkV2._canonical_bytes(Float64(1))
+    @test GeneralBenchmarkV2._canonical_bytes(Int8(1)) != GeneralBenchmarkV2._canonical_bytes(Int16(1))
+    @test GeneralBenchmarkV2._canonical_bytes(UInt8(1)) != GeneralBenchmarkV2._canonical_bytes(Int8(1))
+    @test GeneralBenchmarkV2._canonical_bytes(Int[]) != GeneralBenchmarkV2._canonical_bytes(Array{Int,2}(undef, 0, 0))
+    @test GeneralBenchmarkV2._canonical_bytes(String) != GeneralBenchmarkV2._canonical_bytes("String")
+    # Exact interval bytes do not depend on ambient BigFloat precision.
+    ref_at_128 = setprecision(BigFloat, 128) do
+        GeneralBenchmarkV2._native_reference(original.payload).objective_interval
+    end
+    ref_at_512 = setprecision(BigFloat, 512) do
+        GeneralBenchmarkV2._native_reference(original.payload).objective_interval
+    end
+    @test ref_at_128 == ref_at_512
+    for bits in (256, 512)
+        built_big = setprecision(BigFloat, 79) do
+            build_instance(catalog, train_lp,
+                _reviewed_bigfloat_execution(bits))[1]
+        end
+        @test built_big.facts.model_precision_bits == bits
+        @test built_big.facts.model_fingerprint ==
+              GeneralBenchmarkV2._native_model_fingerprint(built_big.problem)
+    end
+    @test bytes2hex(GeneralBenchmarkV2._canonical_bytes(Rational{Int}(1, 2))) ==
+          "0a4300000000000000013143000000000000000132"
+    @test GeneralBenchmarkV2._hex(Rational{Int}(1, 2)) ==
+          "e6f6e48d1b9bcedbb4d603dbeffe70afff478f3da15f1109f62057b587b844e3"
+    # Direct BigFloat builds are scoped by V2Precision.bits and their model
+    # fingerprints are intentionally distinct even when rational coefficients
+    # happen to be exactly representable at both precisions.
+    bf256 = build_instance(catalog, train_sdp,
+        _reviewed_bigfloat_execution(256))[1]
+    bf512 = build_instance(catalog, train_sdp,
+        _reviewed_bigfloat_execution(512))[1]
+    @test bf256.facts.model_precision_bits == 256
+    @test bf512.facts.model_precision_bits == 512
+    @test bf256.problem.arithmetic.precision_bits == 256
+    @test bf512.problem.arithmetic.precision_bits == 512
+    @test bf256.facts.model_fingerprint != bf512.facts.model_fingerprint
+    @test bf256.transform == train_sdp.provenance.transform
+end
+
+
+@testset "typed RSOC lowering has independent exact epigraph oracles" begin
+    catalog = rsoc_tranche_catalog()
+    @test length(catalog.instances) == 3
+    precision = _reviewed_float64_execution()
+    expected = Dict(:quadratic_epigraph => 1.5, :perspective_ls => 0.5,
+        :many_qr3 => 24.0)
+    for instance in catalog.instances
+        @test instance.payload isa RSOCArtifact
+        @test instance.reference.oracle isa V2RSOCOracle
+        built, elapsed = build_instance(catalog, instance, precision)
+        @test elapsed >= 0
+        @test built.facts.artifact_fingerprint == instance.checksum
+        result = run_instance(catalog, instance, precision)
+        @test result.status === :optimal
+        @test result.certificate_valid
+        @test result.validation.reference
+        @test result.validation.failures == Symbol[]
+        @test isapprox(parse(Float64, result.objective), expected[instance.payload.kind];
+            atol=5e-7, rtol=0)
+        @test result.core_seconds !== nothing
+    end
+end
+
+@testset "typed SDP lowering has independent Gram/dual oracles" begin
+    catalog = sdp_tranche_catalog()
+    @test length(catalog.instances) == 3
+    precision = _reviewed_float64_execution()
+    expected = Dict(:weighted_trace => 1.0, :maxcut_k4 => -4.0,
+        :multiblock => 8.0)
+    for instance in catalog.instances
+        @test instance.payload isa SDPArtifact
+        @test instance.reference.oracle isa V2SDPOracle
+        built, elapsed = build_instance(catalog, instance, precision)
+        @test elapsed >= 0
+        @test built.facts.artifact_fingerprint == instance.checksum
+        result = run_instance(catalog, instance, precision)
+        @test result.status === :optimal
+        @test result.certificate_valid
+        @test result.validation.reference
+        @test result.validation.failures == Symbol[]
+        @test isapprox(parse(Float64, result.objective), expected[instance.payload.kind];
+            atol=5e-7, rtol=0)
+        @test result.core_seconds !== nothing
+    end
+end
+
+@testset "typed EXP and Power small tranche" begin
+    precision = _reviewed_float64_execution()
+    expcat = exp_tranche_catalog()
+    @test length(expcat.instances) == 1
+    @test expcat.instances[1].payload isa ExpArtifact
+    built, elapsed = build_instance(expcat, expcat.instances[1], precision)
+    @test elapsed >= 0
+    result = run_instance(expcat, expcat.instances[1], precision)
+    @test result.status === :optimal
+    @test result.certificate_valid
+    @test result.validation.reference
+    @test result.validation.failures == Symbol[]
+    @test result.core_seconds !== nothing
+
+    # These typed candidates are intentionally not catalog rows until a
+    # native certificate-valid receipt exists (the current route breaks down).
+    @test ExpArtifact(:exp_entropy_probe, :entropy, [0//1, 0//1], [1//2, 1//2]; n=2).n == 2
+    @test ExpArtifact(:exp_lse_probe, :logsumexp, [0//1, 0//1], [1//2, 1//2]; n=2).kind === :logsumexp
+
+    powercat = power_tranche_catalog()
+    @test length(powercat.instances) == 1
+    power_instance = only(powercat.instances)
+    power_artifact = power_instance.payload
+    @test power_artifact.id === :v2_power_interior_epigraph_small
+    @test power_artifact.alphas == Rational{Int}[1//2]
+    @test power_artifact.fixed_values == Rational{Int}[1//2]
+    @test power_artifact.primal_witness == Rational{Int}[1//4, 1//2]
+    @test power_artifact.objective == 1//4
+    power_built, power_elapsed = build_instance(powercat, power_instance, precision)
+    @test power_elapsed >= 0
+    @test power_built.facts.model_fingerprint == power_built.facts.model_contract_fingerprint
+    power_result = run_instance(powercat, power_instance, precision)
+    @test power_result.status === :optimal
+    @test power_result.certificate_valid
+    @test power_result.validation.reference
+    @test power_result.validation.failures == Symbol[]
+    @test isapprox(parse(Float64, power_result.objective), 0.25; atol=5e-7, rtol=0)
+
+    @test reviewed_power_alphas() == Rational{Int}[1//2, 1//3, 2//3, 2//5, 7//10]
+    # Harder boundary/heterogeneous candidates remain typed but unregistered.
+    power_candidate = PowerArtifact(:power_probe, :separable_p_power,
+        reviewed_power_alphas(), fill(1//1, 5), Rational{Int}[], 5//1;
+        primal_witness=vcat(fill(Rational{Int}[1//1, 1//1], 5)...))
+    @test power_candidate isa PowerArtifact
+    weighted_candidate = PowerArtifact(:weighted_probe, :weighted_mean,
+        Rational{Int}[1//2], Rational{Int}[], Rational{Int}[1, 1], 1//1;
+        primal_witness=Rational{Int}[1, 1, 1])
+    @test weighted_candidate.weighted_values == Rational{Int}[1, 1]
+end
+
+@testset "typed mixed six-cone planted coupling" begin
+    catalog = mixed_tranche_catalog()
+    @test length(catalog.instances) == 1
+    instance = only(catalog.instances)
+    artifact = instance.payload
+    @test artifact isa MixedArtifact
+    @test artifact.kind === :planted_cross_cone
+    @test length(artifact.nonnegative) == 1
+    @test length(artifact.soc) == 4
+    @test length(artifact.rsoc) == 3
+    @test size(artifact.psd) == (2, 2)
+    @test length(artifact.exponential) == 3
+    @test length(artifact.power) == 3
+    @test artifact.coupling_rhs == 8//1
+    @test all(iszero, artifact.dual_witness.nonnegative)
+    @test all(iszero, artifact.dual_witness.soc)
+    @test all(iszero, artifact.dual_witness.rsoc)
+    @test all(iszero, artifact.dual_witness.psd)
+    @test all(iszero, artifact.dual_witness.exponential)
+    @test all(iszero, artifact.dual_witness.power)
+    @test artifact.dual_coupling == 1//1
+    @test sum(artifact.coupling_coefficients .* Rational{Int}[
+        artifact.primal_witness.nonnegative[1], artifact.primal_witness.soc[1],
+        artifact.primal_witness.rsoc[1], artifact.primal_witness.psd[1, 1],
+        artifact.primal_witness.exponential[1], artifact.primal_witness.power[1]]) ==
+        artifact.coupling_rhs
+    precision = _reviewed_float64_execution()
+    built, elapsed = build_instance(catalog, instance, precision)
+    @test elapsed >= 0
+    @test built.facts.artifact_fingerprint == instance.checksum
+    result = run_instance(catalog, instance, precision)
+    @test result.status === :optimal
+    @test result.certificate_valid
+    @test result.validation.reference
+    @test result.validation.failures == Symbol[]
+    @test isapprox(parse(Float64, result.objective), 8.0; atol=5e-7, rtol=0)
+    @test result.core_seconds !== nothing
+end
