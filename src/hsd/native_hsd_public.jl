@@ -1162,11 +1162,16 @@ function _public_native_hsd_core(
                 solve_reduced.A, solve_reduced.c,
             )
         elseif _native_hsd_dense_rank_fallback_allowed(solve_reduced.A)
-            # Small high-precision sparse systems cannot use Float64 SPQR.
-            # This is an exact-arithmetic RRQR rank analysis only; the HSD
-            # solve, original-coordinate certificate, and all gates remain
-            # unchanged.
-            _hsd_rowspace_reduction(Matrix(solve_reduced.A), solve_reduced.c)
+            # Use the typed provider RRQR as a fast full-rank authority when
+            # available. Rank-deficient cases retain the existing generic RRQR
+            # because they also need its explicit row-space basis.
+            provider_reduction = _hsd_provider_full_rank_reduction(
+                solve_reduced.A, solve_reduced.c, settings.limits.threads,
+            )
+            provider_reduction === nothing ?
+                _hsd_rowspace_reduction(
+                    Matrix(solve_reduced.A), solve_reduced.c,
+                ) : provider_reduction
         else
             _hsd_rowspace_reduction(solve_reduced)
         end

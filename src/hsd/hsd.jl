@@ -208,6 +208,70 @@ This method is the explicitly-dense route: it is dispatched only for dense
 sparse-preserving dispatch in `src/hsd/equality_reduction_sparse.jl`, which
 never materializes `Matrix(A)` or a dense null-space basis.
 """
+function _hsd_provider_full_rank_reduction(
+    A::SparseMatrixCSC{T,Int}, c::AbstractVector{T}, threads::Int,
+) where {T<:AbstractFloat}
+    T === Float64 && return nothing
+    descriptor = la_provider_descriptor(T, threads)
+    descriptor.available || return nothing
+    descriptor.provider in (:multifloat_linear_algebra, :bigfloat_linear_algebra) ||
+        return nothing
+
+    m, n = size(A)
+    length(c) == n || throw(DimensionMismatch("canonical A/c dimensions disagree"))
+    scaleA = max(_hsd_sparse_scaleA(A), one(T))
+    rank_tol = T(max(m, n)) * eps(T) * scaleA
+    relative_tol = rank_tol / scaleA
+    transposed = alloc_zeros(T, n, m)
+    @inbounds for column in 1:n
+        for pointer in nzrange(A, column)
+            transposed[column, A.rowval[pointer]] = A.nzval[pointer]
+        end
+    end
+
+    configuration = plan_la_backend(
+        T; requested=:auto, route=:dense_cholesky,
+        threads=threads, equality_solver=:qr,
+    )
+    backend = instantiate_la_backend(configuration, T, threads)
+    factor = la_qr_factor!(
+        backend, transposed; pivoted=true,
+        relative_tolerance=relative_tol,
+    )
+    factor === nothing && return nothing
+    factor.rank == n || return nothing
+
+    diagonal_max = zero(T)
+    @inbounds for index in 1:n
+        diagonal_max = max(diagonal_max, abs(factor.factors[index, index]))
+    end
+    cutoff = max(rank_tol, rank_tol * diagonal_max / scaleA)
+    noise_hi = T(10) * eps(T) * scaleA
+    ambiguous = false
+    @inbounds for index in 1:n
+        diagonal = abs(factor.factors[index, index])
+        if (diagonal > cutoff && diagonal <= T(4) * cutoff) ||
+           (diagonal > noise_hi && diagonal <= cutoff)
+            ambiguous = true
+            break
+        end
+    end
+
+    return (
+        Ar=SparseArrays.sparse(A),
+        cr=copy_owned!(alloc_zeros(T, n), c),
+        V=IdentityRankBasis(T, n),
+        cnull=zeros(T, n),
+        rank=n,
+        rank_tolerance=cutoff,
+        objective_tolerance=T(100 * max(m, n)) * eps(T) *
+                            max(norm(c, Inf), one(T)),
+        ambiguous=ambiguous,
+        incompatible=false,
+        ray=zeros(T, n),
+    )
+end
+
 function _hsd_rowspace_reduction(A::AbstractMatrix{T}, c::AbstractVector{T}) where {T<:AbstractFloat}
     m, n = size(A)
     n == length(c) || throw(DimensionMismatch("canonical A/c dimensions disagree"))
