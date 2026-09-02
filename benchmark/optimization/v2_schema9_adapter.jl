@@ -245,7 +245,7 @@ function schema9_row(row::P.ProfileRow)
     values[:requested_provider] = get(row.receipt, "requested_provider", missing)
     values[:status] = row.status
     values[:reference_status] = row.reference_status
-    values[:execution_mode] = "same_process_three_sample"
+    values[:execution_mode] = get(row.receipt, "execution_mode", "same_process_three_sample")
     values[:requested_engine] = "native_hsd"
     values[:executed_engine] = "native_hsd"
     values[:requested_kkt_route] = row.requested_route
