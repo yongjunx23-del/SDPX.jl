@@ -891,7 +891,7 @@ The Exp/Power rows are assembled by the sparse three-row dyadic kernel below;
 excluding them here prevents both a dense product-column pass and double
 counting in mixed products.
 """
-@inline function _product_hsd_apply_symmetric_G!(runtime, dst, src)
+Base.@noinline function _product_hsd_apply_symmetric_G!(runtime, dst, src)
     fill!(dst, zero(eltype(dst)))
     @inbounds for block in runtime.orthant
         offset = block.offset
@@ -977,7 +977,7 @@ the global `m x m` operator `G`. Symmetric blocks retain the per-column block
 map; every Exp/Power block is accumulated by the sparse three-row dyadic
 assembler over the frozen reduced matrix.
 """
-@inline function _product_hsd_form_schur_border!(
+Base.@noinline function _product_hsd_form_schur_border!(
     state::ProductConeHSDState{T},
 ) where {T}
     base = state.base
