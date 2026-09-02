@@ -703,17 +703,11 @@ end
     winv = block.state.winv
     z = block.input
     computed = block.output
-    SymmetricCones._soc_q_condition_reliable(w, n) || return false
 
-    # `z` was produced by Q_{w^{-1}} before this Q_w application.  Its
-    # backward error is amplified by kappa(Q_w), so an output-only
-    # sqrt(eps) forcing term is not a valid certificate near a curved cone
-    # boundary.  Reuse the same finite, capped condition budget that admits
-    # the frozen SOC scaling, and apply it to each row's actual map work.
-    # Crossing the one-percent cap remains a hard fail-closed request for
-    # more working precision.
-    budget = _product_hsd_soc_condition_budget(w, n)
-    isfinite(budget) && budget < one(T) / T(100) || return false
+    # Certify the actual Q maps below from their componentwise arithmetic
+    # work. A condition-number cutoff is useful for choosing a conservative
+    # trial step, but must not preempt this stronger replay at an accepted
+    # iterate.
     gamma = _product_bordered_gamma(T, 12n + 24)
     isfinite(gamma) || return false
     offset = block.offset
@@ -1834,12 +1828,6 @@ a conservative congruence bound; the zero-work case remains exact.
         n = block.dim
         w = block.state.w
         state.soc_bounds_certified ||
-            return false, T(Inf), zero(T), true
-        SymmetricCones._soc_q_condition_reliable(w, n) ||
-            return false, T(Inf), zero(T), true
-        condition_budget = _product_hsd_soc_condition_budget(w, n)
-        isfinite(condition_budget) &&
-            condition_budget < one(T) / T(100) ||
             return false, T(Inf), zero(T), true
         dot_work = zero(T)
         tail2 = zero(T)
@@ -3367,8 +3355,19 @@ function product_hsd_step!(state::ProductConeHSDState{T}) where {T}
         _product_hsd_fixed_trace_hkm_neighborhood!(
             state, base.s, base.y, base.mu,
         )
+    elseif try_update_scaling!(state.runtime, base.s, base.y, base.mu)
+        true
+    elseif !isempty(state.runtime.soc) && isempty(state.runtime.exp) &&
+           isempty(state.runtime.power)
+        # Recompute against the exact accepted (s,y) pair. The condition cap
+        # is a conservative first-pass step heuristic; explicit map replay is
+        # the fallback authority for a finite strict-interior accepted point.
+        try_update_scaling!(
+            state.runtime, base.s, base.y, base.mu;
+            allow_conditioned_soc=true,
+        )
     else
-        try_update_scaling!(state.runtime, base.s, base.y, base.mu)
+        false
     end
     timings.scaling_seconds += Float64(time_ns() - t0) * 1.0e-9
     scaling_ok || return HSDStepDirectionFailed

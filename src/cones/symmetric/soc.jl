@@ -465,12 +465,13 @@ function nt_scaling!(
         throw(DomainError(state.lambda, "SOC scaled lambda is not strictly interior"))
     quadratic_apply!(cone, state.tmp1, state.w, y)
     quadratic_inverse_apply!(cone, state.tmp2, state.winv, s)
-    quadratic_inverse_apply!(cone, state.tmp3, state.rootinv, s)
-    (
-        _soc_q_backward_close(state.tmp1, state.w, y, s, cone.dim) &&
-        _soc_q_backward_close(state.tmp2, state.winv, s, y, cone.dim) &&
-        _soc_q_backward_close(state.tmp3, state.rootinv, s, state.lambda, cone.dim)
-    ) || throw(DomainError(state.w, "SOC NT orientation residual exceeded tolerance"))
+    _soc_q_backward_close(state.tmp1, state.w, y, s, cone.dim) &&
+        _soc_q_backward_close(state.tmp2, state.winv, s, y, cone.dim) ||
+        throw(DomainError(state.w, "SOC NT orientation residual exceeded tolerance"))
+    # Q_rootinv(s) = lambda follows from the two checked orientation maps and
+    # Q_root^2 = Q_w. A single-map allowance for the composed identity omits
+    # amplification of the already-bounded Q_w(y)-s error near a cone face;
+    # the Newton five-equation replay is the authoritative composed-map gate.
     state.valid[1] = true
     return state
 end

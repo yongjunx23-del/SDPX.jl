@@ -235,6 +235,33 @@ end
           result.diagnostics.termination.reason === :verified_accepted_step
 end
 
+@testset "SOC conditioned scaling uses actual replay authority" begin
+    model = SDPX.Model(Float64)
+    SDPX.variable!(model, :soc_point, 3; domain=SDPX.LorentzCone())
+    canonical = SDPX.canonicalize(SDPX.compile_product_cone_model(model))
+    runtime = SDPX.ProductConeRuntime(canonical.cone_layout, Float64)
+    primal = [
+        0.0029752337182299814,
+        3.156052916360546e-5,
+        0.002975046435627424,
+    ]
+    dual_point = [
+        313.9531423478005,
+        -3.4103218616967674,
+        -313.93350154379425,
+    ]
+    @test SDPX.product_strictly_interior(runtime, primal, dual_point)
+    @test !SDPX.try_update_scaling!(runtime, primal, dual_point, 1.0)
+    @test SDPX.try_update_scaling!(
+        runtime, primal, dual_point, 1.0; allow_conditioned_soc=true,
+    )
+    block = only(runtime.soc)
+    @test !SDPX.SymmetricCones._soc_q_condition_reliable(
+        block.state.w, block.dim,
+    )
+    @test block.state.valid[1]
+end
+
 @testset "Precision benchmark contract" begin
     precisions=precision_specs(Float64,Float64,Float64)
     @test length(precisions)==7

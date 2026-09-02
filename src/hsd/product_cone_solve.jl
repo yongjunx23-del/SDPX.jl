@@ -389,8 +389,15 @@ function _product_hsd_terminal_verified_result!(
         _product_hsd_fixed_trace_hkm_neighborhood!(
             state, base.s, base.y, base.mu,
         )
+    elseif try_update_scaling!(state.runtime, base.s, base.y, base.mu)
+        true
+    elseif isempty(state.runtime.exp) && isempty(state.runtime.power)
+        try_update_scaling!(
+            state.runtime, base.s, base.y, base.mu;
+            allow_conditioned_soc=true,
+        )
     else
-        try_update_scaling!(state.runtime, base.s, base.y, base.mu)
+        false
     end
     # `_product_hsd_make_result` has copied every verified coordinate. A
     # failure to restore this reusable mutable runtime cannot revoke that
@@ -525,6 +532,19 @@ function product_hsd_solve!(
                 code,
             )
             terminal === nothing || return terminal
+            # Preserve the ordinary condition-aware trajectory and terminal
+            # certificate opportunity first. Only a still-unverified generic
+            # symmetric SOC iterate may replay the same Newton direction with
+            # actual map checks as the acceptance authority.
+            conditioned_soc_rescue =
+                !(state.symmetric_core isa FixedTraceQ3CoreWorkspace) &&
+                !isempty(state.runtime.soc) &&
+                isempty(state.runtime.exp) && isempty(state.runtime.power)
+            if conditioned_soc_rescue && _product_hsd_line_search!(
+                state; allow_conditioned_soc=true,
+            )
+                continue
+            end
             return _product_hsd_termination_or_dual_ray!(
                 state, x_original, s_original, y_original, certificate_tol,
                 ProductHSDBreakdown, ProductHSDLineSearchBreakdown, code,

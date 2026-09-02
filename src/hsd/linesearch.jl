@@ -57,7 +57,9 @@ remains authoritative.
     return true
 end
 
-@inline function _product_hsd_trial_scaling!(state::ProductConeHSDState)
+@inline function _product_hsd_trial_scaling!(
+    state::ProductConeHSDState; allow_conditioned_soc::Bool=false,
+)
     base = state.base
     mu_t = _product_hsd_trial_mu(base)
     isfinite(mu_t) && mu_t > zero(mu_t) || return false
@@ -65,18 +67,23 @@ end
         return _product_hsd_fixed_trace_hkm_neighborhood!(
             state, base.st, base.yt, mu_t,
         )
+    elseif allow_conditioned_soc
+        return try_update_scaling!(
+            state.runtime, base.st, base.yt, mu_t;
+            allow_conditioned_soc=true,
+        )
     end
     return try_update_scaling!(state.runtime, base.st, base.yt, mu_t)
 end
 
 """Common strict-interior/scaling neighborhood gate for every cone product."""
 @inline function _product_hsd_trial_in_neighborhood!(
-    state::ProductConeHSDState{T},
+    state::ProductConeHSDState{T}; allow_conditioned_soc::Bool=false,
 ) where {T}
     base = state.base
     return isfinite(base.tau_t) && isfinite(base.kappa_t) &&
            base.tau_t > zero(T) && base.kappa_t > zero(T) &&
-           _product_hsd_trial_scaling!(state)
+           _product_hsd_trial_scaling!(state; allow_conditioned_soc)
 end
 
 """
@@ -92,8 +99,17 @@ least one quarter of its predicted `alpha * current` reduction.
     isfinite(current) && isfinite(trial) && isfinite(alpha) || return false
     resolution = T(256) * eps(T) * scale
     predicted = alpha * current
-    if predicted <= resolution
-        return trial <= current + resolution
+    minimum_fraction = T(2) * cbrt(eps(T))
+    arithmetic_neighborhood = T(16) * sqrt(eps(T)) * scale
+    if current > arithmetic_neighborhood &&
+       predicted < minimum_fraction * current
+        return false
+    elseif predicted <= resolution
+        # At the arithmetic floor, accept only a representable decrease.
+        # A non-increasing-with-slack test lets a conditioned rescue accept
+        # zero-progress steps indefinitely instead of reaching certification.
+        return trial < current
+    end
     end
     return trial <= current - predicted / T(4) + resolution
 end
@@ -109,7 +125,9 @@ propagate to the caller."""
 end
 
 """Single-alpha product-cone fraction-to-boundary line search."""
-@inline function _product_hsd_line_search!(state::ProductConeHSDState{T}) where {T}
+@inline function _product_hsd_line_search!(
+    state::ProductConeHSDState{T}; allow_conditioned_soc::Bool=false,
+) where {T}
     base = state.base
     alpha = _product_hsd_boundary_alpha!(state)
     (isfinite(alpha) && alpha > zero(T)) || return false
@@ -148,7 +166,9 @@ end
         end
         base.tau_t = base.tau + alpha * base.dtau
         base.kappa_t = base.kappa + alpha * base.dkappa
-        ok = _product_hsd_trial_in_neighborhood!(state)
+        ok = _product_hsd_trial_in_neighborhood!(
+            state; allow_conditioned_soc,
+        )
         if ok
             _product_hsd_trial_residual!(state)
             p2 = _hsd_maxinf(base.rPt)
@@ -215,8 +235,22 @@ end
             _product_hsd_fixed_trace_hkm_neighborhood!(
                 state, base.s, base.y, base.mu,
             )
-        else
-            try_update_scaling!(state.runtime, base.s, base.y, base.mu)
+        elseif allow_conditioned_soc
+            try_update_scaling!(
+                state.runtime, base.s, base.y, base.mu;
+                allow_conditioned_soc=true,
+            )
+        elseif !try_update_scaling!(
+            state.runtime, base.s, base.y, base.mu,
+        ) && !isempty(state.runtime.soc)
+            # The unchanged accepted point may itself have entered through an
+            # actual-replay rescue. Restore that already-certified scaling
+            # rather than invalidating the runtime with the weaker condition
+            # heuristic used by the ordinary first pass.
+            try_update_scaling!(
+                state.runtime, base.s, base.y, base.mu;
+                allow_conditioned_soc=true,
+            )
         end
         return false
     end

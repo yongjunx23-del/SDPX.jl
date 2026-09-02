@@ -370,8 +370,10 @@ end
 end
 
 
-@inline function _runtime_try_nt!(block::SOCRuntimeBlock{T}) where {T}
-    # Boolean form of the pair-dependent SOC update.  It mirrors the frozen
+@inline function _runtime_try_nt!(
+    block::SOCRuntimeBlock{T}, allow_conditioned::Bool=false,
+) where {T}
+    # Boolean form of the pair-dependent SOC update. It mirrors the frozen
     # symmetric kernel but turns expected orientation loss near the boundary
     # into a line-search rejection instead of allocating a DomainError.
     cone = block.cone
@@ -401,7 +403,8 @@ end
     SymmetricCones.quadratic_apply!(cone, state.w, state.tmp2, state.w)
     SymmetricCones._soc_strict_interior(cone, state.w) || return false
     SymmetricCones._soc_spectral_gap_reliable(state.w, cone.dim) || return false
-    SymmetricCones._soc_q_condition_reliable(state.w, cone.dim) || return false
+    (allow_conditioned ||
+     SymmetricCones._soc_q_condition_reliable(state.w, cone.dim)) || return false
     SymmetricCones.inverse!(cone, state.winv, state.w)
     SymmetricCones.sqrt!(cone, state.root, state.w)
     SymmetricCones.inverse!(cone, state.rootinv, state.root)
@@ -423,14 +426,16 @@ end
     SymmetricCones._soc_strict_interior(cone, state.lambda) || return false
     SymmetricCones.quadratic_apply!(cone, state.tmp1, state.w, y)
     SymmetricCones.quadratic_inverse_apply!(cone, state.tmp2, state.winv, s)
-    SymmetricCones.quadratic_inverse_apply!(cone, state.tmp3, state.rootinv, s)
-    (
-        SymmetricCones._soc_q_backward_close(state.tmp1, state.w, y, s, cone.dim) &&
-        SymmetricCones._soc_q_backward_close(state.tmp2, state.winv, s, y, cone.dim) &&
-        SymmetricCones._soc_q_backward_close(
-            state.tmp3, state.rootinv, s, state.lambda, cone.dim,
-        )
+    SymmetricCones._soc_q_backward_close(
+        state.tmp1, state.w, y, s, cone.dim,
     ) || return false
+    SymmetricCones._soc_q_backward_close(
+        state.tmp2, state.winv, s, y, cone.dim,
+    ) || return false
+    # Q_rootinv(s) = lambda follows algebraically from the two orientation
+    # maps above. A standalone single-map allowance omits amplification of the
+    # already-bounded Q_w(y)-s error near a cone face; the downstream Newton
+    # five-equation replay is the authoritative composed-map check.
     state.valid[1] = true
     return true
 end
@@ -635,7 +640,10 @@ near-boundary/orientation rejection returns `false` without constructing an
 exception.  Programmer errors such as a dimension or element-type mismatch
 remain ordinary setup exceptions.
 """
-function try_update_scaling!(runtime::ProductConeRuntime{T}, s, y, mu) where {T}
+function try_update_scaling!(
+    runtime::ProductConeRuntime{T}, s, y, mu;
+    allow_conditioned_soc::Bool=false,
+) where {T}
     _runtime_check_vectors(runtime, s, y)
     muT = T(mu)
     (isfinite(muT) && muT >= zero(T)) || return false
@@ -649,7 +657,7 @@ function try_update_scaling!(runtime::ProductConeRuntime{T}, s, y, mu) where {T}
     for block in runtime.soc
         _runtime_copy_in!(block.primal, s, block.offset, block.dim)
         _runtime_copy_in!(block.dual, y, block.offset, block.dim)
-        _runtime_try_nt!(block) || return false
+        _runtime_try_nt!(block, allow_conditioned_soc) || return false
     end
     for block in runtime.psd
         _runtime_copy_in!(block.primal, s, block.offset, block.len)
