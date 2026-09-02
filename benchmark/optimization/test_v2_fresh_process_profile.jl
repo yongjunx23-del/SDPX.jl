@@ -137,11 +137,50 @@ end
         @test TOML.parsefile(artifact)["ok"] === true
         @test_throws ArgumentError V2FreshProcessProfile._atomic_toml(
             artifact, Dict{String,Any}("ok"=>false))
+        race = joinpath(dir, "race.bin")
+        contenders = [Threads.@spawn(try
+            V2FreshProcessProfile._atomic_bytes(race, Vector{UInt8}(codeunits(value)))
+            true
+        catch
+            false
+        end) for value in ("first", "second")]
+        @test count(fetch, contenders) == 1
+        @test String(read(race)) in ("first", "second")
         if !Sys.iswindows()
             link = joinpath(dir, "source-link")
             symlink(V2FreshProcessProfile.ROOT, link)
             @test_throws ArgumentError V2FreshProcessProfile._canonical_destination(
                 joinpath(link, ".ignored-stageb", "escape.toml"))
+            dangling = joinpath(dir, "dangling.toml")
+            symlink(joinpath(dir, "does-not-exist"), dangling)
+            @test_throws ArgumentError V2FreshProcessProfile._canonical_destination(dangling)
         end
+
+        bundle = mktempdir(dir; prefix="bundle.", cleanup=false)
+        mkpath(joinpath(bundle, "children"))
+        fixed = Dict("receipt.toml"=>"receipt", "schema.tsv"=>"tsv",
+            "schema.toml"=>"schema")
+        for (name, value) in fixed
+            write(joinpath(bundle, name), value)
+        end
+        write(joinpath(bundle, "children", "warmup.toml"), "warmup")
+        for i in 1:3
+            write(joinpath(bundle, "children", "sample_$i.toml"), "sample$i")
+        end
+        completion = Dict{String,Any}("completion_protocol"=>1, "complete"=>true,
+            "bundle"=>bundle, "source_commit"=>"a"^40,
+            "tree_fingerprint"=>"b"^40, "case_key"=>"fixture",
+            "files"=>Dict(
+                "receipt_sha256"=>V2FreshProcessProfile._child_hash(joinpath(bundle,"receipt.toml")),
+                "schema_tsv_sha256"=>V2FreshProcessProfile._child_hash(joinpath(bundle,"schema.tsv")),
+                "schema_toml_sha256"=>V2FreshProcessProfile._child_hash(joinpath(bundle,"schema.toml")),
+                "warmup_sha256"=>V2FreshProcessProfile._child_hash(joinpath(bundle,"children","warmup.toml")),
+                "sample_sha256"=>[V2FreshProcessProfile._child_hash(joinpath(bundle,"children","sample_$i.toml")) for i in 1:3]))
+        marker = joinpath(dir, "bundle.complete.toml")
+        V2FreshProcessProfile._atomic_toml(marker, completion)
+        @test V2FreshProcessProfile._validate_completion(marker)["complete"] === true
+        write(joinpath(bundle, "children", "sample_2.toml"), "tampered")
+        @test_throws ArgumentError V2FreshProcessProfile._validate_completion(marker)
+        rm(bundle; recursive=true, force=true)
     end
 end

@@ -63,7 +63,8 @@ end
 
 function _canonical_destination(path::AbstractString)
     absolute = abspath(path)
-    ispath(absolute) && throw(ArgumentError("refusing to overwrite existing artifact: $absolute"))
+    (ispath(absolute) || islink(absolute)) && throw(ArgumentError(
+        "refusing to overwrite existing artifact or dangling symlink: $absolute"))
     parent = dirname(absolute)
     suffix = String[]
     while !ispath(parent)
@@ -118,12 +119,15 @@ function _atomic_bytes(path::AbstractString, bytes::Vector{UInt8})
         close(io)
     end
     try
-        mv(temporary, canonical; force=false)
+        # hardlink is an atomic no-replace installation on the same
+        # filesystem: an existing file or dangling symlink yields EEXIST.
+        hardlink(temporary, canonical)
         _sync_directory(dirname(canonical))
     catch
         rm(temporary; force=true)
         rethrow()
     end
+    rm(temporary; force=true)
     canonical
 end
 
@@ -354,6 +358,37 @@ function _read_child(path)
     (receipt=receipt, sha256=digest, path=String(path))
 end
 
+function _validate_completion(path)
+    (isfile(path) && !islink(path)) || throw(ArgumentError(
+        "completion marker is missing or a symlink"))
+    document = TOML.parse(String(read(path)))
+    get(document, "complete", false) === true || throw(ArgumentError(
+        "completion marker is not committed"))
+    get(document, "completion_protocol", 0) == 1 || throw(ArgumentError(
+        "unsupported completion protocol"))
+    bundle = realpath(String(document["bundle"]))
+    isdir(bundle) || throw(ArgumentError("completion bundle is missing"))
+    root = realpath(ROOT)
+    relative = relpath(bundle, root)
+    (relative == "." || (!isabspath(relative) && relative != ".." &&
+        !startswith(relative, ".." * Base.Filesystem.path_separator))) &&
+        throw(ArgumentError("completion bundle resolves inside source worktree"))
+    files = document["files"]
+    checks = (
+        (joinpath(bundle, "receipt.toml"), String(files["receipt_sha256"])),
+        (joinpath(bundle, "schema.tsv"), String(files["schema_tsv_sha256"])),
+        (joinpath(bundle, "schema.toml"), String(files["schema_toml_sha256"])),
+        (joinpath(bundle, "children", "warmup.toml"), String(files["warmup_sha256"])),
+    )
+    all(isfile(path_) && _child_hash(path_) == digest for (path_, digest) in checks) ||
+        throw(ArgumentError("completion bundle fixed-file hash mismatch"))
+    sample_hashes = String.(files["sample_sha256"])
+    length(sample_hashes) == 3 || throw(ArgumentError("completion bundle sample count mismatch"))
+    all(_child_hash(joinpath(bundle, "children", "sample_$i.toml")) == sample_hashes[i]
+        for i in 1:3) || throw(ArgumentError("completion bundle sample hash mismatch"))
+    document
+end
+
 function _launch_child(path, case_id)
     active = Base.active_project()
     active === nothing && throw(ArgumentError("parent must run under an active project"))
@@ -557,14 +592,16 @@ function parent_main()
     _require_clean_source("parent_start")
     case_id = Symbol(_arg("case-id", "v2_lp_box_small"))
     requested_prefix = _arg("prefix", joinpath(tempdir(), "SDPX_STAGE_B_FRESH_PROFILE"))
-    receipt_path = _canonical_destination(string(requested_prefix, ".receipt.toml"))
-    prefix = chop(receipt_path; tail=length(".receipt.toml"))
-    final_tsv = _canonical_destination(string(prefix, ".tsv"))
-    final_toml = _canonical_destination(string(prefix, ".toml"))
+    completion_path = _canonical_destination(string(requested_prefix, ".complete.toml"))
+    canonical_prefix = chop(completion_path; tail=length(".complete.toml"))
+    bundle = mktempdir(dirname(canonical_prefix);
+        prefix=basename(canonical_prefix) * ".bundle.", cleanup=false)
+    receipt_path = joinpath(bundle, "receipt.toml")
+    final_tsv = joinpath(bundle, "schema.tsv")
+    final_toml = joinpath(bundle, "schema.toml")
     catalog, instance = _catalog_instance(case_id)
     precision = _precision()
-    work = string(prefix, ".children")
-    ispath(work) && throw(ArgumentError("refusing to overwrite existing child artifact directory: $work"))
+    work = joinpath(bundle, "children")
     mkpath(work)
     warmup_path = joinpath(work, "warmup.toml")
     measured_paths = [joinpath(work, "sample_$(i).toml") for i in 1:3]
@@ -601,6 +638,34 @@ function parent_main()
     published_tsv = _atomic_bytes(final_tsv, read(staged_schema.tsv))
     published_toml = _atomic_bytes(final_toml, read(staged_schema.toml))
     rm(schema_stage; recursive=true, force=true)
+    bundle_files = Dict(
+        "receipt_sha256" => _child_hash(published_receipt),
+        "schema_tsv_sha256" => _child_hash(published_tsv),
+        "schema_toml_sha256" => _child_hash(published_toml),
+        "warmup_sha256" => warmup_snapshot.sha256,
+        "sample_sha256" => hashes,
+    )
+    completion = Dict{String,Any}(
+        "completion_protocol" => 1,
+        "complete" => true,
+        "bundle" => bundle,
+        "source_commit" => row.source_commit,
+        "tree_fingerprint" => row.tree_fingerprint,
+        "case_key" => row.case_key,
+        "files" => bundle_files,
+    )
+    bundle_completion = _atomic_toml(joinpath(bundle, "completion.toml"), completion)
+    _sync_directory(bundle)
+    try
+        published_completion = _atomic_bytes(completion_path, read(bundle_completion))
+        _validate_completion(published_completion)
+        println("STAGE_B_FRESH_COMPLETION marker=$(published_completion) bundle=$(bundle)")
+    catch
+        # A concurrent winner owns the prefix. This unique uncommitted bundle
+        # is not evidence and can be safely removed.
+        rm(bundle; recursive=true, force=true)
+        rethrow()
+    end
     _require_clean_source("parent_after_publication")
     println("STAGE_B_FRESH_RECEIPT receipt=$(published_receipt) tsv=$(published_tsv) toml=$(published_toml)")
     println("STAGE_B_FRESH_SUMMARY pid=", row.receipt["sample_pids"],
