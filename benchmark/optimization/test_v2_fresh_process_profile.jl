@@ -146,6 +146,10 @@ end
         end) for value in ("first", "second")]
         @test count(fetch, contenders) == 1
         @test String(read(race)) in ("first", "second")
+        sync_failure = joinpath(dir, "sync-failure.bin")
+        @test_throws ErrorException V2FreshProcessProfile._atomic_bytes(
+            sync_failure, UInt8[0x01]; sync_directory_fn=_ -> error("injected fsync failure"))
+        @test !ispath(sync_failure) && !islink(sync_failure)
         if !Sys.iswindows()
             link = joinpath(dir, "source-link")
             symlink(V2FreshProcessProfile.ROOT, link)

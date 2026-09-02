@@ -105,7 +105,8 @@ function _sync_directory(path)
     end
 end
 
-function _atomic_bytes(path::AbstractString, bytes::Vector{UInt8})
+function _atomic_bytes(path::AbstractString, bytes::Vector{UInt8};
+                       sync_directory_fn=_sync_directory)
     canonical = _canonical_destination(path)
     mkpath(dirname(canonical))
     # Re-resolve after mkdir so a symlink swap cannot redirect publication.
@@ -118,12 +119,18 @@ function _atomic_bytes(path::AbstractString, bytes::Vector{UInt8})
     finally
         close(io)
     end
+    installed = false
     try
         # hardlink is an atomic no-replace installation on the same
         # filesystem: an existing file or dangling symlink yields EEXIST.
         hardlink(temporary, canonical)
-        _sync_directory(dirname(canonical))
+        installed = true
+        sync_directory_fn(dirname(canonical))
     catch
+        # If durability fails after the link linearization point, remove the
+        # destination before reporting failure. Never leave committed-looking
+        # evidence from a failed publication call.
+        installed && rm(canonical; force=true)
         rm(temporary; force=true)
         rethrow()
     end
@@ -656,17 +663,27 @@ function parent_main()
     )
     bundle_completion = _atomic_toml(joinpath(bundle, "completion.toml"), completion)
     _sync_directory(bundle)
-    try
-        published_completion = _atomic_bytes(completion_path, read(bundle_completion))
-        _validate_completion(published_completion)
-        println("STAGE_B_FRESH_COMPLETION marker=$(published_completion) bundle=$(bundle)")
+    # Validate the complete immutable set before installing its public marker.
+    _validate_completion(bundle_completion)
+    published_completion = try
+        _atomic_bytes(completion_path, read(bundle_completion))
     catch
-        # A concurrent winner owns the prefix. This unique uncommitted bundle
-        # is not evidence and can be safely removed.
+        # No marker was installed by this call (atomic writer rolls it back).
+        # A concurrent winner may own the prefix; this bundle is an orphan.
         rm(bundle; recursive=true, force=true)
         rethrow()
     end
-    _require_clean_source("parent_after_publication")
+    try
+        _require_clean_source("parent_after_publication")
+        _validate_completion(published_completion)
+    catch
+        # Roll back only our marker and retain the immutable bundle for audit.
+        # Never delete a bundle while a public marker can still reference it.
+        rm(published_completion; force=true)
+        _sync_directory(dirname(published_completion))
+        rethrow()
+    end
+    println("STAGE_B_FRESH_COMPLETION marker=$(published_completion) bundle=$(bundle)")
     println("STAGE_B_FRESH_RECEIPT receipt=$(published_receipt) tsv=$(published_tsv) toml=$(published_toml)")
     println("STAGE_B_FRESH_SUMMARY pid=", row.receipt["sample_pids"],
         " iterations=", row.sample_iterations, " objectives=", row.sample_objective,
