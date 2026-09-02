@@ -9,6 +9,17 @@ include(joinpath(
     @__DIR__, "..", "benchmark", "general", "GenericConicBenchmark.jl",
 ))
 using .GenericConicBenchmark
+include(joinpath(@__DIR__, "..", "benchmark", "robustness",
+    "test_route_guard.jl"))
+include(joinpath(
+    @__DIR__, "..", "benchmark", "general", "test_v2.jl",
+))
+include(joinpath(
+    @__DIR__, "..", "benchmark", "optimization", "test_v2_schema9_adapter.jl",
+))
+
+include(joinpath(@__DIR__, "..", "benchmark", "bootstrap", "physics",
+    "test_physics_catalog_contracts.jl"))
 
 const E2E_CASE_IDS = (
     :lp_afiro_style,
@@ -360,3 +371,10 @@ end
             atol=1e-6, rtol=1e-4)
     end
 end
+
+# Dependent benchmark profiling/selection fixture tests.
+include(joinpath(@__DIR__, "..", "benchmark", "optimization", "test_profile_catalog.jl"))
+include(joinpath(@__DIR__, "..", "benchmark", "optimization", "test_compare_contract.jl"))
+include(joinpath(@__DIR__, "..", "benchmark", "optimization", "test_measure_target.jl"))
+include(joinpath(@__DIR__, "..", "benchmark", "bootstrap", "physics",
+    "smatrix_4d", "spec_only", "test_smatrix_4d_spec.jl"))

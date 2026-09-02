@@ -1,5 +1,10 @@
 name: Optimization loop
 
+# Legacy manual parent-vs-candidate comparison. The dependency-aware path is
+# benchmark-catalog-gate.yml -> benchmark-profile-optimization.yml and consumes
+# exact-head catalog/profile manifests before selecting a target. This legacy
+# workflow remains available for explicit historical comparisons only.
+
 on:
   # Manual for now: running the ~2h parent-versus-candidate loop on every push
   # is a policy decision. The day-to-day benchmark loop lives in
@@ -85,7 +90,8 @@ jobs:
           - Base SHA (explicit input): \`$base_sha_full\`
           - Actions run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
           - Quick correctness suite: passed
-          - Schema-v8 smoke suite and native HSD allocation gate: passed
+          - Schema-v9 smoke suite: passed
+          - Native HSD allocation: evidence only; nonzero allocations do not affect correctness status
           - Fresh-process stability matrix: passed
           - Base-vs-candidate comparison: present when the benchmark emitted it
           - Evidence is immutable on this ref keyed by candidate SHA.

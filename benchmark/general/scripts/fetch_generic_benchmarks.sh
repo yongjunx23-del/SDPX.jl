@@ -14,12 +14,17 @@ fetch() {
   fi
 }
 
-# NETLIB instances are mirrored as uncompressed MPS by HiGHS. The bytes are
-# checksum-pinned here; reference objectives remain those published by NETLIB.
-fetch https://raw.githubusercontent.com/ERGO-Code/HiGHS/master/check/instances/afiro.mps \
+# AFIRO/ADLITTLE are pinned to a content-addressed HiGHS mirror. The bytes
+# are checksum-pinned below; reference objectives remain those published by
+# NETLIB. The remaining NETLIB rows use the official legacy endpoints and are
+# retained as deferred until a strict parser-compatible conversion is pinned.
+fetch https://raw.githubusercontent.com/ERGO-Code/HiGHS/73cac48c5340d775a477087198611862559be250/check/instances/afiro.mps \
   "$DATA/netlib/afiro.mps"
-fetch https://raw.githubusercontent.com/ERGO-Code/HiGHS/master/check/instances/adlittle.mps \
+fetch https://raw.githubusercontent.com/ERGO-Code/HiGHS/73cac48c5340d775a477087198611862559be250/check/instances/adlittle.mps \
   "$DATA/netlib/adlittle.mps"
+fetch https://www.netlib.org/lp/data/share2b "$DATA/netlib/share2b.mps"
+fetch https://www.netlib.org/lp/data/sc50a "$DATA/netlib/sc50a.mps"
+fetch https://www.netlib.org/lp/data/recipe "$DATA/netlib/recipe.mps"
 
 # SDPLIB 1.2 sparse SDPA files and published objective table.
 fetch https://raw.githubusercontent.com/vsdp/SDPLIB/master/data/control1.dat-s \

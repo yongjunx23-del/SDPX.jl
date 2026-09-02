@@ -24,6 +24,9 @@ general solver benchmark and black-box E2E cases live in `benchmark/general/`.
 - `matrix_bootstrap/` — matrix-bootstrap SDP;
 - `modular_lp/` — finite-grid modular-bootstrap LP;
 - `smatrix_soc/` — sampled S-matrix SOCP;
+- `modular_pmp/` — experimental original Hellerman polynomial-functional SDP
+  front end; currently unregistered and fail-closed until a strict witness is
+  independently certified;
 - `thermal_exp/` — Gibbs/KL exponential-cone model;
 - `thermal_power/` — Renyi power-cone model.
 

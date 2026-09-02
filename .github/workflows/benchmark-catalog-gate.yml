@@ -1,0 +1,76 @@
+name: Benchmark catalog gate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'benchmark/**'
+      - 'src/**'
+      - 'docs/**'
+      - '.github/workflows/**'
+  workflow_dispatch:
+
+concurrency:
+  group: benchmark-catalog-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  catalog:
+    name: Build and validate benchmark catalogs
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      JULIA_NUM_THREADS: '1'
+      OPENBLAS_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+      SDPX_CATALOG_OUTPUT: ${{ github.workspace }}/catalog-manifest-v2.toml
+      GITHUB_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1.10'
+      - uses: julia-actions/cache@v2
+        with:
+          cache-name: benchmark-catalog-v2
+      - name: Instantiate benchmark environment at the checked-out SDPX source
+        run: |
+          julia --startup-file=no --project=benchmark/bootstrap/benchenv -e '
+            using Pkg
+            Pkg.develop(path=pwd())
+            Pkg.instantiate()
+          '
+      - name: Build and validate catalog manifest
+        run: |
+          set -euo pipefail
+          julia --startup-file=no --project=benchmark/bootstrap/benchenv \
+            benchmark/optimization/catalog_build.jl
+          test "$(grep -c '^source_commit' catalog-manifest-v2.toml)" -eq 1
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          grep -q "source_commit = \"$(git rev-parse HEAD)\"" catalog-manifest-v2.toml
+          grep -q "tree_fingerprint = \"$(git rev-parse HEAD^{tree})\"" catalog-manifest-v2.toml
+      - name: Verify manifest identity
+        run: |
+          set -euo pipefail
+          sha256sum catalog-manifest-v2.toml > catalog-manifest-v2.sha256
+          printf '%s\n' "$GITHUB_SHA" > catalog-source-commit.txt
+          printf '%s\n' "$(git rev-parse HEAD^{tree})" > catalog-source-tree.txt
+          printf '%s\n' "$GITHUB_RUN_ID" > catalog-run-id.txt
+      - name: Upload catalog manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdpx-benchmark-catalog-v2-${{ github.sha }}
+          path: |
+            catalog-manifest-v2.toml
+            catalog-manifest-v2.sha256
+            catalog-source-commit.txt
+            catalog-source-tree.txt
+            catalog-run-id.txt
+          if-no-files-found: error
+          retention-days: 30

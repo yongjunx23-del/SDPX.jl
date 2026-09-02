@@ -1,0 +1,166 @@
+# External benchmark provenance/eligibility metadata.
+# A row is solve-eligible only when every required field is complete and an
+# independent checker receipt is pinned. parity_pending=true rows remain
+# inventory-only until parity_sha256 is populated and the row is revalidated.
+
+[[case]]
+id = "netlib_afiro"
+library = "NETLIB"
+family = "lp"
+tier = "small"
+split = "train"
+relative_path = "netlib/afiro.mps"
+source_url = "https://raw.githubusercontent.com/ERGO-Code/HiGHS/73cac48c5340d775a477087198611862559be250/check/instances/afiro.mps"
+license_note = "NETLIB public LP data; preserve original attribution"
+sha256 = "9cd304f02717cbd6f85068cb777b69d28539b22a4868ae0f0fb425f514f0eea5"
+parsed_fingerprint = "8bb4c6ef83de30cf400b5616390fb0d05bbd17df85d65ae01835b4e586e86b16"
+official_status = "optimal"
+objective_interval = ["-464.75314486", "-464.75314086"]
+parity_pending = true
+parity_sha256 = ""
+solve_eligible = false
+note = "Published NETLIB AFIRO interval; independent checker parity pending."
+
+[[case]]
+id = "netlib_adlittle"
+library = "NETLIB"
+family = "lp"
+tier = "medium"
+split = "holdout"
+relative_path = "netlib/adlittle.mps"
+source_url = "https://raw.githubusercontent.com/ERGO-Code/HiGHS/73cac48c5340d775a477087198611862559be250/check/instances/adlittle.mps"
+license_note = "NETLIB public LP data; preserve original attribution"
+sha256 = "ed99da009e35279828219ff7f04a2cd4f170692bedf58f704b622338e4adc1f9"
+parsed_fingerprint = "c8884824c0e1dfdaa9fa399ec5e7c602d909f8a49c11b4c301f75e944e72a3da"
+official_status = "optimal"
+objective_interval = ["225494.96314", "225494.96318"]
+parity_pending = true
+parity_sha256 = ""
+solve_eligible = false
+note = "Published NETLIB interval; independent checker parity pending."
+
+[[case]]
+id = "netlib_share2b"
+library = "NETLIB"
+family = "lp"
+tier = "small"
+split = "holdout"
+relative_path = "netlib/share2b.mps"
+source_url = "https://www.netlib.org/lp/data/share2b"
+license_note = "NETLIB public LP data; preserve original attribution"
+sha256 = "f4c226064757a7c4255a88c59704e1070be8225ef0962d9518ff69c79519923f"
+parsed_fingerprint = ""
+official_status = "optimal"
+objective_interval = []
+parity_pending = true
+parity_sha256 = ""
+solve_eligible = false
+note = "Downloaded official legacy NETLIB encoding; current strict MPS parser rejects it; deferred until an immutable parsed conversion and published interval are pinned."
+
+[[case]]
+id = "netlib_sc50a"
+library = "NETLIB"
+family = "lp"
+tier = "small"
+split = "holdout"
+relative_path = "netlib/sc50a.mps"
+source_url = "https://www.netlib.org/lp/data/sc50a"
+license_note = "NETLIB public LP data; preserve original attribution"
+sha256 = "f6eb22f39b9978bba1ed5de3bba0b63ce70a058ef5e77a6dc7f06901edfd9ef8"
+parsed_fingerprint = ""
+official_status = "optimal"
+objective_interval = []
+parity_pending = true
+parity_sha256 = ""
+solve_eligible = false
+note = "Downloaded official legacy NETLIB encoding; current strict MPS parser rejects it; deferred until an immutable parsed conversion and published interval are pinned."
+
+[[case]]
+id = "netlib_recipe"
+library = "NETLIB"
+family = "lp"
+tier = "medium"
+split = "holdout"
+relative_path = "netlib/recipe.mps"
+source_url = "https://www.netlib.org/lp/data/recipe"
+license_note = "NETLIB public LP data; preserve original attribution"
+sha256 = "cc053f4111f619da90b223455192543893a638b2d5e0490aeb8afad778ed9736"
+parsed_fingerprint = ""
+official_status = "optimal"
+objective_interval = []
+parity_pending = true
+parity_sha256 = ""
+solve_eligible = false
+note = "Downloaded official legacy NETLIB encoding; current strict MPS parser rejects it; deferred until an immutable parsed conversion and published interval are pinned."
+
+[[case]]
+id = "sdplib_control5"
+library = "SDPLIB"
+family = "sdp"
+tier = "medium"
+split = "holdout"
+relative_path = "sdplib/control5.dat-s"
+source_url = "https://raw.githubusercontent.com/vsdp/SDPLIB/fa11b45c1d8c896a6abad2648d5dad46d8ecefaa/data/control5.dat-s"
+license_note = "SDPLIB 1.2 public benchmark data; preserve repository attribution"
+sha256 = "a18fdbeb0e1af50f2dda325fa8571f5d7ddf382bd9226a7469b23a1c1a00b43e"
+parsed_fingerprint = "38e8930bdc5c017b8114ed6ca291a72b531d55146c1d091fa1d68ddd2ebf390d"
+official_status = "optimal"
+objective_interval = ["16.8835", "16.8837"]
+parity_pending = true
+parity_sha256 = ""
+solve_eligible = false
+note = "Published SDPLIB objective 1.68836e+01; independent checker parity pending."
+
+[[case]]
+id = "sdplib_theta1"
+library = "SDPLIB"
+family = "sdp"
+tier = "medium"
+split = "holdout"
+relative_path = "sdplib/theta1.dat-s"
+source_url = "https://raw.githubusercontent.com/vsdp/SDPLIB/fa11b45c1d8c896a6abad2648d5dad46d8ecefaa/data/theta1.dat-s"
+license_note = "SDPLIB 1.2 public benchmark data; preserve repository attribution"
+sha256 = "e957517b2284f24eba158db56a0ae34ecc07d24fa299a31f732dad3d4a54ea34"
+parsed_fingerprint = "bd7798bd9df9e02dfd8c4eb434f6cae0ca49e9faabd93ffc95bafa2b4f5f53e5"
+official_status = "optimal"
+objective_interval = ["22.9999", "23.0001"]
+parity_pending = true
+parity_sha256 = ""
+solve_eligible = false
+note = "Published SDPLIB objective 2.300000e+01; independent checker parity pending."
+
+[[case]]
+id = "sdplib_maxG11"
+library = "SDPLIB"
+family = "sdp"
+tier = "medium"
+split = "holdout"
+relative_path = "sdplib/maxG11.dat-s"
+source_url = "https://raw.githubusercontent.com/vsdp/SDPLIB/fa11b45c1d8c896a6abad2648d5dad46d8ecefaa/data/maxG11.dat-s"
+license_note = "SDPLIB 1.2 public benchmark data; preserve repository attribution"
+sha256 = "8b52fef34e22120f59161fe140dcb0285bfa194853791f2e8f682f77b56f2d1a"
+parsed_fingerprint = "4dd112ec32efc1e19cff17436e7254f58413b38eea2edf86898c423688140fb1"
+official_status = "optimal"
+objective_interval = ["629.1647", "629.1649"]
+parity_pending = true
+parity_sha256 = ""
+solve_eligible = false
+note = "Published SDPLIB objective 6.291648e+02; independent checker parity pending."
+
+[[case]]
+id = "sdplib_qap5"
+library = "SDPLIB"
+family = "sdp"
+tier = "medium"
+split = "holdout"
+relative_path = "sdplib/qap5.dat-s"
+source_url = "https://raw.githubusercontent.com/vsdp/SDPLIB/fa11b45c1d8c896a6abad2648d5dad46d8ecefaa/data/qap5.dat-s"
+license_note = "SDPLIB 1.2 public benchmark data; preserve repository attribution"
+sha256 = "08afd61ec131d190aa3344f3bfd5c39551b1a5639b99f42ecf5b6a993faa7a52"
+parsed_fingerprint = "2d1cf6fbad6910f5a2d6a2cf45a09f14a25da119b9d0f5b7d7aa4b75f74d3e1f"
+official_status = "optimal"
+objective_interval = ["-436.01", "-435.99"]
+parity_pending = true
+parity_sha256 = ""
+solve_eligible = false
+note = "Published SDPLIB objective -4.36000e+02; independent checker parity pending."

@@ -3,13 +3,18 @@ module GenericConicBenchmark
 using LinearAlgebra
 using Printf
 using Random
+using TOML
+using SHA
 using SDPX
 
 export AbstractGenericProblem, BenchmarkSpec, BenchmarkResult
 export PrecisionSpec, PrecisionBenchmarkResult, precision_specs, run_precision_case
-export build, inventory, run_one, run_tier, validate_result, main
+export build, inventory, run_one, run_tier, validate_result, main, canonical_tier
 export MPSData, SDPAData, CBFData, read_mps, mps_model, read_sdpa, read_cbf, sdpa_model, EXTERNAL_BENCHMARKS_EXPANDED
 export ExternalBenchmark, external_inventory, read_external, reference_matches
+export ExternalHoldoutSpec, EXTERNAL_HOLDOUTS, external_holdout_inventory,
+    external_case_complete, validate_external_holdout_spec,
+    validate_external_holdout_manifest
 
 abstract type AbstractGenericProblem end
 
@@ -27,16 +32,19 @@ struct BenchmarkSpec{P<:AbstractGenericProblem,Q<:NamedTuple}
 end
 
 "Stable, serialization-friendly measurements emitted by the generic runner."
-struct BenchmarkResult
+struct BenchmarkResult{T<:AbstractFloat}
     id::Symbol
     family::Symbol
     tier::Symbol
     status::Symbol
-    objective::Float64
-    dual_objective::Float64
-    primal_residual::Float64
-    dual_residual::Float64
-    relative_gap::Float64
+    # Keep arithmetic values in the requested backend.  In particular, this
+    # must not narrow Float64xN or BigFloat certificates merely because the
+    # legacy V1 result schema predates the precision matrix.
+    objective::T
+    dual_objective::T
+    primal_residual::T
+    dual_residual::T
+    relative_gap::T
     certificate_valid::Bool
     iterations::Int
     seconds::Float64
@@ -107,16 +115,19 @@ const _KNOWN_FINDING_STATUSES = (
     :stalled,
 )
 
-function validate_result(spec::BenchmarkSpec, result::BenchmarkResult)
+function validate_result(spec::BenchmarkSpec, result::BenchmarkResult{T}) where {T<:AbstractFloat}
     if spec.expected_status === :known_solver_finding
         return result.status in _KNOWN_FINDING_STATUSES && !result.certificate_valid
     end
     status_ok = result.status === spec.expected_status
     certificate_ok = result.certificate_valid
-    objective_ok = spec.known_objective === nothing ||
-        isapprox(result.objective, spec.known_objective;
-                 atol=spec.objective_tolerance,
-                 rtol=spec.objective_tolerance)
+    # Convert the reference and allowance into the result backend before
+    # comparing.  The certificate itself remains in T throughout the runner;
+    # this is only a compatibility bridge for the legacy Float64 references.
+    expected = spec.known_objective === nothing ? nothing : T(spec.known_objective)
+    allowance = T(spec.objective_tolerance)
+    objective_ok = expected === nothing ||
+        isapprox(result.objective, expected; atol=allowance, rtol=allowance)
     return status_ok && certificate_ok && objective_ok
 end
 
@@ -133,11 +144,11 @@ function run_one(spec::BenchmarkSpec, ::Type{T}=Float64;
         spec.family,
         spec.tier,
         SDPX.status(solved),
-        Float64(certificate.primal_objective),
-        Float64(certificate.dual_objective),
-        Float64(certificate.primal_residual),
-        Float64(certificate.dual_residual),
-        Float64(certificate.relative_gap),
+        convert(T, certificate.primal_objective),
+        convert(T, certificate.dual_objective),
+        convert(T, certificate.primal_residual),
+        convert(T, certificate.dual_residual),
+        convert(T, certificate.relative_gap),
         certificate.valid,
         solved.iterations,
         measurement.time,
@@ -156,12 +167,15 @@ function run_one(spec::BenchmarkSpec, ::Type{T}=Float64;
 end
 
 function _print_result(result::BenchmarkResult)
-    @printf("%-28s %-5s status=%-20s obj=% .9e rp=%.2e rd=%.2e gap=%.2e cert=%s iter=%d time=%.3fs alloc=%.2fMiB %s\n",
-        String(result.id), uppercase(String(result.family)), String(result.status),
-        result.objective, result.primal_residual, result.dual_residual,
-        result.relative_gap, result.certificate_valid, result.iterations,
-        result.seconds, result.bytes / 2.0^20,
-        !result.expectation_met ? "FAIL" :
+    # Avoid an implicit backend conversion in reporting.  Display remains
+    # stable enough for humans while serialized measurements retain T.
+    @printf("%-28s %-5s status=%-20s ",
+        String(result.id), uppercase(String(result.family)), String(result.status))
+    println("obj=", result.objective, " rp=", result.primal_residual,
+        " rd=", result.dual_residual, " gap=", result.relative_gap,
+        " cert=", result.certificate_valid, " iter=", result.iterations,
+        " time=", result.seconds, "s alloc=", result.bytes / 2.0^20,
+        "MiB ", !result.expectation_met ? "FAIL" :
         result.status in _KNOWN_FINDING_STATUSES ? "FINDING" : "PASS")
 end
 
@@ -197,8 +211,17 @@ function run_tier(tier::Symbol=:small, ::Type{T}=Float64;
     return (; tier, elapsed, results)
 end
 
+const _COMPATIBILITY_TIERS = Dict(:instant => :small, :small => :small,
+                                  :medium => :medium, :heavy => :large,
+                                  :large => :large, :extreme => :extreme)
+canonical_tier(tier::Symbol) = haskey(_COMPATIBILITY_TIERS, tier) ?
+    _COMPATIBILITY_TIERS[tier] : throw(ArgumentError("unknown benchmark tier $tier"))
+
 function main(args=ARGS)
-    tier = isempty(args) ? :small : Symbol(args[1])
+    requested = isempty(args) ? :small : Symbol(args[1])
+    tier = canonical_tier(requested)
+    requested in (:instant, :heavy) && @warn(
+        "legacy benchmark tier '$requested' is deprecated; use '$tier'; old result schema is retired")
     family = length(args) >= 2 ? Symbol(args[2]) : nothing
     allow_large = get(ENV, "SDPX_GENERIC_ALLOW_LARGE", "0") == "1"
     run_tier(tier; family, allow_large,

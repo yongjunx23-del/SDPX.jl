@@ -196,6 +196,9 @@ mutable struct ProductConeHSDState{
     # Public additive iteration controls; a normalized NamedTuple avoids any
     # per-step allocation and defaults to the historical path.
     iteration_knobs::NamedTuple
+    # One-shot route restart uses a terminal expanded executor. Ordinary
+    # expanded requests retain the historical expanded->bordered fallback.
+    allow_expanded_bordered_fallback::Bool
 end
 
 function ProductConeHSDState(
@@ -219,6 +222,7 @@ function _product_cone_hsd_state(
     iteration_knobs::NamedTuple=(;
         sigma=nothing, beta=nothing, gamma=nothing, predictor=:classic,
     ),
+    allow_expanded_bordered_fallback::Bool=true,
 ) where {T<:AbstractFloat,R<:AbstractFactorCache{T}}
     kkt_route in (:bordered, :expanded, :sparse_schur) || throw(ArgumentError(
         "product HSD kkt_route must be :bordered, :expanded, or :sparse_schur",
@@ -358,6 +362,7 @@ function _product_cone_hsd_state(
         residual_hook,
         phase_timings,
         iteration_knobs,
+        allow_expanded_bordered_fallback,
     )
 end
 
@@ -372,6 +377,7 @@ function ProductConeHSDState(
     iteration_knobs::NamedTuple=(;
         sigma=nothing, beta=nothing, gamma=nothing, predictor=:classic,
     ),
+    allow_expanded_bordered_fallback::Bool=true,
 ) where {T<:AbstractFloat}
     reduction = _hsd_rowspace_reduction(canonical)
     cache = DenseSchurCholeskyCache{T}(reduction.rank)
@@ -386,6 +392,7 @@ function ProductConeHSDState(
         symmetric_core_precision_bits=symmetric_core_precision_bits,
         symmetric_core_regularization=symmetric_core_regularization,
         iteration_knobs=iteration_knobs,
+        allow_expanded_bordered_fallback=allow_expanded_bordered_fallback,
     )
 end
 
@@ -3244,6 +3251,7 @@ public result, or fall back to a legacy/lifted route.
 end
 
 @inline function _product_hsd_expanded_fallback_allowed(state::ProductConeHSDState)
+    state.allow_expanded_bordered_fallback || return false
     state.expanded === nothing && return false
     return state.expanded.status in (
         EXPANDED_KKT_FACTOR_FAILED,

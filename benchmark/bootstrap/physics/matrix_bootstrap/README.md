@@ -42,3 +42,16 @@ stable PRL citation, and interval semantics.
 `catalog.jl` registers levels 4/6/8 with the shared benchmark harness. Their
 reference status is `:build_only`: the runner measures construction and
 validates the exact artifact fingerprint without invoking a solver.
+
+## Catalog contract
+
+- **Physical assumptions/conventions:** D=2 bosonic O(2) matrix quantum mechanics, ordered momentum traces, and fixed scan slices.
+- **Primary equations/version:** Lin--Zheng, arXiv:2507.21007v3; exact EOM/E34/E40/E42 equations are listed in `PROVENANCE.md`.
+- **Truncation/discretization:** finite word levels 4/6/8 and a low-order quotient; the full Ward tower is absent.
+- **Convex variables/objective/cones:** exact-rational moments and quadratic lifts, affine equations, PSD moment blocks, and no objective oracle.
+- **Strict witness:** no independent feasible moment/PSD witness is stored; the artifact remains build-only.
+- **Reference status:** `:build_only`, `paper_equivalent=false`.
+- **Excluded claims:** no ground-state interval, published table, complete gauge quotient, or solver optimum.
+- **Scaling tiers:** levels 4/6/8 = tiny/small/medium; construction scaling only.
+
+The shared checklist is [`../PHYSICS_CATALOG_TEMPLATE.md`](../PHYSICS_CATALOG_TEMPLATE.md).

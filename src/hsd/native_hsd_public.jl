@@ -985,7 +985,8 @@ function _public_native_hsd_core(
     model::Model{T},
     program::NativeConeProgram{T},
     route::NativeConeRoute,
-    settings::Settings{T},
+    settings::Settings{T};
+    allow_expanded_bordered_fallback::Bool=true,
 ) where {T<:AbstractFloat}
     setup_started = time_ns()
     canonical = canonicalize(program)
@@ -1357,11 +1358,13 @@ function _public_native_hsd_core(
             symmetric_core_current_rss=peak_rss,
             symmetric_core_precision_bits=effective_precision,
             iteration_knobs=settings.iteration_knobs,
+            allow_expanded_bordered_fallback=allow_expanded_bordered_fallback,
         )
     else
         state = ProductConeHSDState(
             solve_reduced; kkt_route=settings.kkt_route,
             iteration_knobs=settings.iteration_knobs,
+            allow_expanded_bordered_fallback=allow_expanded_bordered_fallback,
         )
         base = state.base
         plan = _native_hsd_plan(
@@ -1768,6 +1771,160 @@ function _public_result_from_native_hsd(
     )
 end
 
+"""Return a settings copy with only the structural KKT route changed."""
+function _native_hsd_route_settings(settings::Settings{T}, route::Symbol) where {T<:AbstractFloat}
+    return Settings{T}(
+        tolerances=settings.tolerances,
+        limits=settings.limits,
+        engine=settings.engine,
+        scaling=settings.scaling,
+        formulation=settings.formulation,
+        kkt_route=route,
+        provider=settings.provider,
+        presolve=settings.presolve,
+        algorithm=settings.algorithm,
+        sparse=settings.sparse,
+        equality_solver=settings.equality_solver,
+        working_precision_policy=settings.working_precision_policy,
+        diagnostics=settings.diagnostics,
+        verbosity=settings.verbosity,
+        timing=settings.timing,
+        certification=settings.certification,
+        blas_threads=settings.blas_threads,
+        iteration_knobs=settings.iteration_knobs,
+    )
+end
+
+"""Attach a transparent one-shot route restart to the final core receipt.
+
+The guard is deliberately narrow: it handles only an early fixed-trace
+predictor residual failure.  An exact duplicate-equality model may still
+fail in the expanded route with tau-collapse recovery exhaustion; that is a
+separate equality-reduction/geometry issue and must remain fail-closed rather
+than being claimed as repaired by this fallback.
+"""
+function _native_hsd_restarted_core(
+    initial::NativeHSDCoreResult{T},
+    fallback::NativeHSDCoreResult{T},
+) where {T<:AbstractFloat}
+    initial_diag = initial.diagnostics
+    fallback_diag = fallback.diagnostics
+    initial_t = initial_diag.timings
+    fallback_t = fallback_diag.timings
+    initial_selected = initial_diag.selected_algorithms
+    fallback_selected = fallback_diag.selected_algorithms
+    # Each child core records the routes it actually attempted.  Compose the
+    # restart receipt from those records rather than reconstructing route names
+    # from the restart policy.  This keeps the receipt honest if a child
+    # terminates before execution and filters only the explicit sentinel.
+    initial_attempts = Tuple(filter(
+        route -> route !== :not_executed,
+        initial_selected.attempted_kkt_routes,
+    ))
+    fallback_attempts = Tuple(filter(
+        route -> route !== :not_executed,
+        fallback_selected.attempted_kkt_routes,
+    ))
+    isempty(initial_attempts) && throw(ArgumentError(
+        "native HSD restart requires an executed initial route receipt",
+    ))
+    isempty(fallback_attempts) && throw(ArgumentError(
+        "native HSD restart requires an executed fallback route receipt",
+    ))
+    attempts = (initial_attempts..., fallback_attempts...)
+    executed_route = fallback_selected.executed_kkt_route
+    timings = merge(
+        fallback_t,
+        (
+            setup=get(fallback_t, :setup, 0.0) + get(initial_t, :setup, 0.0),
+            core=get(fallback_t, :core, 0.0) + get(initial_t, :core, 0.0),
+            reconstruction=get(fallback_t, :reconstruction, 0.0) +
+                           get(initial_t, :reconstruction, 0.0),
+            total=get(fallback_t, :total, get(fallback_t, :core, 0.0)) +
+                  get(initial_t, :total, get(initial_t, :core, 0.0)),
+        ),
+    )
+    # Preserve every planning/identity field from the initial receipt, not
+    # just the currently documented aliases.  The fields listed here are
+    # execution outcomes supplied by the final child and therefore must remain
+    # from `fallback_selected`; all other initial fields are planning facts.
+    execution_fields = (
+        :executed_algorithm,
+        :executed_kkt_formulation,
+        :executed_kkt_route,
+        :executed_kkt_storage,
+        :executed_factorization,
+        :executed_factorization_reuse,
+        :executed_factorization_kernel,
+        :row_scaling,
+        :transform,
+        :border_structure,
+        :pivoting,
+        :gram_or_metric,
+        :metric,
+        :route,
+        :execution_path,
+        :executed_scaling,
+        :executed_backend,
+        :backend,
+        :la_executed_provider,
+        :attempted_kkt_routes,
+        :executed_fallback_chain,
+        :executed_threads,
+        :fallback_reason,
+    )
+    planned_fields = Tuple(filter(
+        field -> !(field in execution_fields),
+        propertynames(initial_selected),
+    ))
+    initial_planned = NamedTuple{planned_fields}(
+        Tuple(getproperty(initial_selected, field) for field in planned_fields),
+    )
+    selected = merge(
+        fallback_selected,
+        initial_planned,
+        (
+            executed_kkt_route=executed_route,
+            attempted_kkt_routes=attempts,
+            executed_fallback_chain=attempts,
+            fallback_reason=:bordered_predictor_residual_fallback,
+            route_restart_reason=:fixed_trace_predictor_residual_failed,
+            route_restart_iteration=initial.iterations,
+        ),
+    )
+    termination = merge(
+        fallback_diag.termination,
+        (
+            route_restart_reason=:fixed_trace_predictor_residual_failed,
+            route_restart_iteration=initial.iterations,
+            route_attempts=attempts,
+        ),
+    )
+    diagnostics = NativeHSDDiagnostics(
+        initial_diag.plan,
+        timings,
+        fallback_diag.memory,
+        selected,
+        vcat(initial_diag.warnings, fallback_diag.warnings),
+        termination,
+        fallback_diag.equality,
+        fallback_diag.rank,
+    )
+    return NativeHSDCoreResult{T}(
+        fallback.status,
+        fallback.message,
+        fallback.iterations,
+        diagnostics,
+        fallback.reason,
+        fallback.factorizations,
+        fallback.product_status,
+        fallback.recovery_valid,
+        fallback.x,
+        fallback.s,
+        fallback.y,
+    )
+end
+
 """Public direct-native orchestration.  No family lowerer is reachable."""
 function _public_optimize_native_hsd(
     model::Model{T},
@@ -1786,6 +1943,22 @@ function _public_optimize_native_hsd(
         warm_start,
     )
     canonical, _, core = _public_native_hsd_core(model, program, route, settings)
+    if settings.kkt_route === :bordered &&
+       core.status === NumericalBreakdown &&
+       core.reason === :fixed_trace_predictor_residual_failed &&
+       core.iterations <= 1
+        fallback_settings = _native_hsd_route_settings(settings, :expanded)
+        fallback_route = NativeConeRoute(:expanded)
+        _public_validate_native_hsd_policy(
+            model, program, fallback_route, fallback_settings, outputs, warm_start,
+        )
+        fallback_canonical, _, fallback_core = _public_native_hsd_core(
+            model, program, fallback_route, fallback_settings;
+            allow_expanded_bordered_fallback=false,
+        )
+        core = _native_hsd_restarted_core(core, fallback_core)
+        canonical = fallback_canonical
+    end
     return _public_result_from_native_hsd(
         model,
         program,
