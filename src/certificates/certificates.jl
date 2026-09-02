@@ -87,6 +87,96 @@ function _at_negmul!(out::AbstractVector{T}, A::SparseMatrixCSC{T}, v::AbstractV
 end
 
 # ---------------------------------------------------------------------------
+# Independent HSD residual recompute (TASK-P1-CERT Gate B)
+# ---------------------------------------------------------------------------
+# The Optimal verifier must not reuse production residual/scaling helpers:
+# a shared sign, scaling, or norm bug would then hide in both the solver
+# and its acceptance test.  The routines below recompute `rP`, `rD`, `rG`,
+# complementarity, `mu`, and the data-normalized residual from the raw
+# iterate fields with file-local loops only.  The mathematics mirror the
+# frozen HSD equations; no function defined outside this file participates.
+@inline function _cert_maxabs(v::AbstractVector{T}) where {T}
+    a = zero(T)
+    @inbounds for i in eachindex(v)
+        b = v[i] < zero(T) ? -v[i] : v[i]
+        b > a && (a = b)
+    end
+    return a
+end
+
+@inline function _cert_opnorm_inf(M::SparseMatrixCSC{T,Int}) where {T}
+    row_sums = zeros(T, size(M, 1))
+    @inbounds for column in axes(M, 2)
+        for pointer in nzrange(M, column)
+            row_sums[M.rowval[pointer]] += abs(M.nzval[pointer])
+        end
+    end
+    return maximum(row_sums; init=zero(T))
+end
+
+function _cert_residual!(state::HSDState{T}) where {T}
+    A, x, y, svec = state.A, state.x, state.y, state.s
+    b, c, tau, kappa = state.b, state.c, state.tau, state.kappa
+    m, n = state.m, state.n
+    @inbounds for k in 1:m
+        state.rP[k] = svec[k] - b[k] * tau
+    end
+    @inbounds for j in 1:n
+        xj = x[j]
+        for pointer in nzrange(A, j)
+            state.rP[A.rowval[pointer]] += A.nzval[pointer] * xj
+        end
+    end
+    @inbounds for j in 1:n
+        acc = c[j] * tau
+        for pointer in nzrange(A, j)
+            acc += A.nzval[pointer] * y[A.rowval[pointer]]
+        end
+        state.rD[j] = acc
+    end
+    state.rG = dot(c, x) * -one(T) - dot(b, y) + kappa
+    state.complementarity = dot(svec, y) + tau * kappa
+    state.mu = state.complementarity / T(state.nu + 1)
+    return nothing
+end
+
+function _cert_normalized_residual(state::HSDState{T}) where {T}
+    p = zero(T)
+    @inbounds for k in 1:state.m
+        v = state.rP[k]
+        isfinite(v) || return T(Inf)
+        a = abs(v)
+        isfinite(a) || return T(Inf)
+        a > p && (p = a)
+    end
+    d = zero(T)
+    @inbounds for i in 1:state.n
+        v = state.rD[i]
+        isfinite(v) || return T(Inf)
+        a = abs(v)
+        isfinite(a) || return T(Inf)
+        a > d && (d = a)
+    end
+    g = abs(state.rG)
+    isfinite(g) || return T(Inf)
+    numerator = max(p, max(d, g))
+    isfinite(numerator) || return T(Inf)
+    matrix_norm = _cert_opnorm_inf(state.A)
+    rhs_norm = _cert_maxabs(state.b)
+    objective_norm = _cert_maxabs(state.c)
+    isfinite(matrix_norm) && isfinite(rhs_norm) && isfinite(objective_norm) ||
+        return T(Inf)
+    data_norm = matrix_norm + rhs_norm
+    isfinite(data_norm) || return T(Inf)
+    data_norm += objective_norm
+    isfinite(data_norm) || return T(Inf)
+    data_norm += one(T)
+    isfinite(data_norm) && data_norm > zero(T) || return T(Inf)
+    normalized = numerator / data_norm
+    return isfinite(normalized) ? normalized : T(Inf)
+end
+
+# ---------------------------------------------------------------------------
 # Centralized finite gate
 # ---------------------------------------------------------------------------
 # The finite gate must run before every tolerance comparison used for cone
@@ -275,7 +365,7 @@ function verify_optimal!(
     _all_finite(state.x) && _all_finite(state.s) && _all_finite(state.y) &&
         isfinite(state.tau) && isfinite(state.kappa) && isfinite(state.mu) ||
         return false
-    hsd_residual!(state)
+    _cert_residual!(state)
     _all_finite(state.rP) && _all_finite(state.rD) && isfinite(state.rG) ||
         return false
     # τ must be clearly positive: a genuinely optimal recovery needs x/τ, s/τ,
@@ -288,7 +378,7 @@ function verify_optimal!(
     # tau), not in the arbitrarily scaled embedding coordinates.
     inv_tau = inv(state.tau)
     isfinite(inv_tau) || return false
-    normalized_residual = hsd_normalized_residual(state) * inv_tau
+    normalized_residual = _cert_normalized_residual(state) * inv_tau
     isfinite(normalized_residual) && normalized_residual <= tol || return false
     # cone membership: s/τ ∈ K, y/τ ∈ K* (using pre-allocated scratch buffers)
     @inbounds for k in 1:state.m
@@ -368,8 +458,8 @@ function verify_primal_infeasibility!(
     by < -tol || return false
     # A'y ≈ 0 (relative to the ray magnitude)
     _at_vec!(state.workspace.q, canonical_equality(canonical), y)
-    res = _maxabs(state.workspace.q)
-    ray_scale = one(T) + _maxabs(y)
+    res = _cert_maxabs(state.workspace.q)
+    ray_scale = one(T) + _cert_maxabs(y)
     isfinite(res) && isfinite(ray_scale) || return false
     relative_residual = res / ray_scale
     isfinite(relative_residual) && relative_residual <= tol || return false
@@ -385,7 +475,7 @@ function verify_primal_infeasibility!(
         dot(canonical_rhs(canonical), state.yt), tol,
     ) || return false
     _at_vec!(state.workspace.q, canonical_equality(canonical), state.yt)
-    normalized_residual = _maxabs(state.workspace.q)
+    normalized_residual = _cert_maxabs(state.workspace.q)
     isfinite(normalized_residual) && normalized_residual <= tol || return false
     in_canonical_cone(canonical, state.yt; dual=true, tol=tol) || return false
     # push the ray back into original coordinates
