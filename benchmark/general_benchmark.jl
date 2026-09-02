@@ -750,8 +750,8 @@ function run_benchmark(spec::BenchmarkProblemSpec; verbosity::Int=0, time_limit:
     outputs = SDPX.Outputs(
         :all, :all, :all;
         objectives=true,
-        certificate=:full,
-        diagnostics=:none,
+        certificate=:summary,
+        diagnostics=:summary,
         history=false,
         trace=false,
     )
