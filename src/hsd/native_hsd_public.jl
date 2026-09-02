@@ -1390,9 +1390,9 @@ function _public_native_hsd_core(
             reduction,
             route,
             settings;
-            product_rank=size(base.rank_basis, 2),
-            product_rank_ambiguous=base.rank_ambiguous,
-            product_rank_incompatible=base.rank_incompatible,
+            product_rank=size(base.workspace.rank_basis, 2),
+            product_rank_ambiguous=base.workspace.rank_ambiguous,
+            product_rank_incompatible=base.workspace.rank_incompatible,
         )
     end
     core_started = time_ns()

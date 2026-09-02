@@ -1118,15 +1118,15 @@ function _fixed_trace_hsd_residual!(
         _fixed_trace_mul_At_dual_residual!(
             base.rD, core, base.y, base.c, base.tau,
         )
-        if _hsd_is_identity_basis(base.rank_basis)
-            copyto!(base.rDr, base.rD)
+        if _hsd_is_identity_basis(base.workspace.rank_basis)
+            copyto!(base.workspace.rDr, base.rD)
         else
-            @inbounds for j in 1:base.nr
+            @inbounds for j in 1:base.workspace.nr
                 acc = zero(T)
                 for i in 1:base.n
-                    acc += base.rank_basis[i, j] * base.rD[i]
+                    acc += base.workspace.rank_basis[i, j] * base.rD[i]
                 end
-                base.rDr[j] = acc
+                base.workspace.rDr[j] = acc
             end
         end
     else

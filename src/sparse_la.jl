@@ -27,6 +27,30 @@ supports_sparse_generic(::Type{Float64}) = false
 supports_sparse_execution(::Type{Float64}) = true
 supports_sparse_execution(::Type{T}) where {T} = supports_sparse_generic(T)
 
+# Restored P0 gate (TASK-P0-SPARSE-AUGMENTED): the dead-code excision of
+# `src/workspace.jl` deleted this predicate while `src/pipeline/classify.jl`
+# and `src/pipeline/workspace_estimate.jl` still call it.  Definition is
+# verbatim from `workspace.jl` (pre-excision) so sparse-plan paths resolve
+# instead of throwing `UndefVarError`.
+function _use_sparse_schur_sdp(prob::SDPProblem{T}) where {T}
+    sizeof(Int) >= 8 || return false
+    supports_sparse_execution(T) || return false
+    # The frozen SPD sparse path has no pivoted sparse saddle-point solver.
+    # Equality-bearing requests therefore remain dense (or an exact arrow
+    # reduction selected before this predicate) and never allocate a sparse
+    # workspace that would need an implicit fallback.
+    prob.dims.n == 0 || return false
+    prob.cons isa SparseCons{T} || return false
+    # The Schur planner is authoritative.  It has already compared the
+    # structural nnz estimate with the deterministic density/memory rule, so
+    # no numeric try-sparse/fallback decision is made here.  Explicit sparse
+    # requests are represented by the same plan and therefore remain
+    # inspectable before workspace construction.
+    plan = prob.structure.schur_plan
+    plan.storage === :sparse || return false
+    return true
+end
+
 _sparse_provider(::Type{Float64}) = CHOLMODSparseProvider()
 _sparse_provider(::Type{T}) where {T} = supports_sparse_generic(T) ?
     GenericSparseProvider{T}() : throw(ArgumentError(

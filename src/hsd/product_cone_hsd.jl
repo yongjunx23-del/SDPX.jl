@@ -276,7 +276,7 @@ function _product_cone_hsd_state(
         offsets[block_index] = block.offset
     end
     ns_schur = prepare_symmetric_core ? nothing :
-        NonsymmetricSchur3Workspace(base.Ar, offsets)
+        NonsymmetricSchur3Workspace(base.workspace.Ar, offsets)
     # GPTPro I2: the cone traits (runtime Exp/Power block lists) are fixed at
     # setup, so a model without nonsymmetric blocks is known never to execute
     # the hybrid coupled Newton route.  Pure LP/SOC/PSD models keep `coupled`
@@ -285,12 +285,12 @@ function _product_cone_hsd_state(
     # are constructed only when Exp/Power blocks exist, and always before the
     # hot loop (never on first use inside an epoch).
     coupled = (!prepare_symmetric_core && block_count > 0) ?
-        NonsymmetricCoupledWorkspace(base.Ar, base.nr, offsets) : nothing
+        NonsymmetricCoupledWorkspace(base.workspace.Ar, base.workspace.nr, offsets) : nothing
     # The symmetric product route intentionally owns a pivoted full-border
-    # LPLU. `base.driver` remains part of the generic HSD storage contract but
+    # LPLU. `base.workspace.driver` remains part of the generic HSD storage contract but
     # is never factored by this route, even when a caller supplied it.
     symmetric_bordered = prepare_symmetric_core ? nothing :
-        SymmetricBorderedWorkspace(T, base.nr)
+        SymmetricBorderedWorkspace(T, base.workspace.nr)
     # Expanded storage is opt-in ownership, not an eager shadow workspace.
     # The default bordered route must not pay the dense O((n+m)^2) memory cost
     # of a factorization session it can never execute.
@@ -328,14 +328,14 @@ function _product_cone_hsd_state(
     # pure O(nr^2) allocation that the hot path never touches.  Only allocate
     # them when a nonsymmetric Schur session actually exists.
     has_ns_schur = ns_schur !== nothing
-    ns_H = has_ns_schur ? zeros(T, base.nr, base.nr) : Matrix{T}(undef, 0, 0)
+    ns_H = has_ns_schur ? zeros(T, base.workspace.nr, base.workspace.nr) : Matrix{T}(undef, 0, 0)
     ns_metrics = has_ns_schur ? zeros(T, 3, 3, block_count) : zeros(T, 3, 3, 0)
-    ns_at_g_b = has_ns_schur ? zeros(T, base.nr) : T[]
-    ns_bt_g_a = has_ns_schur ? zeros(T, base.nr) : T[]
-    ns_at_g_rhs = has_ns_schur ? zeros(T, base.nr) : T[]
+    ns_at_g_b = has_ns_schur ? zeros(T, base.workspace.nr) : T[]
+    ns_bt_g_a = has_ns_schur ? zeros(T, base.workspace.nr) : T[]
+    ns_at_g_rhs = has_ns_schur ? zeros(T, base.workspace.nr) : T[]
     ns_zero_rhs = has_ns_schur ? zeros(T, m) : T[]
     parallel_schur = !prepare_symmetric_core && block_count == 0 &&
-        isempty(runtime.psd) && base.nr > 1 && schur_threads > 1 &&
+        isempty(runtime.psd) && base.workspace.nr > 1 && schur_threads > 1 &&
         schur_threads >= Threads.nthreads()
     schur_slots = parallel_schur ? Threads.maxthreadid() : 0
     schur_g_inputs = [zeros(T, m) for _ in 1:schur_slots]
@@ -463,7 +463,7 @@ function _prepare_product_hsd_symmetric_core(
 ) where {T<:AbstractFloat,R<:AbstractFactorCache{T}}
     m = base.m
     n = base.n
-    nr = base.nr
+    nr = base.workspace.nr
     blocks = layout_blocks(base.canonical.cone_layout)
     effective_precision = precision_bits == 0 ? (
         T === BigFloat ? precision(BigFloat) : sig_bits(T)
@@ -529,7 +529,7 @@ function _prepare_product_hsd_symmetric_core(
     )
     return prepare_symmetric_core_state(
         system,
-        base.rank_basis,
+        base.workspace.rank_basis,
         block_ranges,
         block_sizes,
         effective_precision,
@@ -990,8 +990,8 @@ Base.@noinline function _product_hsd_form_schur_column!(
     g_input::Vector{T}, g_output::Vector{T},
 ) where {T}
     base = state.base
-    A = base.Ar
-    H = base.H
+    A = base.workspace.Ar
+    H = base.workspace.H
     fill!(g_input, zero(T))
     @inbounds for ptr in nzrange(A, j)
         g_input[A.rowval[ptr]] = A.nzval[ptr]
@@ -1018,9 +1018,9 @@ Base.@noinline function _product_hsd_form_schur_border!(
     state::ProductConeHSDState{T},
 ) where {T}
     base = state.base
-    A = base.Ar
-    H = base.H
-    nr = base.nr
+    A = base.workspace.Ar
+    H = base.workspace.H
+    nr = base.workspace.nr
     fill!(H, zero(T))
     if isempty(state.schur_g_inputs)
         @inbounds for j in 1:nr
@@ -1066,9 +1066,9 @@ Base.@noinline function _product_hsd_form_schur_border!(
             atgb += A.nzval[ptr] * state.gb[A.rowval[ptr]]
         end
         has_nonsymmetric && (atgb += state.ns_at_g_b[j])
-        cj = base.cr[j]
-        base.qr[j] = cj - atgb
-        base.rvec[j] = base.tau * (cj + atgb)
+        cj = base.workspace.cr[j]
+        base.workspace.qr[j] = cj - atgb
+        base.workspace.rvec[j] = base.tau * (cj + atgb)
     end
     return base.kappa - base.tau * bgb
 end
@@ -1171,17 +1171,17 @@ end
         workspace.last_reason = SYMMETRIC_BORDERED_ORDER_FAILED
         return false
     end
-    nr == base.nr && n == nr + 1 || begin
+    nr == base.workspace.nr && n == nr + 1 || begin
         workspace.last_reason = SYMMETRIC_BORDERED_ORDER_FAILED
         return false
     end
 
     @inbounds for j in 1:nr
         for i in 1:nr
-            workspace.matrix[i, j] = base.H[i, j]
+            workspace.matrix[i, j] = base.workspace.H[i, j]
         end
-        workspace.matrix[j, n] = base.qr[j]
-        workspace.matrix[n, j] = base.rvec[j]
+        workspace.matrix[j, n] = base.workspace.qr[j]
+        workspace.matrix[n, j] = base.workspace.rvec[j]
     end
     workspace.matrix[n, n] = border_scalar
 
@@ -1443,7 +1443,7 @@ inverse.
     # failure can never leave the old factor looking current.
     workspace.factor_receipt = nothing
     K = workspace.matrix
-    nr = base.nr
+    nr = base.workspace.nr
     nsdim = workspace.nonsymmetric_dimension
     dual_row0 = nsdim
     dy_col0 = nr
@@ -1455,11 +1455,11 @@ inverse.
 
     # Static A_N coefficients in C_N and D.
     @inbounds for j in 1:nr
-        for pointer in nzrange(base.Ar, j)
-            row = base.Ar.rowval[pointer]
+        for pointer in nzrange(base.workspace.Ar, j)
+            row = base.workspace.Ar.rowval[pointer]
             local_row = workspace.row_to_local[row]
             iszero(local_row) && continue
-            value = base.Ar.nzval[pointer]
+            value = base.workspace.Ar.nzval[pointer]
             K[local_row, j] -= value
             K[dual_row0 + j, dy_col0 + local_row] += value
         end
@@ -1496,9 +1496,9 @@ inverse.
     end
     @inbounds for j in 1:nr
         dj = zero(T)
-        for pointer in nzrange(base.Ar, j)
-            row = base.Ar.rowval[pointer]
-            dj += base.Ar.nzval[pointer] * state.gb[row]
+        for pointer in nzrange(base.workspace.Ar, j)
+            row = base.workspace.Ar.rowval[pointer]
+            dj += base.workspace.Ar.nzval[pointer] * state.gb[row]
         end
         state.ns_at_g_b[j] = dj
     end
@@ -1507,18 +1507,18 @@ inverse.
     # sparse contractions below cannot double count an Exp/Power block.
     @inbounds for column in 1:nr
         fill!(state.g_input, zero(T))
-        for pointer in nzrange(base.Ar, column)
-            state.g_input[base.Ar.rowval[pointer]] +=
-                base.Ar.nzval[pointer]
+        for pointer in nzrange(base.workspace.Ar, column)
+            state.g_input[base.workspace.Ar.rowval[pointer]] +=
+                base.workspace.Ar.nzval[pointer]
         end
         _product_hsd_apply_symmetric_G!(
             runtime, state.g_output, state.g_input,
         )
         for row_column in 1:nr
             value = zero(T)
-            for pointer in nzrange(base.Ar, row_column)
-                row = base.Ar.rowval[pointer]
-                value += base.Ar.nzval[pointer] * state.g_output[row]
+            for pointer in nzrange(base.workspace.Ar, row_column)
+                row = base.workspace.Ar.rowval[pointer]
+                value += base.workspace.Ar.nzval[pointer] * state.g_output[row]
             end
             K[dual_row0 + row_column, column] = value
         end
@@ -1526,8 +1526,8 @@ inverse.
 
     @inbounds for j in 1:nr
         dj = state.ns_at_g_b[j]
-        K[dual_row0 + j, dtau_column] = base.cr[j] - dj
-        K[gap_row, j] = -(base.cr[j] + dj)
+        K[dual_row0 + j, dtau_column] = base.workspace.cr[j] - dj
+        K[gap_row, j] = -(base.workspace.cr[j] + dj)
     end
     K[gap_row, dtau_column] = beta
     K[gap_row, dkappa_column] = one(T)
@@ -1574,7 +1574,7 @@ end
     base = state.base
     workspace = state.coupled
     rhs = workspace.rhs
-    nr = base.nr
+    nr = base.workspace.nr
     nsdim = workspace.nonsymmetric_dimension
     dual_row0 = nsdim
     gap_row = nsdim + nr + 1
@@ -1593,12 +1593,12 @@ end
     end
     @inbounds for j in 1:nr
         pj = zero(T)
-        for pointer in nzrange(base.Ar, j)
-            row = base.Ar.rowval[pointer]
-            pj += base.Ar.nzval[pointer] * state.g_output[row]
+        for pointer in nzrange(base.workspace.Ar, j)
+            row = base.workspace.Ar.rowval[pointer]
+            pj += base.workspace.Ar.nzval[pointer] * state.g_output[row]
         end
         state.ns_at_g_rhs[j] = pj
-        rhs[dual_row0 + j] = -base.rDr[j] - pj
+        rhs[dual_row0 + j] = -base.workspace.rDr[j] - pj
     end
     zeta = zero(T)
     @inbounds for row in 1:base.m
@@ -1624,7 +1624,7 @@ end
 ) where {T}
     base = state.base
     workspace = state.coupled
-    nr = base.nr
+    nr = base.workspace.nr
     nsdim = workspace.nonsymmetric_dimension
     dtau_index = nr + nsdim + 1
     dkappa_index = dtau_index + 1
@@ -1640,7 +1640,7 @@ end
     end
     physical = workspace.physical_solution
     @inbounds for j in 1:nr
-        base.dxr[j] = physical[j]
+        base.workspace.dxr[j] = physical[j]
     end
     base.dtau = physical[dtau_index]
     base.dkappa = physical[dkappa_index]
@@ -1689,13 +1689,13 @@ end
     _product_hsd_apply_symmetric_G!(
         state.runtime, state.g_output, state.g_input,
     )
-    A = base.Ar
-    @inbounds for j in 1:base.nr
+    A = base.workspace.Ar
+    @inbounds for j in 1:base.workspace.nr
         acc = zero(T)
         for ptr in nzrange(A, j)
             acc += A.nzval[ptr] * state.g_output[A.rowval[ptr]]
         end
-        base.rhs[j] = -base.rDr[j] - acc
+        base.workspace.rhs[j] = -base.workspace.rDr[j] - acc
     end
     bsum = zero(T)
     @inbounds for k in 1:base.m
@@ -1706,8 +1706,8 @@ end
             state, state.g_input,
         )
         ns_result.status === NS_SCHUR3_ASSEMBLED || return T(NaN)
-        @inbounds for j in 1:base.nr
-            base.rhs[j] -= state.ns_at_g_rhs[j]
+        @inbounds for j in 1:base.workspace.nr
+            base.workspace.rhs[j] -= state.ns_at_g_rhs[j]
         end
         bsum += ns_result.b_g_rhs
     end
@@ -2179,12 +2179,12 @@ end
         end
         isfinite(residual) && isfinite(local_work) || return false
 
-        propagated = if _hsd_is_identity_basis(base.rank_basis)
+        propagated = if _hsd_is_identity_basis(base.workspace.rank_basis)
             workspace.certified_physical_bound[i]
         else
             sum_terms = zero(T)
-            for j in 1:base.nr
-                term = abs(base.rank_basis[i, j]) *
+            for j in 1:base.workspace.nr
+                term = abs(base.workspace.rank_basis[i, j]) *
                        workspace.certified_physical_bound[j]
                 isfinite(term) || return false
                 sum_terms += term
@@ -2612,8 +2612,8 @@ end
     end
     bsum = _product_hsd_rhs!(state)
     rho = scalar_rhs + base.tau * base.rG - base.tau * bsum
-    @inbounds for i in 1:base.nr
-        value = base.rhs[i]
+    @inbounds for i in 1:base.workspace.nr
+        value = base.workspace.rhs[i]
         isfinite(value) || begin
             workspace.last_reason = SYMMETRIC_BORDERED_RHS_FAILED
             return false
@@ -2646,8 +2646,8 @@ end
     base = state.base
     workspace = state.symmetric_bordered
     _product_hsd_prepare_bordered_rhs!(state, scalar_rhs) || return false
-    @inbounds for i in 1:base.nr
-        value = base.dxr[i]
+    @inbounds for i in 1:base.workspace.nr
+        value = base.workspace.dxr[i]
         isfinite(value) || return false
         workspace.solution[i] = value
     end
@@ -2750,8 +2750,8 @@ end
         workspace.last_reason = SYMMETRIC_BORDERED_ORIGINAL_CERT_FAILED
         return false
     end
-    @inbounds for i in 1:base.nr
-        base.dxr[i] = workspace.solution[i]
+    @inbounds for i in 1:base.workspace.nr
+        base.workspace.dxr[i] = workspace.solution[i]
     end
     base.dtau = workspace.solution[end]
     _hsd_scatter_dx!(base)
@@ -2816,15 +2816,15 @@ end
     copyto!(base.rD, base.rDt)
     copyto!(state.h, base.st)
     base.rG = original_rG
-    if _hsd_is_identity_basis(base.rank_basis)
-        copyto!(base.rDr, base.rD)
+    if _hsd_is_identity_basis(base.workspace.rank_basis)
+        copyto!(base.workspace.rDr, base.rD)
     else
-        @inbounds for j in 1:base.nr
+        @inbounds for j in 1:base.workspace.nr
             acc = zero(T)
             for i in 1:base.n
-                acc += base.rank_basis[i, j] * base.rD[i]
+                acc += base.workspace.rank_basis[i, j] * base.rD[i]
             end
-            base.rDr[j] = acc
+            base.workspace.rDr[j] = acc
         end
     end
     return nothing
@@ -2844,15 +2844,15 @@ end
         end
     end
     if !reduced_authoritative
-        if _hsd_is_identity_basis(base.rank_basis)
-            copyto!(base.dxr, base.dx)
+        if _hsd_is_identity_basis(base.workspace.rank_basis)
+            copyto!(base.workspace.dxr, base.dx)
         else
-            @inbounds for j in 1:base.nr
+            @inbounds for j in 1:base.workspace.nr
                 acc = zero(T)
                 for i in 1:base.n
-                    acc += base.rank_basis[i, j] * base.dx[i]
+                    acc += base.workspace.rank_basis[i, j] * base.dx[i]
                 end
-                base.dxr[j] = acc
+                base.workspace.dxr[j] = acc
             end
         end
     end
@@ -2954,15 +2954,15 @@ end
             end
             base.rD[j] = dual_residual
         end
-        if _hsd_is_identity_basis(base.rank_basis)
-            copyto!(base.rDr, base.rD)
+        if _hsd_is_identity_basis(base.workspace.rank_basis)
+            copyto!(base.workspace.rDr, base.rD)
         else
-            @inbounds for j in 1:base.nr
+            @inbounds for j in 1:base.workspace.nr
                 acc = zero(T)
                 for i in 1:base.n
-                    acc = muladd(base.rank_basis[i, j], base.rD[i], acc)
+                    acc = muladd(base.workspace.rank_basis[i, j], base.rD[i], acc)
                 end
-                base.rDr[j] = acc
+                base.workspace.rDr[j] = acc
             end
         end
         gap_residual = original_rG + base.dkappa
@@ -3026,8 +3026,8 @@ end
             workspace.last_reason = SYMMETRIC_BORDERED_SOLVE_FAILED
             return false
         end
-        @inbounds for j in 1:base.nr
-            base.dxr[j] = workspace.solution[j]
+        @inbounds for j in 1:base.workspace.nr
+            base.workspace.dxr[j] = workspace.solution[j]
         end
         base.dtau = workspace.solution[end]
         workspace.accumulated_candidate = true
@@ -3238,9 +3238,9 @@ public result, or fall back to a legacy/lifted route.
     catch
         return HSDStepDirectionFailed
     end
-    (_hsd_matrix_finite(base.H) && isfinite(border_scalar) &&
-     _product_hsd_vector_finite(base.qr) &&
-     _product_hsd_vector_finite(base.rvec)) || return HSDStepDirectionFailed
+    (_hsd_matrix_finite(base.workspace.H) && isfinite(border_scalar) &&
+     _product_hsd_vector_finite(base.workspace.qr) &&
+     _product_hsd_vector_finite(base.workspace.rvec)) || return HSDStepDirectionFailed
     assembled = try
         _product_hsd_assemble_bordered!(state, border_scalar)
     catch
@@ -3352,8 +3352,8 @@ end
 
 function product_hsd_step!(state::ProductConeHSDState{T}) where {T}
     base = state.base
-    base.rank_ambiguous && return HSDStepDirectionFailed
-    base.rank_incompatible && return HSDStepDirectionFailed
+    base.workspace.rank_ambiguous && return HSDStepDirectionFailed
+    base.workspace.rank_incompatible && return HSDStepDirectionFailed
     timings = state.phase_timings
     t0 = time_ns()
     _product_hsd_residual!(state)

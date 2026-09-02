@@ -158,26 +158,10 @@ mutable struct HSDState{T, R<:AbstractFactorCache{T}}
     epoch::Int
 end
 
-# Source-compatible transition accessors.  The names intentionally are not
-# fields of HSDState; `fieldnames(HSDState)` therefore exposes the ownership
-# boundary while existing numerical kernels can migrate incrementally.
-const _HSD_BORDERED_PROPERTIES = (
-    :At, :Ad, :Ar, :Atr, :cr, :nr, :orthant_only, :rank_basis,
-    :rank_null_objective, :rank_ambiguous, :rank_incompatible, :rank_ray,
-    :rDr, :driver, :H, :rhs, :q, :qr, :rvec, :u, :w, :dxr,
-    :equality_mode, :equality_status,
-)
-@inline function Base.getproperty(state::HSDState, name::Symbol)
-    if name in _HSD_BORDERED_PROPERTIES
-        return getproperty(getfield(state, :workspace), name)
-    end
-    return getfield(state, name)
-end
-@inline function Base.propertynames(state::HSDState, private::Bool=false)
-    names = fieldnames(typeof(state))
-    return private ? (names..., _HSD_BORDERED_PROPERTIES...) :
-                     (names..., _HSD_BORDERED_PROPERTIES...)
-end
+# Ownership boundary (TASK-P0-TYPED-CORE).  The route-owned names below are
+# fields of `BorderedHSDWorkspace`, never of `HSDState`; all numerical
+# kernels address them as `state.workspace.<name>`.  No `getproperty` shim
+# exists, so any direct `state.<name>` access fails loudly at compile time.
 
 # ---------------------------------------------------------------------------
 # Setup-time orthogonal row-space reduction
@@ -512,7 +496,7 @@ end
 
 hsd_nu(state::HSDState) = state.nu
 hsd_has_variables(state::HSDState) = state.n
-hsd_effective_variables(state::HSDState) = state.nr
+hsd_effective_variables(state::HSDState) = state.workspace.nr
 hsd_num_slack(state::HSDState) = state.m
 
 """
@@ -546,15 +530,15 @@ function hsd_dual_residual!(state::HSDState{T}) where {T}
     end
     # Keep the full residual for certificates/diagnostics and project it onto
     # the orthonormal row-space coordinates for the bordered Newton RHS.
-    if _hsd_is_identity_basis(state.rank_basis)
-        copyto!(state.rDr, state.rD)
+    if _hsd_is_identity_basis(state.workspace.rank_basis)
+        copyto!(state.workspace.rDr, state.rD)
     else
-        @inbounds for j in 1:state.nr
+        @inbounds for j in 1:state.workspace.nr
             acc = zero(T)
             for i in 1:state.n
-                acc += state.rank_basis[i, j] * state.rD[i]
+                acc += state.workspace.rank_basis[i, j] * state.rD[i]
             end
-            state.rDr[j] = acc
+            state.workspace.rDr[j] = acc
         end
     end
     return state.rD

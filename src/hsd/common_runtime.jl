@@ -9,15 +9,15 @@
 # reduced equality-map direction.  No original coordinate is selected or
 # forced to zero.
 @inline function _hsd_scatter_dx!(state::HSDState{T}) where {T}
-    V = state.rank_basis
+    V = state.workspace.rank_basis
     if _hsd_is_identity_basis(V)
-        copyto!(state.dx, state.dxr)
+        copyto!(state.dx, state.workspace.dxr)
         return state.dx
     end
     @inbounds for i in 1:state.n
         acc = zero(T)
-        for j in 1:state.nr
-            acc += V[i, j] * state.dxr[j]
+        for j in 1:state.workspace.nr
+            acc += V[i, j] * state.workspace.dxr[j]
         end
         state.dx[i] = acc
     end
@@ -112,8 +112,8 @@ end
     r.mu = state.mu
     r.mu_aff = state.mu_aff
     r.complementarity = state.complementarity
-    r.matrix_epoch = kkt_matrix_epoch(state.driver)
-    r.factor_epoch = kkt_factor_epoch(state.driver)
-    r.factorizations = kkt_factor_count(state.driver)
+    r.matrix_epoch = kkt_matrix_epoch(state.workspace.driver)
+    r.factor_epoch = kkt_factor_epoch(state.workspace.driver)
+    r.factorizations = kkt_factor_count(state.workspace.driver)
     return r
 end

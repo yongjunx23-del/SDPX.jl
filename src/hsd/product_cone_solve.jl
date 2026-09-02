@@ -104,7 +104,7 @@ function _product_hsd_refined_optimal_result!(
     # explicit target-arithmetic dense copy rather than silently lowering to
     # Float64. The copy exists only for a terminal candidate; Newton epochs
     # remain sparse. Oversized candidates fail closed before allocation.
-    A = base.Ad
+    A = base.workspace.Ad
     refinement_A = if A isa SparseMatrixCSC && T !== Float64
         scalar_bytes = ExtendedPrecisionBLAS._element_storage_bytes(T)
         required = saturating_bytes(scalar_bytes, size(A,1), size(A,2))
@@ -447,15 +447,15 @@ function product_hsd_solve!(
     s_original = zeros(T, base.m)
     y_original = zeros(T, base.m)
 
-    if base.rank_ambiguous
+    if base.workspace.rank_ambiguous
         return _product_hsd_make_result(
             state, ProductHSDRankAmbiguous, ProductHSDRankAmbiguousSetup,
             HSDStepDirectionFailed, zero(T), x_original, s_original,
             y_original,
         )
     end
-    if base.rank_incompatible
-        copyto!(base.x, base.rank_ray)
+    if base.workspace.rank_incompatible
+        copyto!(base.x, base.workspace.rank_ray)
         if verify_dual_infeasibility!(
             base.canonical, base, x_original, s_original; tol=certificate_tol,
         )

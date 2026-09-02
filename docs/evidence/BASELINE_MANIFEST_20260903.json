@@ -1,0 +1,10 @@
+{
+  "task": "TASK-P0-BASELINE",
+  "candidate_branch": "release/v0.6.1",
+  "candidate_sha": "077c520df8348e8f9b4004c8e5abecd40b4de964",
+  "origin_main_sha": "f7346d0d507837c66e79cfcaaa66e2e6811e046e",
+  "julia": "julia version 1.12.6",
+  "manifest_oracle_sha256": "76439275808a9910c34d3a8f147621e0283f953719c43d68e40241db3102df5b",
+  "typed_rows_sha256": "3e0e5366bdc4ad9aba0be8988bbda732d3e2d232774881dc848359c97038cd74",
+  "notes": "pre-P0-TYPED-CORE baseline; shim still present at this commit"
+}

@@ -367,8 +367,8 @@ function verify_primal_infeasibility!(
     isfinite(by) || return false
     by < -tol || return false
     # A'y ≈ 0 (relative to the ray magnitude)
-    _at_vec!(state.q, canonical_equality(canonical), y)
-    res = _maxabs(state.q)
+    _at_vec!(state.workspace.q, canonical_equality(canonical), y)
+    res = _maxabs(state.workspace.q)
     ray_scale = one(T) + _maxabs(y)
     isfinite(res) && isfinite(ray_scale) || return false
     relative_residual = res / ray_scale
@@ -384,8 +384,8 @@ function verify_primal_infeasibility!(
     _certificate_unit_normalization_ok(
         dot(canonical_rhs(canonical), state.yt), tol,
     ) || return false
-    _at_vec!(state.q, canonical_equality(canonical), state.yt)
-    normalized_residual = _maxabs(state.q)
+    _at_vec!(state.workspace.q, canonical_equality(canonical), state.yt)
+    normalized_residual = _maxabs(state.workspace.q)
     isfinite(normalized_residual) && normalized_residual <= tol || return false
     in_canonical_cone(canonical, state.yt; dual=true, tol=tol) || return false
     # push the ray back into original coordinates
