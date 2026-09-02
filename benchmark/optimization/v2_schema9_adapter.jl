@@ -58,11 +58,12 @@ function profile_v2_target(catalog, instance, precision; warmup=true, samples=3)
     samples == 3 || throw(ArgumentError("schema-v9 adapter requires exactly three samples"))
     instance.reference.status === :optimal ||
         throw(ArgumentError("schema-v9 adapter currently accepts optimal targets only"))
+    instance.split === :train ||
+        throw(ArgumentError("schema-v9 adapter accepts training instances only: $(instance.id)"))
     get(instance.provenance, :solve_eligible, false) === true ||
         throw(ArgumentError("target is not solve-eligible: $(instance.id)"))
-    any(x -> x.id === instance.id && x.split === :train,
-        V2.training_instances(catalog)) ||
-        throw(ArgumentError("schema-v9 adapter accepts training instances only: $(instance.id)"))
+    any(x -> x === instance, V2.training_instances(catalog)) ||
+        throw(ArgumentError("schema-v9 adapter accepts the supplied catalog training instance by identity: $(instance.id)"))
     warmup || throw(ArgumentError("schema-v9 adapter requires one excluded warmup"))
 
     _run_once(catalog, instance, precision)
@@ -74,7 +75,8 @@ function profile_v2_target(catalog, instance, precision; warmup=true, samples=3)
         throw(ArgumentError("V2 target failed an independent reference gate"))
     length(unique(r.iterations for r in results)) == 1 ||
         throw(ArgumentError("V2 target iteration count is nondeterministic"))
-    length(unique(r.objective for r in results)) == 1 ||
+    sample_objective_strings = [r.objective for r in results]
+    length(unique(sample_objective_strings)) == 1 ||
         throw(ArgumentError("V2 target objective string is nondeterministic"))
     routes = [r.route_receipt for r in results]
     routes[2:end] == routes[1:end-1] ||
@@ -86,6 +88,9 @@ function profile_v2_target(catalog, instance, precision; warmup=true, samples=3)
     catalog_fp = V2.catalog_fingerprint(catalog)
     route = routes[1]
     objectives = [parse(Float64, r.objective) for r in results]
+    length(unique(objectives)) == 1 ||
+        throw(ArgumentError("V2 target observed objective is nondeterministic after parsing"))
+    observed_objective = only(unique(objectives))
     seconds = [m.wall_seconds for m in measured]
     core_seconds = [r.core_seconds === nothing ? nothing : Float64(r.core_seconds) for r in results]
     recovery_seconds = [r.recovery_seconds === nothing ? nothing : Float64(r.recovery_seconds) for r in results]
@@ -186,9 +191,13 @@ function profile_v2_target(catalog, instance, precision; warmup=true, samples=3)
         family=String(instance.family), tier=String(instance.tier.name),
         arithmetic=String(precision.name), solve_eligible=true, build_only=false,
         source=instance.source, status="optimal", certificate_valid=true,
-        semantic_pass=true, objective=reference_objective,
+        # This is the deterministic measured objective; the independent
+        # interval midpoint is carried separately as reference_objective.
+        # This is the deterministic measured objective; the independent
+        # interval midpoint is carried separately as reference_objective.
+        semantic_pass=true, objective=observed_objective,
         iterations=first(results).iterations, sample_seconds=seconds,
-        sample_core_seconds=Float64[x === nothing ? 0.0 : x for x in core_seconds], setup_seconds=first(results).setup_seconds,
+        sample_core_seconds=Union{Nothing,Float64}[x for x in core_seconds], setup_seconds=first(results).setup_seconds,
         allocation_bytes=Int[m.allocated_bytes for m in measured],
         sample_iterations=Int[r.iterations for r in results],
         peak_rss_bytes=nothing, reference_status="optimal",
@@ -248,10 +257,10 @@ function schema9_row(row::P.ProfileRow)
     values[:objective_interval_lower] = row.reference_lower
     values[:objective_interval_upper] = row.reference_upper
     values[:objective_in_reference_interval] = row.reference_lower !== nothing &&
-        row.reference_upper !== nothing && row.objective >= row.reference_lower &&
-        row.objective <= row.reference_upper
+        row.reference_upper !== nothing && all(x -> row.reference_lower <= x <= row.reference_upper,
+            row.sample_objective)
     values[:objective_error] = row.reference_objective === nothing ? missing :
-        abs(row.objective - row.reference_objective)
+        maximum(abs.(row.sample_objective .- row.reference_objective))
     values[:certificate_kind] = get(row.receipt, "certificate_kind", "optimal")
     values[:certificate_failures] = ""
     values[:certificate_policy] = "strict_original_coordinate"
@@ -266,7 +275,9 @@ function schema9_row(row::P.ProfileRow)
     values[:semantic_pass] = row.semantic_pass
     values[:semantic_failures] = ""
     values[:total_seconds] = P._median(row.sample_seconds)
-    values[:core_seconds] = P._median(row.sample_core_seconds)
+    core_samples = row.sample_core_seconds
+    values[:core_seconds] = (isempty(core_samples) || any(isnothing, core_samples) ||
+        any(x -> !isfinite(x), core_samples)) ? missing : P._median(core_samples)
     values[:sample_count] = length(row.sample_seconds)
     values[:sample_seconds] = row.sample_seconds
     values[:sample_semantic_pass] = row.sample_semantic_pass
@@ -286,7 +297,8 @@ function schema9_row(row::P.ProfileRow)
     # decomposition is unavailable, so these fields remain missing.
     values[:setup_seconds] = missing
     values[:frontend_seconds] = row.setup_seconds
-    values[:core_seconds] = P._median(row.sample_core_seconds)
+    values[:core_seconds] = (isempty(core_samples) || any(isnothing, core_samples) ||
+        any(x -> !isfinite(x), core_samples)) ? missing : P._median(core_samples)
     values[:process_peak_rss_bytes] = row.peak_rss_bytes
     values[:memory_budget_bytes] = 4 * 1024^3
     values[:phase_consistent] = get(row.receipt, "phase_accounting_complete", missing)

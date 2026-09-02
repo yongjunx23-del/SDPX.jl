@@ -318,6 +318,35 @@ end
     @test isempty(afiro.parity_sha256)
     @test length(afiro.sha256) == 64
     @test length(afiro.parsed_fingerprint) == 64
+    # Eligibility is recomputed from metadata, not trusted from the stored bit.
+    forged_pending = GenericConicBenchmark.ExternalHoldoutSpec(
+        afiro.id, afiro.library, afiro.family, afiro.tier, afiro.split,
+        afiro.relative_path, afiro.source_url, afiro.license_note, afiro.sha256,
+        afiro.parsed_fingerprint, afiro.official_status, afiro.objective_interval,
+        true, afiro.parity_sha256, true, afiro.note)
+    @test !GenericConicBenchmark.external_case_complete(forged_pending)
+    @test_throws ArgumentError GenericConicBenchmark.validate_external_holdout_spec(forged_pending)
+    forged_missing = GenericConicBenchmark.ExternalHoldoutSpec(
+        afiro.id, afiro.library, afiro.family, afiro.tier, afiro.split,
+        afiro.relative_path, afiro.source_url, afiro.license_note, afiro.sha256,
+        afiro.parsed_fingerprint, afiro.official_status, afiro.objective_interval,
+        false, "", true, afiro.note)
+    @test !GenericConicBenchmark.external_case_complete(forged_missing)
+    @test_throws ArgumentError GenericConicBenchmark.validate_external_holdout_spec(forged_missing)
+    forged_malformed = GenericConicBenchmark.ExternalHoldoutSpec(
+        afiro.id, afiro.library, afiro.family, afiro.tier, afiro.split,
+        afiro.relative_path, afiro.source_url, afiro.license_note, afiro.sha256,
+        afiro.parsed_fingerprint, afiro.official_status, afiro.objective_interval,
+        false, repeat("z", 64), true, afiro.note)
+    @test !GenericConicBenchmark.external_case_complete(forged_malformed)
+    @test_throws ArgumentError GenericConicBenchmark.validate_external_holdout_spec(forged_malformed)
+    forged_path = GenericConicBenchmark.ExternalHoldoutSpec(
+        afiro.id, afiro.library, afiro.family, afiro.tier, :invalid_split,
+        "../outside.mps", afiro.source_url, afiro.license_note, afiro.sha256,
+        afiro.parsed_fingerprint, afiro.official_status, afiro.objective_interval,
+        false, afiro.parity_sha256, true, afiro.note)
+    @test !GenericConicBenchmark.external_case_complete(forged_path)
+    @test_throws ArgumentError GenericConicBenchmark.validate_external_holdout_spec(forged_path)
     deferred = only(filter(spec -> spec.id === :netlib_share2b,
         GenericConicBenchmark.external_holdout_inventory()))
     @test !deferred.solve_eligible

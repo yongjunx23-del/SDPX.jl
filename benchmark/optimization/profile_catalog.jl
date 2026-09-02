@@ -44,7 +44,7 @@ Base.@kwdef struct ProfileRow
     objective::Union{Nothing,Float64} = nothing
     iterations::Int = 0
     sample_seconds::Vector{Float64} = Float64[]
-    sample_core_seconds::Vector{Float64} = Float64[]
+    sample_core_seconds::Vector{Union{Nothing,Float64}} = Union{Nothing,Float64}[]
     setup_seconds::Union{Nothing,Float64} = nothing
     allocation_bytes::Vector{Int} = Int[]
     sample_iterations::Vector{Int} = Int[]
@@ -458,14 +458,14 @@ function select_max_target(rows; metric=:core_seconds)
     for row in rows
         row.solve_eligible && !row.build_only && row.semantic_pass && row.certificate_valid || continue
         validate_profile_row(row) || continue
-        vals = metric === :core_seconds && !isempty(row.sample_core_seconds) ?
-            row.sample_core_seconds : row.sample_seconds
+        vals = metric === :core_seconds ? row.sample_core_seconds : row.sample_seconds
         isempty(vals) && continue
+        metric === :core_seconds && any(isnothing, vals) && continue
         all(isfinite, vals) || continue
         push!(candidates, row)
     end
     isempty(candidates) && throw(ArgumentError("no certified solve-eligible profile rows"))
-    value(row) = _median(metric === :core_seconds && !isempty(row.sample_core_seconds) ?
+    value(row) = _median(metric === :core_seconds ?
         row.sample_core_seconds : row.sample_seconds)
     sort!(candidates; by=row -> (-value(row), -(_median(row.allocation_bytes) === nothing ? 0 : _median(row.allocation_bytes)), row.case_key))
     return candidates[1], candidates
@@ -533,6 +533,9 @@ function validate_profile_row(row::ProfileRow; live=false)
     all(x -> isfinite(x) && abs(x - row.reference_objective) <= tol,
         row.sample_objective) || return false
     length(row.sample_core_seconds) in (0, 3) || return false
+    all(x -> isnothing(x) || (isfinite(x) && x >= 0), row.sample_core_seconds) || return false
+    row.objective !== nothing || return false
+    row.objective == row.sample_objective[1] || return false
     return true
 end
 

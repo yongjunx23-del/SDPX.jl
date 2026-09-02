@@ -62,7 +62,28 @@ function ExternalHoldoutSpec(id::Symbol, library::Symbol, family::Symbol,
         parity_pending, lowercase(String(parity_sha256)), required, String(note))
 end
 
-external_case_complete(spec::ExternalHoldoutSpec) = spec.solve_eligible
+function _external_computed_complete(spec::ExternalHoldoutSpec)
+    interval = spec.objective_interval
+    safe_path = !isempty(strip(spec.relative_path)) &&
+        !isabspath(spec.relative_path) &&
+        normpath(spec.relative_path) != ".." && !startswith(normpath(spec.relative_path), "../")
+    identity_ok = spec.id != Symbol("") && spec.library != Symbol("") &&
+        spec.family != Symbol("") && spec.tier in (:small, :medium, :large, :extreme) &&
+        spec.split in (:train, :holdout)
+    source_ok = safe_path && !isempty(strip(spec.source_url)) && !isempty(strip(spec.license_note))
+    checksum_ok = occursin(r"^[0-9a-f]{64}$", spec.sha256)
+    parsed_ok = occursin(r"^[0-9a-f]{64}$", spec.parsed_fingerprint)
+    status_ok = spec.official_status in (:optimal, :primal_infeasible, :dual_infeasible)
+    interval_ok = interval !== nothing && length(interval) == 2 &&
+        all(x -> !isempty(strip(x)) && try isfinite(parse(BigFloat, x)) catch; false end,
+            interval) && try parse(BigFloat, interval[1]) <= parse(BigFloat, interval[2]) catch; false end
+    parity_ok = !spec.parity_pending && occursin(r"^[0-9a-f]{64}$", spec.parity_sha256)
+    identity_ok && source_ok && checksum_ok && parsed_ok && status_ok && interval_ok && parity_ok
+end
+
+# Recompute from independent metadata fields.  In particular, never use the
+# stored eligibility bit as its own validator input.
+external_case_complete(spec::ExternalHoldoutSpec) = _external_computed_complete(spec)
 
 """The reviewed external train/holdout rows.  Data are intentionally
 metadata-pinned; binary/text payloads remain cache artifacts fetched by the
@@ -141,7 +162,8 @@ external_holdout_inventory(; eligible_only::Bool=false) = eligible_only ?
     filter(external_case_complete, EXTERNAL_HOLDOUTS) : copy(EXTERNAL_HOLDOUTS)
 
 function validate_external_holdout_spec(spec::ExternalHoldoutSpec)
-    spec.solve_eligible == external_case_complete(spec) ||
+    complete = _external_computed_complete(spec)
+    spec.solve_eligible == complete ||
         throw(ArgumentError("external eligibility is not fail-closed for $(spec.id)"))
     return true
 end
