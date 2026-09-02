@@ -3,6 +3,7 @@ module MasslessEFT
 using LinearAlgebra
 using SHA
 using SparseArrays
+using TOML
 import SDPX
 
 export MasslessEFTSpec, MasslessEFTArtifact
@@ -24,6 +25,19 @@ const PHI_STAR_TEXT = "1.2111811263284054594005962749442436567081555533911510203
 const MANIFEST_PATH = joinpath(@__DIR__, "source_oracle_manifest.toml")
 manifest_sha256() = open(MANIFEST_PATH, "r") do io
     bytes2hex(SHA.sha256(io))
+end
+
+function _manifest_contract()
+    manifest = TOML.parsefile(MANIFEST_PATH)
+    return (
+        source_identifier=manifest["source_identifier"],
+        source_version=manifest["source_version"],
+        source_generator_sha256=manifest["source_generator_sha256"],
+        source_auditor_sha256=manifest["source_auditor_sha256"],
+        external_receipt_json_sha256=manifest["external_receipt_json_sha256"],
+        sdpx_import_base=manifest["sdpx_import_base"],
+        source_guard_precision_bits=manifest["source_guard_precision_bits"],
+    )
 end
 
 Base.@kwdef struct MasslessEFTSpec{T<:AbstractFloat}
@@ -102,9 +116,13 @@ function _validate_spec(spec::MasslessEFTSpec)
 end
 
 function _spec(::Type{T}, scale, id, maxN, lmax, ngrid, Q) where {T<:AbstractFloat}
+    phi_star = T === BigFloat ?
+        setprecision(BigFloat, SOURCE_GUARD_PRECISION_BITS) do
+            parse(BigFloat, PHI_STAR_TEXT)
+        end : parse(T, PHI_STAR_TEXT)
     MasslessEFTSpec{T}(id=id, scale=scale, maxN=maxN, lmax=lmax,
         ngrid=ngrid, heldout_ngrid=2 * ngrid - 1, quadrature_order=Q,
-        phi_star=parse(T, PHI_STAR_TEXT), precision_bits=SOURCE_GUARD_PRECISION_BITS)
+        phi_star=phi_star, precision_bits=SOURCE_GUARD_PRECISION_BITS)
 end
 
 function massless_eft_specs(::Type{T}=Float64) where {T<:AbstractFloat}
@@ -117,11 +135,9 @@ end
 
 function _source_grid(n::Int, phi_star)
     setprecision(BigFloat, SOURCE_GUARD_PRECISION_BITS) do
-        source_phi = if phi_star isa Float64 && phi_star == parse(Float64, PHI_STAR_TEXT)
-            parse(BigFloat, PHI_STAR_TEXT)
-        else
-            BigFloat(phi_star)
-        end
+        canonical_target = parse(typeof(phi_star), PHI_STAR_TEXT)
+        source_phi = phi_star == canonical_target ?
+            parse(BigFloat, PHI_STAR_TEXT) : BigFloat(phi_star)
         lo, hi = source_phi, BigFloat(pi) - source_phi
         mid, half = (hi + lo) / 2, (hi - lo) / 2
         [mid - half * cos(BigFloat(k - 1) * BigFloat(pi) / BigFloat(n - 1)) for k in 1:n]
@@ -591,6 +607,14 @@ function validate_artifact(artifact::MasslessEFTArtifact; rebuild::Bool=true)
     length(artifact.g0_map) == length(artifact.g2_map) || push!(failures, "objective_dimensions")
     artifact.witness_certified == false || push!(failures, "uncertified_witness_claim")
     artifact.provenance.manifest_sha256 == manifest_sha256() || push!(failures, "manifest_digest")
+    contract = _manifest_contract()
+    artifact.provenance.source_identifier == contract.source_identifier || push!(failures, "manifest_source_identifier")
+    artifact.spec.source_version == contract.source_version || push!(failures, "manifest_source_version")
+    artifact.provenance.source_generator_sha256 == contract.source_generator_sha256 || push!(failures, "manifest_generator")
+    artifact.provenance.source_auditor_sha256 == contract.source_auditor_sha256 || push!(failures, "manifest_auditor")
+    artifact.provenance.external_receipt_json_sha256 == contract.external_receipt_json_sha256 || push!(failures, "manifest_receipt")
+    artifact.provenance.sdpx_import_base == contract.sdpx_import_base || push!(failures, "manifest_import_base")
+    artifact.provenance.source_guard_precision_bits == contract.source_guard_precision_bits || push!(failures, "manifest_guard_precision")
     if rebuild && isempty(failures)
         expected = build_massless_eft(artifact.spec)
         artifact.phis == expected.phis || push!(failures, "phase_semantics")

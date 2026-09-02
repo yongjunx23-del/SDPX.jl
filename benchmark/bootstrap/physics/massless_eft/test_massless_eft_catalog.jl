@@ -19,6 +19,25 @@ using .MasslessEFT
     @test length(pair_basis(specs.train.maxN)) == 16
     @test length(pair_basis(specs.production.maxN)) == 64
 
+    # The canonical source endpoint and cheap production identity must not
+    # inherit the caller's ambient BigFloat precision.
+    low_precision_spec = setprecision(BigFloat, 64) do
+        massless_eft_specs(BigFloat).production
+    end
+    high_precision_spec = setprecision(BigFloat, 512) do
+        massless_eft_specs(BigFloat).production
+    end
+    @test precision(low_precision_spec.phi_star) == 1024
+    @test low_precision_spec.phi_star == high_precision_spec.phi_star
+    @test spec_fingerprint(low_precision_spec) == spec_fingerprint(high_precision_spec)
+
+    manifest_contract = MasslessEFT._manifest_contract()
+    @test manifest_contract.source_generator_sha256 == MasslessEFT.SOURCE_GENERATOR_SHA256
+    @test manifest_contract.source_auditor_sha256 == MasslessEFT.SOURCE_AUDITOR_SHA256
+    @test manifest_contract.external_receipt_json_sha256 == MasslessEFT.SOURCE_RESULT_SHA256
+    @test manifest_contract.sdpx_import_base == MasslessEFT.SDPX_IMPORT_BASE
+    @test manifest_contract.source_guard_precision_bits == MasslessEFT.SOURCE_GUARD_PRECISION_BITS
+
     for scale in (:smoke, :train)
         first_artifact = build_massless_eft(scale)
         second_artifact = build_massless_eft(scale)

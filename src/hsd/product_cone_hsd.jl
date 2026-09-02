@@ -1743,17 +1743,6 @@ end
     return abs(residual) <= threshold * work
 end
 
-@inline function _product_hsd_conditioned_cone_newton_close(
-    residual::T, work::T, budget::T,
-) where {T}
-    isfinite(residual) && isfinite(work) && work >= zero(T) &&
-        isfinite(budget) && zero(T) <= budget < one(T) / T(100) ||
-        return false
-    iszero(work) && return iszero(residual)
-    allowance = budget * work
-    return isfinite(allowance) && abs(residual) <= allowance
-end
-
 @inline function _product_hsd_normalized_error(
     residual::T, work::T,
 ) where {T}
@@ -2127,18 +2116,9 @@ end
 
     # The accepted reduced bordered residual lives in row-space coordinates.
     # Propagate its immutable physical bound through the actual RRQR basis.
-    # Separately account for the condition-aware SOC G-map error and this
-    # direct full-equation recomputation's own arithmetic work.
-    @inbounds for block in state.runtime.soc
-        SymmetricCones._soc_q_condition_reliable(
-            block.state.w, block.dim,
-        ) || return false
-        budget = _product_hsd_soc_condition_budget(
-            block.state.w, block.dim,
-        )
-        isfinite(budget) && budget < one(T) / T(100) || return false
-    end
-
+    # The per-coordinate SOC G-map bounds above came from explicit Q-map
+    # replay, so no weaker condition-number heuristic may veto this terminal
+    # full-equation check.
     @inbounds for i in 1:base.n
         residual = muladd(base.c[i], base.dtau, base.rD[i])
         local_work = abs(base.rD[i]) + abs(base.c[i] * base.dtau)
@@ -2199,27 +2179,16 @@ end
     work = abs(kdt) + abs(tdk) + abs(scalar_rhs)
     isfinite(residual) && isfinite(work) || return false
 
-    soc_budget = zero(T)
-    @inbounds for block in state.runtime.soc
-        SymmetricCones._soc_q_condition_reliable(
-            block.state.w, block.dim,
-        ) || return false
-        budget = _product_hsd_soc_condition_budget(
-            block.state.w, block.dim,
-        )
-        isfinite(budget) && budget < one(T) / T(100) || return false
-        soc_budget = max(soc_budget, budget)
-    end
-    metric_work = zero(T)
+    conditioned = zero(T)
     @inbounds for k in 1:base.m
-        term = base.b[k] * base.dy[k]
+        term = abs(base.tau) * abs(base.b[k]) *
+               state.soc_g_error_bound[k]
         isfinite(term) || return false
-        metric_work += abs(term)
+        conditioned += term
     end
     propagated = workspace.certified_physical_bound[end]
     gamma = _product_bordered_gamma(T, 8)
     recomputation = gamma * work
-    conditioned = soc_budget * abs(base.tau) * metric_work
     allowance = propagated + conditioned + recomputation
     isfinite(propagated) && isfinite(conditioned) &&
         isfinite(recomputation) &&
