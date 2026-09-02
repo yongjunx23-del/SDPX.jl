@@ -3,8 +3,7 @@
 using LinearAlgebra
 
 @testset "Original Hellerman modular functional PMP front end" begin
-    modular_path = joinpath(@__DIR__, "..", "benchmark", "bootstrap",
-        "physics", "modular_pmp", "ModularPMP.jl")
+    modular_path = joinpath(@__DIR__, "modular_pmp", "ModularPMP.jl")
     host = Module(:ModularPMPContract)
     Base.include(host, modular_path)
     mp = getfield(host, :ModularPMP)
