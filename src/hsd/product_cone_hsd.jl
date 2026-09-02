@@ -163,6 +163,8 @@ mutable struct ProductConeHSDState{
     g_input::Vector{T}
     g_output::Vector{T}
     gb::Vector{T}
+    schur_g_inputs::Vector{Vector{T}}
+    schur_g_outputs::Vector{Vector{T}}
     ds_hat::Vector{T}
     dy_hat::Vector{T}
     soc_g_error_bound::Vector{T}
@@ -224,6 +226,7 @@ function _product_cone_hsd_state(
     symmetric_core_current_rss::Union{Nothing,Integer}=nothing,
     symmetric_core_precision_bits::Integer=0,
     symmetric_core_regularization::Real=0.0,
+    schur_threads::Integer=1,
     iteration_knobs::NamedTuple=(;
         sigma=nothing, beta=nothing, gamma=nothing, predictor=:classic,
     ),
@@ -232,6 +235,7 @@ function _product_cone_hsd_state(
     kkt_route in (:bordered, :expanded, :sparse_schur) || throw(ArgumentError(
         "product HSD kkt_route must be :bordered, :expanded, or :sparse_schur",
     ))
+    schur_threads >= 1 || throw(ArgumentError("schur_threads must be positive"))
     if prepare_symmetric_core && kkt_route !== :bordered
         throw(ArgumentError(
             "prepare_symmetric_core requires kkt_route === :bordered " *
@@ -330,6 +334,12 @@ function _product_cone_hsd_state(
     ns_bt_g_a = has_ns_schur ? zeros(T, base.nr) : T[]
     ns_at_g_rhs = has_ns_schur ? zeros(T, base.nr) : T[]
     ns_zero_rhs = has_ns_schur ? zeros(T, m) : T[]
+    parallel_schur = !prepare_symmetric_core && block_count == 0 &&
+        isempty(runtime.psd) && base.nr > 1 && schur_threads > 1 &&
+        schur_threads >= Threads.nthreads()
+    schur_slots = parallel_schur ? Threads.maxthreadid() : 0
+    schur_g_inputs = [zeros(T, m) for _ in 1:schur_slots]
+    schur_g_outputs = [zeros(T, m) for _ in 1:schur_slots]
     return ProductConeHSDState{
         T,R,typeof(runtime),typeof(ns_schur),typeof(coupled),
         typeof(symmetric_bordered),typeof(expanded),typeof(sparse_schur),
@@ -341,6 +351,8 @@ function _product_cone_hsd_state(
         zeros(T, m),
         zeros(T, m),
         zeros(T, m),
+        schur_g_inputs,
+        schur_g_outputs,
         zeros(T, m),
         zeros(T, m),
         zeros(T, m),
@@ -383,6 +395,7 @@ function ProductConeHSDState(
     symmetric_core_current_rss::Union{Nothing,Integer}=nothing,
     symmetric_core_precision_bits::Integer=0,
     symmetric_core_regularization::Real=0.0,
+    schur_threads::Integer=1,
     iteration_knobs::NamedTuple=(;
         sigma=nothing, beta=nothing, gamma=nothing, predictor=:classic,
     ),
@@ -400,6 +413,7 @@ function ProductConeHSDState(
         symmetric_core_current_rss=symmetric_core_current_rss,
         symmetric_core_precision_bits=symmetric_core_precision_bits,
         symmetric_core_regularization=symmetric_core_regularization,
+        schur_threads=schur_threads,
         iteration_knobs=iteration_knobs,
         allow_expanded_bordered_fallback=allow_expanded_bordered_fallback,
     )
@@ -971,11 +985,34 @@ end
     return result
 end
 
+Base.@noinline function _product_hsd_form_schur_column!(
+    state::ProductConeHSDState{T}, j::Int,
+    g_input::Vector{T}, g_output::Vector{T},
+) where {T}
+    base = state.base
+    A = base.Ar
+    H = base.H
+    fill!(g_input, zero(T))
+    @inbounds for ptr in nzrange(A, j)
+        g_input[A.rowval[ptr]] = A.nzval[ptr]
+    end
+    _product_hsd_apply_symmetric_G!(state.runtime, g_output, g_input)
+    @inbounds for i in 1:j
+        acc = zero(T)
+        for ptr in nzrange(A, i)
+            acc += A.nzval[ptr] * g_output[A.rowval[ptr]]
+        end
+        H[i, j] = acc
+        H[j, i] = acc
+    end
+    return nothing
+end
+
 """
 Assemble `H=Ar'GAr` and the shared homogeneous border without materialising
-the global `m x m` operator `G`. Symmetric blocks retain the per-column block
-map; every Exp/Power block is accumulated by the sparse three-row dyadic
-assembler over the frozen reduced matrix.
+the global `m x m` operator `G`. Independent Schur columns use setup-owned
+thread scratch for pure orthant/SOC products; mixed and PSD products retain
+the serial path because their block kernels own mutable local workspaces.
 """
 Base.@noinline function _product_hsd_form_schur_border!(
     state::ProductConeHSDState{T},
@@ -985,21 +1022,20 @@ Base.@noinline function _product_hsd_form_schur_border!(
     H = base.H
     nr = base.nr
     fill!(H, zero(T))
-    @inbounds for j in 1:nr
-        fill!(state.g_input, zero(T))
-        for ptr in nzrange(A, j)
-            state.g_input[A.rowval[ptr]] = A.nzval[ptr]
+    if isempty(state.schur_g_inputs)
+        @inbounds for j in 1:nr
+            _product_hsd_form_schur_column!(
+                state, j, state.g_input, state.g_output,
+            )
         end
-        _product_hsd_apply_symmetric_G!(
-            state.runtime, state.g_output, state.g_input,
-        )
-        for i in 1:j
-            acc = zero(T)
-            for ptr in nzrange(A, i)
-                acc += A.nzval[ptr] * state.g_output[A.rowval[ptr]]
-            end
-            H[i, j] = acc
-            H[j, i] = acc
+    else
+        Threads.@threads :static for j in 1:nr
+            slot = Threads.threadid()
+            _product_hsd_form_schur_column!(
+                state, j,
+                state.schur_g_inputs[slot],
+                state.schur_g_outputs[slot],
+            )
         end
     end
 

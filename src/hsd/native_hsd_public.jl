@@ -1368,6 +1368,7 @@ function _public_native_hsd_core(
             symmetric_core_memory_limit=memory_limit,
             symmetric_core_current_rss=peak_rss,
             symmetric_core_precision_bits=effective_precision,
+            schur_threads=settings.limits.threads,
             iteration_knobs=settings.iteration_knobs,
             allow_expanded_bordered_fallback=allow_expanded_bordered_fallback,
         )
