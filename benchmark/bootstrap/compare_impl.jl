@@ -59,6 +59,7 @@ function _canonical_executed_route(value)
     token === :none && return :none
     token in (:legacy, :sdpx_legacy) && return :legacy
     token === :catalog_contract && return :contract
+    token in (:native, :native_hsd, :product_hsd) && return :native
     return nothing
 end
 
@@ -76,10 +77,10 @@ function _validate_route(row; label="row")
     if mode === :build
         executed === :none || push!(failures, "$(label)_build_executed_engine_not_none")
     elseif mode in (:solve, :profile)
-        executed in (:legacy, :contract) ||
+        executed in (:legacy, :contract, :native) ||
             push!(failures, "$(label)_solve_executed_engine_invalid")
-        requested === :native &&
-            push!(failures, "$(label)_native_requested_engine_invalid")
+        requested === :native && executed !== :native &&
+            push!(failures, "$(label)_native_route_mismatch")
         requested === :legacy && executed !== :legacy &&
             push!(failures, "$(label)_legacy_route_mismatch")
         requested === :contract && executed !== :contract &&

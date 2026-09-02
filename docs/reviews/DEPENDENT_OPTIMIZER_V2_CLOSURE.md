@@ -39,11 +39,14 @@ repository variable `SDPX_ENABLE_DEPENDENT_OPTIMIZATION` is intentionally
 workflow publishes an exact-head catalog artifact on the target repository's
 main branch. The following remain disabled/open:
 
-- fresh-process profile samples (current adapter is explicitly
-  `same_process_three_sample`);
+- the fresh-process runner currently proves only the first V2 box target;
+  broader timing targets and holdouts remain open;
+- the first box receipt is dominated by process/JIT costs (about 22.48 s total
+  and 11.10 s core per child) and is contract evidence, not a Stage-C 2% speed
+  target;
 - full catalog breadth/holdout completion;
 - provider-backed precision qualification for every target;
-- Stage-B performance, RSS, allocation, and repeated-solve gates;
+- production-scale Stage-B performance, RSS, allocation, and repeated-solve gates;
 - automatic GitHub workflow activation until the exact catalog artifact and
   source/tree identities are published by the catalog workflow.
 
