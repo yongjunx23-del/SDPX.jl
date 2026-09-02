@@ -1,6 +1,10 @@
-# Fixed-trace Q3 direct KKT local contribution (GPT Pro plan P4).
+# Disjoint fixed-head Q3 direct KKT local contribution (legacy file/type
+# spelling: fixed_trace_q3 / FixedTraceQ3*).
 #
-# Fixed-trace Q3 detection and local 2x2 tail elimination are expressed as a
+# Eligibility requires much more than a fixed head: every Q3 must own exactly
+# two local tail variables and those variable pairs must be disjoint across
+# blocks. Dense shared-variable SOCPs use the general symmetric core.
+# Detection and local 2x2 tail elimination are expressed as a
 # NewtonSystem contribution/assembly specialization. Together with the
 # fixed-size Exp/Power 3x3 contribution path in
 # `src/cones/nonsymmetric/scaling3.jl`, every registered entry is a
@@ -11,10 +15,11 @@
 """
     FixedTraceQ3Reduction{T}
 
-Immutable plan object with owned structure-of-arrays storage.  The arrays are
-populated once during planning and are never borrowed from the caller's cone
-matrices; this is important for mutable BigFloat scalars as well as for the
-fixed-trace hot path.
+Legacy-named immutable plan object for the disjoint fixed-head Q3
+specialization, with owned structure-of-arrays storage. The arrays are populated
+once during planning and are never borrowed from the caller's cone matrices;
+this is important for mutable BigFloat scalars as well as for the local Q3 hot
+path.
 """
 struct FixedTraceQ3Reduction{T}
     active_ids::Matrix{Int}
@@ -401,13 +406,14 @@ termination/certificates, or changes the HSD state machine.
 """
 @inline function kkt_specialization_registry()
     return (
-        :fixed_trace_q3,
+        :disjoint_fixed_head_q3,
         _nonsymmetric_scaling_contribution_symbol(),
     )
 end
 
 """Whether `specialization` is a registered KKT local contribution."""
 @inline kkt_specialization_supported(specialization::Symbol) =
+    specialization === :fixed_trace_q3 ||
     specialization in kkt_specialization_registry()
 
 """
@@ -417,7 +423,8 @@ Resolve a registered KKT specialization to its local contribution entry point
 symbol, or `nothing` for an unregistered specialization.
 """
 @inline function kkt_specialization_contribution(specialization::Symbol)
-    specialization === :fixed_trace_q3 && return :fixed_trace_q3_local_elimination
+    specialization in (:disjoint_fixed_head_q3, :fixed_trace_q3) &&
+        return :fixed_trace_q3_local_elimination
     specialization === _nonsymmetric_scaling_contribution_symbol() &&
         return :nonsymmetric_scaling_contribution3
     return nothing
@@ -427,7 +434,7 @@ end
 # Canonical applicability: preserve explicit ZeroCone rows and local Q3 tails.
 # ---------------------------------------------------------------------------
 
-function fixed_trace_q3_canonical_plan(
+function disjoint_fixed_head_q3_canonical_plan(
     canonical::CanonicalConicProgram{T},
 ) where {T<:AbstractFloat}
     zero_rows = Int[]
@@ -504,8 +511,15 @@ function fixed_trace_q3_canonical_plan(
     )
 end
 
+# Compatibility spelling retained for internal callers and downstream tests.
+# The canonical name describes the actual applicability proof: every Q3 has a
+# fixed positive head and exactly two local tail variables, and tail-variable
+# pairs are disjoint across blocks. A dense shared-variable Q3 model is never
+# eligible merely because its head is fixed.
+const fixed_trace_q3_canonical_plan = disjoint_fixed_head_q3_canonical_plan
+
 # ---------------------------------------------------------------------------
-# Equality-side Schur contribution for disjoint fixed-trace Q3 tails.
+# Equality-side Schur contribution for disjoint fixed-head Q3 tails.
 # Internal/opt-in: public HSD dispatch must preserve explicit equality rows
 # before this workspace can become production reachable.
 # ---------------------------------------------------------------------------

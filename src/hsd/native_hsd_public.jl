@@ -990,7 +990,7 @@ function _public_native_hsd_core(
     setup_started = time_ns()
     canonical = canonicalize(program)
     fixed_trace_plan = settings.kkt_route === :bordered ?
-        fixed_trace_q3_canonical_plan(canonical) : nothing
+        disjoint_fixed_head_q3_canonical_plan(canonical) : nothing
     reduction = fixed_trace_plan === nothing ?
         hsd_equality_reduce(canonical) : hsd_retain_equalities(canonical)
     setup_seconds = Float64(time_ns() - setup_started) * 1.0e-9
@@ -1069,7 +1069,7 @@ function _public_native_hsd_core(
     end
     solve_reduced = equilibration_map === nothing ? reduced :
                     equilibrated_program(equilibration_map, reduced)
-    # The fixed-trace Q3 plan is built from the canonical program before
+    # The disjoint fixed-head Q3 plan is built from the canonical program before
     # equilibration.  Ruiz row/column scaling preserves the plan's structural
     # data (zero rows, free ids, active variables) but rescales the numeric
     # cone data (tail_map, fixed_head, offset) and the equality panel, so a
@@ -1077,9 +1077,9 @@ function _public_native_hsd_core(
     # state and breaks the bordered core at iteration 0.  Rebuild the plan
     # from the equilibrated program so every numeric datum matches the state.
     if fixed_trace_plan !== nothing && equilibration_map !== nothing
-        scaled_plan = fixed_trace_q3_canonical_plan(solve_reduced)
+        scaled_plan = disjoint_fixed_head_q3_canonical_plan(solve_reduced)
         scaled_plan === nothing && error(
-            "fixed-trace Q3 structure lost under Ruiz equilibration",
+            "disjoint fixed-head Q3 structure lost under Ruiz equilibration",
         )
         fixed_trace_plan = scaled_plan
     end
@@ -1889,14 +1889,14 @@ function _native_hsd_restarted_core(
             attempted_kkt_routes=attempts,
             executed_fallback_chain=attempts,
             fallback_reason=:bordered_predictor_residual_fallback,
-            route_restart_reason=:fixed_trace_predictor_residual_failed,
+            route_restart_reason=initial.reason,
             route_restart_iteration=initial.iterations,
         ),
     )
     termination = merge(
         fallback_diag.termination,
         (
-            route_restart_reason=:fixed_trace_predictor_residual_failed,
+            route_restart_reason=initial.reason,
             route_restart_iteration=initial.iterations,
             route_attempts=attempts,
         ),
@@ -1946,8 +1946,10 @@ function _public_optimize_native_hsd(
     canonical, _, core = _public_native_hsd_core(model, program, route, settings)
     if settings.kkt_route === :bordered &&
        core.status === NumericalBreakdown &&
-       core.reason === :fixed_trace_predictor_residual_failed &&
-       core.iterations <= 1
+       core.reason in (
+           :symmetric_core_predictor_residual_failed,
+           :disjoint_fixed_head_q3_predictor_residual_failed,
+       ) && core.iterations <= 1
         fallback_settings = _native_hsd_route_settings(settings, :expanded)
         fallback_route = NativeConeRoute(:expanded)
         _public_validate_native_hsd_policy(

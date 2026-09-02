@@ -455,7 +455,7 @@ function _prepare_product_hsd_symmetric_core(
         T === BigFloat ? precision(BigFloat) : sig_bits(T)
     ) : Int(precision_bits)
     fixed_trace_plan === nothing &&
-        (fixed_trace_plan = fixed_trace_q3_canonical_plan(base.canonical))
+        (fixed_trace_plan = disjoint_fixed_head_q3_canonical_plan(base.canonical))
     pure_orthant=all(
         block->block.cone in (:nonnegative,:nonpositive),blocks,
     )

@@ -875,7 +875,9 @@ function _product_hsd_symmetric_core_direction!(
         _product_hsd_symmetric_core_linearization!(state, state.h)
     end
     predictor_linearized || begin
-        state.diagnostic = :fixed_trace_predictor_linearization_failed
+        state.diagnostic = fixed_trace ?
+            :disjoint_fixed_head_q3_predictor_linearization_failed :
+            :symmetric_core_predictor_linearization_failed
         return false
     end
     predictor_system = _product_hsd_symmetric_core_system(
@@ -906,11 +908,15 @@ function _product_hsd_symmetric_core_direction!(
     base.dkappa = predictor_candidate.dkappa
     _product_hsd_core_scatter!(state)
     _hsd_direction_finite(base) || begin
-        state.diagnostic = :fixed_trace_predictor_nonfinite
+        state.diagnostic = fixed_trace ?
+            :disjoint_fixed_head_q3_predictor_nonfinite :
+            :symmetric_core_predictor_nonfinite
         return false
     end
     if !_product_hsd_newton_residual_ok(state, predictor_scalar)
-        state.diagnostic = :fixed_trace_predictor_residual_failed
+        state.diagnostic = fixed_trace ?
+            :disjoint_fixed_head_q3_predictor_residual_failed :
+            :symmetric_core_predictor_residual_failed
         return false
     end
     timings.predictor_linear_solve_seconds +=
@@ -947,7 +953,9 @@ function _product_hsd_symmetric_core_direction!(
     corrector_scalar = sigma_mu - base.tau * base.kappa -
                        base.dtau_a * base.dkappa_a
     corrector_linearized || begin
-        state.diagnostic = :fixed_trace_corrector_linearization_failed
+        state.diagnostic = fixed_trace ?
+            :disjoint_fixed_head_q3_corrector_linearization_failed :
+            :symmetric_core_corrector_linearization_failed
         return false
     end
     corrector_system = _product_hsd_symmetric_core_system(
@@ -969,9 +977,12 @@ function _product_hsd_symmetric_core_direction!(
     base.dkappa = corrector_candidate.dkappa
     _product_hsd_core_scatter!(state)
     _hsd_direction_finite(base) || begin
-        state.diagnostic = :fixed_trace_corrector_nonfinite
+        state.diagnostic = fixed_trace ?
+            :disjoint_fixed_head_q3_corrector_nonfinite :
+            :symmetric_core_corrector_nonfinite
         return false
     end
+    if !_product_hsd_newton_residual_ok(state, corrector_scalar)
     if !_product_hsd_newton_residual_ok(state, corrector_scalar)
         copyto!(base.dx, base.dx_a)
         copyto!(base.dy, base.dy_a)
@@ -981,6 +992,7 @@ function _product_hsd_symmetric_core_direction!(
         _product_hsd_core_scatter!(state)
         state.diagnostic = :corrector_fallback_to_predictor
         return true
+    end
     end
     timings.corrector_linear_solve_seconds +=
         Float64(time_ns() - t0) * 1.0e-9 -

@@ -51,7 +51,8 @@ end
     @test selected.planned_kkt_route === :bordered
     @test selected.executed_kkt_route === :expanded
     @test selected.attempted_kkt_routes === (:bordered, :expanded)
-    @test selected.route_restart_reason === :fixed_trace_predictor_residual_failed
+    @test selected.route_restart_reason ===
+        :symmetric_core_predictor_residual_failed
     @test selected.route_restart_iteration <= 1
     @test selected.fallback_reason === :bordered_predictor_residual_fallback
 
@@ -93,7 +94,7 @@ end
             :factor_once_homogeneous_predictor_corrector
         @test duplicate.termination.reason === :tau_collapse_recovery_exhausted
         @test duplicate_selected.route_restart_reason ===
-            :fixed_trace_predictor_residual_failed
+            :symmetric_core_predictor_residual_failed
         @test duplicate_selected.route_restart_iteration <= 1
     else
         @test duplicate.termination.reason === :symmetric_core_dispatch_exception

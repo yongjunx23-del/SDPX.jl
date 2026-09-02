@@ -39,6 +39,14 @@ sessions implement bordered, expanded, and sparse-Schur realizations.
 still evaluate the exact operator and all five equations for each right-hand
 side.
 
+The canonical local-Q3 specialization is named `disjoint_fixed_head_q3`.
+Eligibility requires a fixed positive Q3 head, exactly two local tail variables
+per block, and disjoint tail-variable pairs across blocks; a fixed head alone is
+not sufficient. Dense shared-variable partial-wave SOCPs therefore use the
+general symmetric core. Legacy implementation symbols and the source filename
+retain `fixed_trace_q3` as a compatibility spelling, but diagnostics use the
+canonical name and generic-core failures use `symmetric_core_*` reasons.
+
 ## Cone runtime
 
 The product runtime contains block-specific operations for nonnegative,

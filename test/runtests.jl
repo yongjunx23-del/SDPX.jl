@@ -181,7 +181,10 @@ end
     )
 end
 
-@testset "Fixed-trace Q3 admits barrier-free columns" begin
+@testset "Disjoint fixed-head Q3 admits barrier-free columns" begin
+    @test :disjoint_fixed_head_q3 in SDPX.kkt_specialization_registry()
+    @test SDPX.kkt_specialization_supported(:disjoint_fixed_head_q3)
+    @test SDPX.kkt_specialization_supported(:fixed_trace_q3) # legacy alias
     # One fixed-head Q3 pair (u,v) plus a free Wilson-style column f that
     # appears only in the equality row.  Substituting f = u + 1/2 gives the
     # same problem without the free column, so the pre-existing fixed-trace
@@ -206,9 +209,23 @@ end
     SDPX.objective!(model, SDPX.Maximize(), x[3])
     program = SDPX.compile_product_cone_model(model)
     canonical = SDPX.canonicalize(program)
-    plan = SDPX.fixed_trace_q3_canonical_plan(canonical)
+    plan = SDPX.disjoint_fixed_head_q3_canonical_plan(canonical)
+    legacy_plan = SDPX.fixed_trace_q3_canonical_plan(canonical)
     @test plan !== nothing
     @test plan.free_ids == [3]
+    @test legacy_plan.free_ids == plan.free_ids
+
+    # A fixed head alone is insufficient. Shared/dense global tail variables,
+    # as in the massless-EFT partial-wave model, must use the general core.
+    shared = SDPX.Model(Float64)
+    z = SDPX.variable!(shared, :z, 3; domain=SDPX.Reals())
+    SDPX.constraint!(shared, :dense_q3,
+        Any[1.0, z[1] + z[2] + z[3], z[1] - z[2]],
+        SDPX.LorentzCone())
+    SDPX.objective!(shared, SDPX.Minimize(), z[1])
+    shared_canonical = SDPX.canonicalize(
+        SDPX.compile_product_cone_model(shared))
+    @test SDPX.disjoint_fixed_head_q3_canonical_plan(shared_canonical) === nothing
     result = SDPX.optimize!(model; settings=SDPX.Settings(Float64; verbosity=0))
     certificate = SDPX.certificate(result)
     @test SDPX.status(result) === :optimal
