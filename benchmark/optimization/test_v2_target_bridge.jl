@@ -1,20 +1,13 @@
 using Test
 using TOML
 
-isdefined(Main, :ProfileCatalog) || include(joinpath(@__DIR__, "profile_catalog.jl"))
-using .ProfileCatalog
+# Deliberately load the bridge before ProfileCatalog/V2.  The first end-to-end
+# call must exercise the real standalone dynamic-include/world-age path.
 include(joinpath(@__DIR__, "v2_target_bridge.jl"))
 using .V2TargetBridge
 
-@testset "bridge selects the pinned reviewed Float64 declaration" begin
-    _, v2, _ = V2TargetBridge._load_v2()
-    precision = V2TargetBridge._reviewed_float64_precision(v2)
-    @test precision.name === :Float64
-    @test precision.bits == 53
-    @test precision.provider === :cholmod
-    @test precision.solver_tolerance == "1e-8"
-    @test precision.certificate_limit == "5e-7"
-end
+_live_valid(row) = Base.invokelatest(
+    getfield(Main.ProfileCatalog, :validate_profile_row), row; live=true)
 
 @testset "V2 solve-eligible target closes dependent optimizer precondition" begin
     tmpdir = mktempdir()
@@ -34,7 +27,7 @@ end
     @test length(unique(row.sample_objective)) == 1
     @test all(row.sample_certificate_valid)
     @test all(row.sample_semantic_pass)
-    @test validate_profile_row(row; live=true)
+    @test _live_valid(row)
     @test result.schema9["schema_version"] == 9
     @test length(result.schema9["result"]) == 1
     receipt = readiness_receipt(result)
@@ -54,9 +47,19 @@ end
         core_seconds=row.sample_core_seconds,
         certificates=row.sample_certificate_valid,
         semantic=row.sample_semantic_pass,
-        live_validator=validate_profile_row(row; live=true),
+        live_validator=_live_valid(row),
         schema_version=result.schema9["schema_version"],
         repository_variable="SDPX_ENABLE_DEPENDENT_OPTIMIZATION",
         repository_variable_state="disabled_not_mutated_locally",
     )))
+end
+
+@testset "bridge selects the pinned reviewed Float64 declaration" begin
+    _, v2, _ = V2TargetBridge._load_v2()
+    precision = V2TargetBridge._reviewed_float64_precision(v2)
+    @test precision.name === :Float64
+    @test precision.bits == 53
+    @test precision.provider === :cholmod
+    @test precision.solver_tolerance == "1e-8"
+    @test precision.certificate_limit == "5e-7"
 end

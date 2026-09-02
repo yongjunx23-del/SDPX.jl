@@ -64,7 +64,7 @@ function profile_first_target(; case_id::Symbol=:v2_lp_box_small)
     precision = _reviewed_float64_precision(v2)
     row = Base.invokelatest(getfield(adapter, :profile_v2_target), catalog, instance, precision;
         warmup=true, samples=3)
-    P.validate_profile_row(row; live=true) ||
+    Base.invokelatest(getfield(P, :validate_profile_row), row; live=true) ||
         throw(ArgumentError("dependent optimizer rejected V2 row as live evidence"))
     return (row=row, v2_commit=identity.commit, v2_tree=identity.tree)
 end
