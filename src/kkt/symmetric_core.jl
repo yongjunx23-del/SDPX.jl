@@ -732,28 +732,6 @@ function _core_mix_cone_signature(
     return signature
 end
 
-"""Content-based signature of the full Newton operator; deliberately no RHS.
-
-Includes the current numeric `pattern.nzval` (Theta blocks), `tau`/`kappa`, and
-the cone numeric values.  Used by tests to prove a numeric mutation is visible.
-"""
-function _core_operator_signature(
-    pattern::SymmetricCorePattern,
-    V::AbstractMatrix,
-    system::NewtonSystem,
-)
-    signature = _core_structure_signature(pattern)
-    signature = _core_mix_values(signature, pattern.nzval)
-    signature = _core_mix_values(signature, V)
-    signature = _core_mix_values(signature, system.A)
-    signature = _core_mix_values(signature, system.b)
-    signature = _core_mix_values(signature, system.c)
-    signature = _core_mix_cone_signature(signature, system.cone)
-    signature = _core_mix_uint(signature, UInt64(hash(system.tau)))
-    signature = _core_mix_uint(signature, UInt64(hash(system.kappa)))
-    return signature
-end
-
 """Static symmetric-core identity: A, b, c, V and the frozen CSC structure.
 
 Deliberately excludes the numeric `Theta` (pattern.nzval), `tau`/`kappa`, and

@@ -273,14 +273,6 @@ end
 @inline _native_hsd_max_iterations(settings::Settings) =
     settings.limits.iterations == 0 ? 200 : settings.limits.iterations
 
-@inline function _native_hsd_route_cone(route::NativeConeRoute)
-    route.route === :lp_family && return :lp
-    route.route === :soc_family && return :socp
-    route.route === :sdp_family && return :sdp
-    route.route === :mixed_family && return :mixed_symmetric
-    return route.route
-end
-
 @inline function _native_hsd_cone_family(cone::Symbol)
     cone in (:free, :zero) && return :none
     cone in (:nonnegative, :nonpositive, :interval) && return :lp

@@ -35,3 +35,11 @@ function saturating_sum_bytes(terms::Integer...)
     end
     return Int(total)
 end
+
+function _nonnegative_int_saturating(value::Real)::Int
+    isfinite(value) || return typemax(Int)
+    value <= zero(value) && return 0
+    value >= typemax(Int) && return typemax(Int)
+    return round(Int, value)
+end
+

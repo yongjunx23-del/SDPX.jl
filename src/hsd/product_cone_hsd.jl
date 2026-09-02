@@ -885,13 +885,6 @@ Lorentz or PSD map solely because its condition number is large.
     return !psd_budget_inconclusive, psd_budget_inconclusive
 end
 
-@inline function _product_hsd_roundtrip_backward_ok(
-    state::ProductConeHSDState,
-)
-    certified, _ = _product_hsd_roundtrip_backward_status(state)
-    return certified
-end
-
 """Apply only the symmetric block metrics, leaving nonsymmetric rows zero.
 
 The Exp/Power rows are assembled by the sparse three-row dyadic kernel below;
