@@ -80,6 +80,35 @@ function _precompile_generic_symmetric_core(
     return result
 end
 
+function _precompile_compact_schur(
+    ::Type{T}; iterations::Int=3,
+) where {T<:AbstractFloat}
+    model = SDPX.Model(T; name="precompile_compact_schur_$(T)")
+    x = SDPX.variable!(model, :shared, 3; domain=SDPX.Reals())
+    for block in 1:8
+        a = T(block) / T(17)
+        b = T(block + 1) / T(19)
+        SDPX.constraint!(model, Symbol(:soc_, block),
+            Any[one(T), x[1] + a * x[2], x[3] - b * x[2]],
+            SDPX.LorentzCone())
+    end
+    SDPX.objective!(model, SDPX.Minimize(), -x[1] + T(1) / T(7) * x[2])
+    settings = SDPX.Settings{T}(
+        tolerances=SDPX.Tolerances{T}(
+            primal=T(1e-8), dual=T(1e-8), gap=T(1e-8),
+        ),
+        limits=SDPX.Limits(iterations=iterations, time=120.0, threads=1),
+        kkt_route=:bordered,
+        verbosity=0,
+    )
+    outputs = SDPX.Outputs(:all, :all, :all;
+        objectives=true, certificate=:summary, diagnostics=:full,
+        history=false, trace=false)
+    result = SDPX.optimize!(model; settings, outputs)
+    result.iterations >= 1 || error("compact Schur workload performed no iteration")
+    return result
+end
+
 function _precompile_fixed_trace(::Type{T}; iterations::Int=2) where {T<:AbstractFloat}
     cells = 4
     variables = 2cells
@@ -130,6 +159,7 @@ if Base.find_package("MultiFloats") !== nothing &&
         for family in (:soc, :sdp, :mixed)
             _precompile_generic_symmetric_core(Float64x4, family)
         end
+        _precompile_compact_schur(Float64x4)
         _precompile_fixed_trace(Float64x4)
     finally
         if old_override === nothing
