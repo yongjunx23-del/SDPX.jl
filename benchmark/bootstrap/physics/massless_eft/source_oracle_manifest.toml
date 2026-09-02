@@ -1,0 +1,48 @@
+schema_version = 1
+artifact_schema_version = 1
+source_identifier = "pole_ansatz_scan"
+source_version = "external-snapshot-1541ab4"
+source_generator_sha256 = "72e0e5f16c1b0f5f3e671a9f0599d06425977d672437a265fbab1b5f07827fcd"
+source_auditor_sha256 = "407c4ff154c69989e24a28ec764bcb17dbf7c71d17c3f35858588c318231fbba"
+source_result_json_sha256 = "03399fed09bcf535fce61084536ff8c18d9aa260243cd657e89f76f7b69525ba"
+repository_head = "1541ab4fa666eedebbdc16706b668040c963f04d"
+
+[normalization]
+implemented_amplitude = "tau = 4*T_physical"
+implemented_disk = "abs(1 + i*tau) <= 1"
+source_prose_disk = "abs(1 + 4*i*T_physical) <= 1"
+soc_vector = "[1, Re(tau), 1-Im(tau)]"
+psd_block = "[2-Im(tau) Re(tau); Re(tau) Im(tau)]"
+status = "resolved_by_explicit_rescaling"
+
+[basis]
+kind = "symmetric_pair_basis"
+ordering = "[(a,t-a) for t=0:maxN for a=t:-1:0 if a >= t-a]"
+projection_prefactor = "1/(32*pi)"
+
+[objectives]
+g0 = "3*alpha_00 - 3*alpha_pole"
+g2 = "1/2*alpha_10 + 1/4*alpha_20 - 1/32*alpha_11 - 3/8*alpha_pole"
+g2_source_discrepancy = "reviewed correction: source/auditor used -1/16, generated Phi11 implies -1/32"
+
+[grid]
+original = "Chebyshev-Lobatto on [phi_star, pi-phi_star], ngrid in {9,33,300}"
+held_out = "599-node same grid; even Julia indices are newly inserted nodes"
+held_out_spin_max = 100
+endpoint_policy = "reported_not_certified"
+
+[oracle]
+kind = "external_sdpb_receipt_interval"
+status = "bounded_provenance_only"
+solve_eligible = false
+independent_objectives = false
+certificate = "none"
+production_maxN14_min_g0 = "-6.103003970118916970904496194881379056372624751987473683288653885405917522657248309039793224751987"
+production_maxN14_max_g0 = "3.314872949902211924680613852881385180078827880625864253400594202194854901819852520991990401347286433835972217540593684873111167537015023474254772876180774852399863243340546098591695162843826"
+
+[claims]
+finite_grid_only = true
+continuum_unitarity = false
+paper_equivalent = false
+nmax_extrapolation = false
+held_out_gate = "diagnostic_only_no_threshold_declared"

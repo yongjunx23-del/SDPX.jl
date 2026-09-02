@@ -23,6 +23,8 @@ include(joinpath(
 
 include(joinpath(@__DIR__, "..", "benchmark", "bootstrap", "physics",
     "test_physics_catalog_contracts.jl"))
+include(joinpath(@__DIR__, "..", "benchmark", "bootstrap", "physics",
+    "massless_eft", "test_massless_eft_catalog.jl"))
 
 const E2E_CASE_IDS = (
     :lp_afiro_style,
