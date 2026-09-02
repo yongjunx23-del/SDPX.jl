@@ -166,8 +166,25 @@ end
 
 @testset "Pure orthant core uses disconnected LDL" begin
     spec=e2e_spec(:lp_random_small)
-    result=SDPX.optimize!(
-        GenericConicBenchmark.build(spec.problem,Float64,spec.params);
+    model=GenericConicBenchmark.build(spec.problem,Float64,spec.params)
+    canonical=SDPX.canonicalize(SDPX.compile_product_cone_model(model))
+    reduction=SDPX.hsd_equality_reduce(canonical)
+    @test SDPX._product_hsd_skip_dense_terminal_refinement(reduction.reduced)
+    soc_spec=e2e_spec(:socp_portfolio_small)
+    soc_model=GenericConicBenchmark.build(
+        soc_spec.problem,Float64,soc_spec.params)
+    soc_canonical=SDPX.canonicalize(SDPX.compile_product_cone_model(soc_model))
+    soc_reduction=SDPX.hsd_equality_reduce(soc_canonical)
+    @test !SDPX._product_hsd_skip_dense_terminal_refinement(soc_reduction.reduced)
+    nonpositive_model=SDPX.Model(Float64)
+    z=SDPX.variable!(nonpositive_model,:z,1;domain=SDPX.Nonpositive())
+    SDPX.objective!(nonpositive_model,SDPX.Minimize(),z[1])
+    nonpositive_canonical=SDPX.canonicalize(
+        SDPX.compile_product_cone_model(nonpositive_model))
+    nonpositive_reduction=SDPX.hsd_equality_reduce(nonpositive_canonical)
+    @test !SDPX._product_hsd_skip_dense_terminal_refinement(
+        nonpositive_reduction.reduced)
+    result=SDPX.optimize!(model;
         settings=SDPX.Settings(Float64;verbosity=0),
     )
     certificate=SDPX.certificate(result)

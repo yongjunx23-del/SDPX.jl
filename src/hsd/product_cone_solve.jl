@@ -251,6 +251,13 @@ function _product_hsd_refined_optimal_result!(
     return nothing
 end
 
+@inline function _product_hsd_skip_dense_terminal_refinement(canonical)
+    blocks = layout_blocks(canonical.cone_layout)
+    canonical_num_variables(canonical) > 0 && !isempty(blocks) &&
+        all(block -> block.cone === :nonnegative &&
+                     block.reconstruction.sign == 1, blocks)
+end
+
 @inline function _product_hsd_candidate_result!(
     state::ProductConeHSDState{T},
     x_original::Vector{T},
@@ -269,6 +276,14 @@ end
         terminal_alpha; check_optimal=true,
     )
     direct === nothing || return direct
+    # A pure orthant iterate has a cheap native Newton path, while the cold
+    # affine dual repair below materializes a dense (n+1)-by-m least-squares
+    # system.  If the unchanged point is not yet strictly certifiable, keep
+    # iterating instead of replacing it with an O(n*m) terminal candidate.
+    # This remains fail closed: no status is produced until the same original-
+    # coordinate verifier accepts a later unchanged HSD iterate.
+    _product_hsd_skip_dense_terminal_refinement(state.base.canonical) &&
+        return nothing
     return _product_hsd_refined_optimal_result!(
         state,x_original,s_original,y_original,tol,reason,last_step,
         terminal_alpha,
