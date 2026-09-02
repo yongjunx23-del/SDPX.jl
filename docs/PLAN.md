@@ -63,6 +63,28 @@ solver algorithms for benchmark models.
 - Push one reviewed release branch, then deploy its immutable environment and
   sysimage to HPC.
 
+## External audit integration (gptpro_consult.md, 2026-09-03)
+
+The global audit's P0–P2 findings were triaged against this branch (the
+audit read a stale desktop checkout 147 commits behind; `workspace.jl`,
+`threaded.jl`, `schur.jl`, `kkt_backend.jl` no longer exist here):
+
+| Audit task | Verdict on this branch | Evidence |
+|---|---|---|
+| TASK-P0-BASELINE | done | `docs/evidence/BASELINE_MANIFEST_20260903.json` |
+| TASK-P0-TYPED-CORE (shim) | done | `Base.getproperty/propertynames(::HSDState)` deleted; all route storage via `state.workspace.*` / `base.workspace.*`; route guard 43/43 |
+| TASK-P0-TYPED-CORE (Any) | done (hot), documented (cold) | `ProviderLPLUCache`, mixed-precision factors, sparse factor narrowed to bounded unions; MFLA 163/163; dead `DenseAugmentedKKTWorkspace` slots untouched |
+| TASK-P0-SPARSE-AUGMENTED | P0 bug fixed | `_use_sparse_schur_sdp` definition lost in excision restored verbatim to `sparse_la.jl` |
+| TASK-P1-CERT (Gate B) | done | `verify_optimal!`/Farkas verifiers recompute from file-local `_cert_*` loops; zero production-helper reuse |
+| TASK-P1-LEGACY-DELETE | already satisfied | `engine=:legacy` rejected at construction; `prepared.jl` funnels to native HSD; legacy = arithmetic provider + schemas only |
+| TASK-P1-OWNER-ALL | confirmed present | sparse assembly already owner-style (`SchurAssemblyMap`); dense Float64 column-owner kept |
+| TASK-P1-CONE-ORACLE | accepted as designed | per-family NT + LHSCB oracles exist; no unified `BarrierOracle` by decision (symmetric self-duality needs no conjugate adapter) |
+| TASK-P0-ZERO-ALLOC | open | full-iteration Gate A harness still to be built |
+| TASK-P1-CHORDAL | open | `chordal.jl` production wiring unverified |
+| TASK-P0-FINAL-GATE | open | runs only after the two open items close |
+
+Full `Pkg.test("SDPX")` green at every commit in this sequence.
+
 ## Stop condition
 
 Optimization stops when two consecutive reviewed candidates fail to improve a
