@@ -331,7 +331,8 @@ const _NATIVE_HSD_DENSE_HIGH_PRECISION_RANK_MAX_ENTRIES = 250_000
 @inline function _native_hsd_dense_rank_fallback_allowed(
     A::SparseMatrixCSC{T,Int},
 ) where {T<:AbstractFloat}
-    return length(A) <= _NATIVE_HSD_DENSE_HIGH_PRECISION_RANK_MAX_ENTRIES
+    return T !== Float64 && length(A) <=
+           _NATIVE_HSD_DENSE_HIGH_PRECISION_RANK_MAX_ENTRIES
 end
 
 @inline _native_hsd_dense_rank_fallback_allowed(::AbstractMatrix) = false
@@ -1416,7 +1417,7 @@ function _public_native_hsd_core(
             y_full,
             reduction,
             product_y;
-            tol=recovery_tol,
+            tol=tol,
         )
     elseif status === DualInfeasible
         recovery_valid = hsd_recover_dual_ray_source!(
@@ -1425,7 +1426,7 @@ function _public_native_hsd_core(
             reduction,
             product_x,
             product_s;
-            tol=recovery_tol,
+            tol=tol,
         )
     end
     recovery_seconds = Float64(time_ns() - recovery_started) * 1.0e-9

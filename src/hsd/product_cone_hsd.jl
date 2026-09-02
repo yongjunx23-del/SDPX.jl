@@ -1728,7 +1728,8 @@ end
 ) where {T}
     isfinite(residual) && isfinite(work) && work >= zero(T) || return false
     iszero(work) && return iszero(residual)
-    threshold = max(T(65536) * sqrt(eps(T)), T(10) * cbrt(eps(T)))
+    threshold = T === Float64 ? T(512) * sqrt(eps(T)) :
+        max(T(65536) * sqrt(eps(T)), T(10) * cbrt(eps(T)))
     return abs(residual) <= threshold * work
 end
 
@@ -1737,7 +1738,8 @@ end
 ) where {T}
     isfinite(residual) && isfinite(work) && work >= zero(T) || return false
     iszero(work) && return iszero(residual)
-    threshold = max(T(65536) * sqrt(eps(T)), T(10) * cbrt(eps(T)))
+    threshold = T === Float64 ? T(512) * sqrt(eps(T)) :
+        max(T(65536) * sqrt(eps(T)), T(10) * cbrt(eps(T)))
     return abs(residual) <= threshold * work
 end
 

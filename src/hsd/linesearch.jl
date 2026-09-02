@@ -110,7 +110,6 @@ least one quarter of its predicted `alpha * current` reduction.
         # zero-progress steps indefinitely instead of reaching certification.
         return trial < current
     end
-    end
     return trial <= current - predicted / T(4) + resolution
 end
 
