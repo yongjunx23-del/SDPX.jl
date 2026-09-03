@@ -36,14 +36,14 @@ end
 
 @inline function _runtime_copy_in!(dst::AbstractVector, src, offset::Int, len::Int)
     @inbounds for i in 1:len
-        dst[i] = src[offset + i - 1]
+        _store_owned_scalar!(dst, i, src[offset + i - 1])
     end
     return dst
 end
 
 @inline function _runtime_copy_out!(dst, offset::Int, src::AbstractVector, len::Int)
     @inbounds for i in 1:len
-        dst[offset + i - 1] = src[i]
+        _store_owned_scalar!(dst, offset + i - 1, src[i])
     end
     return dst
 end
@@ -51,16 +51,16 @@ end
 @inline function _runtime_copy_identity!(dst, offset::Int, dim::Int, ::Val{:orthant})
     z = zero(eltype(dst)); o = one(eltype(dst))
     @inbounds for i in 1:dim
-        dst[offset + i - 1] = o
+        _store_owned_scalar!(dst, offset + i - 1, o)
     end
     return dst
 end
 
 @inline function _runtime_copy_identity!(dst, offset::Int, dim::Int, ::Val{:soc})
     z = zero(eltype(dst)); o = one(eltype(dst))
-    dst[offset] = o
+    _store_owned_scalar!(dst, offset, o)
     @inbounds for i in 2:dim
-        dst[offset + i - 1] = z
+        _store_owned_scalar!(dst, offset + i - 1, z)
     end
     return dst
 end
@@ -71,7 +71,9 @@ end
     @inbounds for j in 1:dim
         for i in j:dim
             k += 1
-            dst[offset + k - 1] = i == j ? o : z
+            _store_owned_scalar!(
+                dst, offset + k - 1, i == j ? o : z,
+            )
         end
     end
     return dst
@@ -86,7 +88,7 @@ end
 
 @inline function _runtime_zero_ranges!(runtime::ProductConeRuntime, vector)
     @inbounds for rows in runtime.zero_ranges, index in rows
-        vector[index] = zero(eltype(vector))
+        _store_owned_scalar!(vector, index, zero(eltype(vector)))
     end
     return vector
 end
@@ -470,8 +472,8 @@ end
     end
     converged || return false
     SymmetricCones._orthonormalize!(V, n)
-    fill!(root, zero(T))
-    fill!(invroot, zero(T))
+    zero_owned!(root)
+    zero_owned!(invroot)
     @inbounds for k in 1:n
         value = values[k]
         (isfinite(value) && value > zero(T)) || return false
@@ -494,7 +496,7 @@ end
 @inline function _runtime_psd_cholesky!(
     L::AbstractMatrix{T}, X::AbstractMatrix, n::Int,
 ) where {T}
-    fill!(L, zero(T))
+    zero_owned!(L)
     @inbounds for j in 1:n
         for i in j:n
             value = X[i, j]
@@ -581,7 +583,7 @@ end
     SymmetricCones._psd_nt_close(state.chol_inv, state.work4, n) ||
         return _runtime_psd_nt_fail(:factorized_orientation, n)
     mul!(state.work1, state.work4, state.work3)
-    fill!(state.chol_inv, zero(T))
+    zero_owned!(state.chol_inv)
     @inbounds for i in 1:n
         state.chol_inv[i, i] = one(T)
     end
@@ -1084,9 +1086,11 @@ end
 
 
 @inline function _runtime_fill_column!(dst, A::SparseMatrixCSC, column::Int)
-    fill!(dst, zero(eltype(dst)))
+    zero_owned!(dst)
     @inbounds for pointer in nzrange(A, column)
-        dst[A.rowval[pointer]] = A.nzval[pointer]
+        _store_owned_scalar!(
+            dst, A.rowval[pointer], A.nzval[pointer],
+        )
     end
     return dst
 end
@@ -1134,7 +1138,7 @@ function assemble_schur!(
     _runtime_check_vector(runtime, scratch.input)
     _runtime_check_vector(runtime, scratch.output)
     _runtime_require_valid(runtime)
-    fill!(H, zero(T))
+    zero_owned!(H)
     @inbounds for column in axes(A, 2)
         _runtime_fill_column!(scratch.input, A, column)
         apply_G!(runtime, scratch.output, scratch.input)

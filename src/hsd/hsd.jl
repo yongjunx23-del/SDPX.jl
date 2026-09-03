@@ -209,7 +209,10 @@ function _hsd_provider_full_rank_reduction(
     transposed = alloc_zeros(T, n, m)
     @inbounds for column in 1:n
         for pointer in nzrange(A, column)
-            transposed[column, A.rowval[pointer]] = A.nzval[pointer]
+            _store_owned_scalar!(
+                transposed, CartesianIndex(column, A.rowval[pointer]),
+                A.nzval[pointer],
+            )
         end
     end
 
@@ -245,14 +248,14 @@ function _hsd_provider_full_rank_reduction(
         Ar=SparseArrays.sparse(A),
         cr=copy_owned!(alloc_zeros(T, n), c),
         V=IdentityRankBasis(T, n),
-        cnull=zeros(T, n),
+        cnull=alloc_zeros(T, n),
         rank=n,
         rank_tolerance=cutoff,
         objective_tolerance=T(100 * max(m, n)) * eps(T) *
                             max(norm(c, Inf), one(T)),
         ambiguous=ambiguous,
         incompatible=false,
-        ray=zeros(T, n),
+        ray=alloc_zeros(T, n),
     )
 end
 
@@ -261,11 +264,11 @@ function _hsd_rowspace_reduction(A::AbstractMatrix{T}, c::AbstractVector{T}) whe
     n == length(c) || throw(DimensionMismatch("canonical A/c dimensions disagree"))
     if n == 0
         return (
-            Ar = SparseArrays.sparse(zeros(T, m, 0)),
+            Ar = SparseArrays.sparse(alloc_zeros(T, m, 0)),
             cr = Vector{T}(undef, 0),
-            V = zeros(T, 0, 0), cnull = zeros(T, 0), rank = 0,
+            V = alloc_zeros(T, 0, 0), cnull = alloc_zeros(T, 0), rank = 0,
             rank_tolerance = zero(T), objective_tolerance = zero(T),
-            ambiguous = false, incompatible = false, ray = zeros(T, 0),
+            ambiguous = false, incompatible = false, ray = alloc_zeros(T, 0),
         )
     end
 
@@ -325,23 +328,23 @@ function _hsd_rowspace_reduction(A::AbstractMatrix{T}, c::AbstractVector{T}) whe
         cr = copy_owned!(alloc_zeros(T, n), c)
         return (
             Ar = SparseArrays.sparse(A), cr = cr, V = V,
-            cnull = zeros(T, n), rank = r,
+            cnull = alloc_zeros(T, n), rank = r,
             rank_tolerance = cutoff,
             objective_tolerance = T(100 * max(m, n)) * eps(T) *
                                   max(norm(c, Inf), one(T)),
             ambiguous = rank_ambiguous, incompatible = false,
-            ray = zeros(T, n),
+            ray = alloc_zeros(T, n),
         )
     end
 
-    seed = zeros(T, n, r)
+    seed = alloc_zeros(T, n, r)
     @inbounds for j in 1:r
         seed[j, j] = one(T)
     end
     V = r == 0 ? seed : Matrix{T}(F.Q * seed)
     Ar_dense = Af * V
     Ar = SparseArrays.sparse(Ar_dense)
-    cr = zeros(T, r)
+    cr = alloc_zeros(T, r)
     @inbounds for j in 1:r
         acc = zero(T)
         for i in 1:n
@@ -368,7 +371,7 @@ function _hsd_rowspace_reduction(A::AbstractMatrix{T}, c::AbstractVector{T}) whe
     end
     incompatible = cnull_norm > compat_tol
 
-    ray = zeros(T, n)
+    ray = alloc_zeros(T, n)
     if incompatible
         # Mathematically A*c_N=0 and c'*(-c_N)=-||c_N||².  Numerical setup
         # only stages this candidate; original-coordinate cone/objective
@@ -442,21 +445,21 @@ function _hsd_state_from_reduction(
         reduction.V, reduction.cnull, reduction.ambiguous,
         reduction.incompatible, reduction.ray,
         _hsd_reduction_mode(reduction), _hsd_reduction_status(reduction),
-        zeros(T, nr), driver,
-        schur_storage, zeros(T, nr), zeros(T, n),
-        zeros(T, nr), zeros(T, nr), zeros(T, nr), zeros(T, nr), zeros(T, nr),
+        alloc_zeros(T, nr), driver,
+        schur_storage, alloc_zeros(T, nr), alloc_zeros(T, n),
+        alloc_zeros(T, nr), alloc_zeros(T, nr), alloc_zeros(T, nr), alloc_zeros(T, nr), alloc_zeros(T, nr),
     )
     z = zero(T); o = one(T)
     return HSDState{T, R}(
         canonical, A, b, c, n, m, nu, workspace,
-        zeros(T, n), zeros(T, m), zeros(T, m), o, o,      # x, y, s, τ, κ
-        zeros(T, n), zeros(T, m), zeros(T, m), z, z,      # dx, dy, ds, dτ, dκ
-        zeros(T, n), zeros(T, m), zeros(T, m), z, z,      # affine directions
-        zeros(T, m), zeros(T, n), z,                      # rP, rD, rG
-        zeros(T, m), zeros(T, m), zeros(T, m),             # theta, g, comp
+        alloc_zeros(T, n), alloc_zeros(T, m), alloc_zeros(T, m), o, o,      # x, y, s, τ, κ
+        alloc_zeros(T, n), alloc_zeros(T, m), alloc_zeros(T, m), z, z,      # dx, dy, ds, dτ, dκ
+        alloc_zeros(T, n), alloc_zeros(T, m), alloc_zeros(T, m), z, z,      # affine directions
+        alloc_zeros(T, m), alloc_zeros(T, n), z,                      # rP, rD, rG
+        alloc_zeros(T, m), alloc_zeros(T, m), alloc_zeros(T, m),             # theta, g, comp
         z, z, z,                                           # mu, mu_aff, complementarity
-        zeros(T, n), zeros(T, m), zeros(T, m), zeros(T, m),
-        zeros(T, m), z, z, zeros(T, m), zeros(T, n),       # trial/scratch
+        alloc_zeros(T, n), alloc_zeros(T, m), alloc_zeros(T, m), alloc_zeros(T, m),
+        alloc_zeros(T, m), z, z, alloc_zeros(T, m), alloc_zeros(T, n),       # trial/scratch
         HSDStepRecord{T}(), 0,
     )
 end
@@ -619,7 +622,7 @@ end
 end
 
 @inline function _opnorm_inf(M::SparseMatrixCSC{T,Int}) where {T}
-    row_sums = zeros(T, size(M, 1))
+    row_sums = alloc_zeros(T, size(M, 1))
     @inbounds for column in axes(M, 2)
         for pointer in nzrange(M, column)
             row = M.rowval[pointer]
@@ -695,7 +698,7 @@ responsible for ensuring `τ > 0`; returns (0,0,0) otherwise.
 """
 function hsd_conic_iterate(state::HSDState{T}) where {T}
     if state.tau <= zero(T)
-        return (zeros(T, state.n), zeros(T, state.m), zeros(T, state.m))
+        return (alloc_zeros(T, state.n), alloc_zeros(T, state.m), alloc_zeros(T, state.m))
     end
     x = state.x ./ state.tau
     y = state.y ./ state.tau

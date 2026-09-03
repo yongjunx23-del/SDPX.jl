@@ -116,7 +116,7 @@ function _strict_shift_symmetric_product!(runtime, point)
     end
     for block in runtime.psd
         local_point = @view point[block.offset:(block.offset + block.len - 1)]
-        matrix = zeros(T, block.dim, block.dim)
+        matrix = alloc_zeros(T, block.dim, block.dim)
         SymmetricCones._unpack_svec!(
             matrix, local_point, block.dim, block.state.invsqrt2,
         )
@@ -154,7 +154,7 @@ function kkt_derived_start!(state::ProductConeHSDState{T}) where {T<:AbstractFlo
 
     scale = max(norm(A, Inf), norm(b, Inf), norm(c, Inf), one(T))
     regularization = sqrt(eps(T)) * scale
-    matrix = zeros(T, dimension, dimension)
+    matrix = alloc_zeros(T, dimension, dimension)
     _assemble_affine_start_kkt!(matrix, A, regularization)
     threshold = T(32) * eps(T) * max(norm(matrix, Inf), one(T))
 
@@ -168,7 +168,7 @@ function kkt_derived_start!(state::ProductConeHSDState{T}) where {T<:AbstractFlo
     factor = GenericPivotedLU(T, dimension)
     factorize_pivoted_lu!(factor, matrix; threshold=threshold) ||
         return _failed_hsd_start_report(T, :affine_kkt_factorization)
-    rhs = zeros(T, dimension, 2)
+    rhs = alloc_zeros(T, dimension, 2)
     @inbounds for i in 1:m
         rhs[n + i, 1] = b[i]
     end
@@ -185,8 +185,8 @@ function kkt_derived_start!(state::ProductConeHSDState{T}) where {T<:AbstractFlo
 
     # Runtime-generated central points are the only initialization authority
     # for nonsymmetric blocks. Symmetric blocks retain their affine estimates.
-    central_s = zeros(T, m)
-    central_y = zeros(T, m)
+    central_s = alloc_zeros(T, m)
+    central_y = alloc_zeros(T, m)
     initialize_primal_dual!(state.runtime, central_s, central_y)
     _copy_nonsymmetric_central_blocks!(state.runtime, s, central_s)
     _copy_nonsymmetric_central_blocks!(state.runtime, y, central_y)
@@ -199,7 +199,7 @@ function kkt_derived_start!(state::ProductConeHSDState{T}) where {T<:AbstractFlo
         _strict_shift_symmetric_product!(state.runtime, y)
     dual_ok || return _failed_hsd_start_report(T, :dual_interior_shift)
 
-    identity = zeros(T, m)
+    identity = alloc_zeros(T, m)
     _product_symmetric_identity!(state.runtime, identity)
     identity_degree = _product_symmetric_identity_degree(state.runtime)
     primal_mass_shift = zero(T)

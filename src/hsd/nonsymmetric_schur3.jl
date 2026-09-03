@@ -117,7 +117,7 @@ function NonsymmetricSchur3Workspace(
             iszero(local_row) && continue
             slot = next_slot[local_row]
             column_indices[slot] = column
-            coefficients[slot] = A.nzval[pointer]
+            _store_owned_scalar!(coefficients, slot, A.nzval[pointer])
             next_slot[local_row] = slot + 1
         end
     end
@@ -129,14 +129,14 @@ function NonsymmetricSchur3Workspace(
         rowptr,
         column_indices,
         coefficients,
-        zeros(T, 6, blocks),
-        zeros(T, 3, 3),
-        zeros(T, 3, 3),
-        zeros(T, 3, columns_count),
-        zeros(T, 3),
-        zeros(T, 3),
-        zeros(T, 3),
-        zeros(T, 3),
+        alloc_zeros(T, 6, blocks),
+        alloc_zeros(T, 3, 3),
+        alloc_zeros(T, 3, 3),
+        alloc_zeros(T, 3, columns_count),
+        alloc_zeros(T, 3),
+        alloc_zeros(T, 3),
+        alloc_zeros(T, 3),
+        alloc_zeros(T, 3),
         setup_valid,
         setup_reason,
     )

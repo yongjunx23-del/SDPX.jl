@@ -147,12 +147,12 @@ end
     zero_t = zero(T)
     one_t = one(T)
     two_t = one_t + one_t
-    workspace.primal[1] = zero_t
-    workspace.primal[2] = one_t
-    workspace.primal[3] = two_t
-    workspace.dual[1] = -one_t
-    workspace.dual[2] = one_t
-    workspace.dual[3] = one_t
+    _store_owned_scalar!(workspace.primal, 1, zero_t)
+    _store_owned_scalar!(workspace.primal, 2, one_t)
+    _store_owned_scalar!(workspace.primal, 3, two_t)
+    _store_owned_scalar!(workspace.dual, 1, -one_t)
+    _store_owned_scalar!(workspace.dual, 2, one_t)
+    _store_owned_scalar!(workspace.dual, 3, one_t)
     return nothing
 end
 
@@ -163,12 +163,12 @@ end
     zero_t = zero(T)
     one_t = one(T)
     alpha = tag.alpha
-    workspace.primal[1] = one_t
-    workspace.primal[2] = one_t
-    workspace.primal[3] = zero_t
-    workspace.dual[1] = alpha
-    workspace.dual[2] = one_t - alpha
-    workspace.dual[3] = inv(one_t + one_t)
+    _store_owned_scalar!(workspace.primal, 1, one_t)
+    _store_owned_scalar!(workspace.primal, 2, one_t)
+    _store_owned_scalar!(workspace.primal, 3, zero_t)
+    _store_owned_scalar!(workspace.dual, 1, alpha)
+    _store_owned_scalar!(workspace.dual, 2, one_t - alpha)
+    _store_owned_scalar!(workspace.dual, 3, inv(one_t + one_t))
     return nothing
 end
 
@@ -323,8 +323,8 @@ function try_initialize_nonsymmetric_block!(
             workspace, NS_INITIALIZATION_TYPE_MISMATCH,
         )
     @inbounds for index in 1:3
-        workspace.primal[index] = primal[index]
-        workspace.dual[index] = dual[index]
+        _store_owned_scalar!(workspace.primal, index, primal[index])
+        _store_owned_scalar!(workspace.dual, index, dual[index])
     end
     return _ns_initialization_validate_loaded!(workspace, tag)
 end

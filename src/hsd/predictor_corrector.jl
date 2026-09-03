@@ -189,7 +189,7 @@ function _product_hsd_sparse_linearization(
     copyto!(state.expanded.cone_corrector_rhs, corrector_rhs)
     for rows in ranges
         dimension = length(rows)
-        operator = zeros(T, dimension, dimension)
+        operator = alloc_zeros(T, dimension, dimension)
         scaling = _product_hsd_nonsymmetric_scaling(
             state.runtime, first(rows),
         )
@@ -931,9 +931,15 @@ function _product_hsd_symmetric_core_direction!(
     # Affine-step / centering-parameter computation feeds the corrector RHS.
     t0 = time_ns()
     alpha_aff = _product_hsd_boundary_alpha!(state)
-    (isfinite(alpha_aff) && alpha_aff > zero(T)) || return false
+    (isfinite(alpha_aff) && alpha_aff > zero(T)) || begin
+        state.diagnostic = :symmetric_core_affine_boundary_failed
+        return false
+    end
     mu_aff = _product_hsd_mu_aff!(state, alpha_aff)
-    (isfinite(mu_aff) && mu_aff >= zero(T)) || return false
+    (isfinite(mu_aff) && mu_aff >= zero(T)) || begin
+        state.diagnostic = :symmetric_core_affine_mu_failed
+        return false
+    end
     ratio = base.mu_aff / base.mu
     sigma = _product_hsd_sigma(state, ratio)
     sigma_mu = sigma * base.mu
@@ -983,7 +989,6 @@ function _product_hsd_symmetric_core_direction!(
         return false
     end
     if !_product_hsd_newton_residual_ok(state, corrector_scalar)
-    if !_product_hsd_newton_residual_ok(state, corrector_scalar)
         copyto!(base.dx, base.dx_a)
         copyto!(base.dy, base.dy_a)
         copyto!(base.ds, base.ds_a)
@@ -992,7 +997,6 @@ function _product_hsd_symmetric_core_direction!(
         _product_hsd_core_scatter!(state)
         state.diagnostic = :corrector_fallback_to_predictor
         return true
-    end
     end
     timings.corrector_linear_solve_seconds +=
         Float64(time_ns() - t0) * 1.0e-9 -

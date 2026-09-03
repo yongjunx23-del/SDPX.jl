@@ -1010,9 +1010,9 @@ function _public_native_hsd_core(
     setup_seconds = Float64(time_ns() - setup_started) * 1.0e-9
     n = canonical_num_variables(canonical)
     m = canonical_num_slack(canonical)
-    x_full = zeros(T, n)
-    s_full = zeros(T, m)
-    y_full = zeros(T, m)
+    x_full = alloc_zeros(T, n)
+    s_full = alloc_zeros(T, m)
+    y_full = alloc_zeros(T, m)
 
     if reduction.status === HSDEqualityInconsistent
         copyto!(y_full, reduction.primal_infeasibility_ray)
@@ -1146,7 +1146,7 @@ function _public_native_hsd_core(
                 x_full, s_full, y_full, setup_seconds, 0.0, recovery_seconds,
             )
         end
-        x_reduced = zeros(T, canonical_num_variables(reduced))
+        x_reduced = alloc_zeros(T, canonical_num_variables(reduced))
         ok = hsd_recover_optimal_source!(
             x_full,
             s_full,
@@ -1498,10 +1498,10 @@ function _native_hsd_frontend_dual(
     canonical::CanonicalConicProgram{T},
     y_canonical::Vector{T},
 ) where {T<:AbstractFloat}
-    source = zeros(T, canonical_num_slack(canonical))
+    source = alloc_zeros(T, canonical_num_slack(canonical))
     dual_forward!(canonical, source, y_canonical)
-    constraint_dual = zeros(T, num_constraints(model))
-    dual_slack = zeros(T, num_variables(model))
+    constraint_dual = alloc_zeros(T, num_constraints(model))
+    dual_slack = alloc_zeros(T, num_variables(model))
     for block in canonical.cone_layout.blocks
         map = block.reconstruction
         @inbounds for local_index in 1:block.length
@@ -1529,7 +1529,7 @@ function _native_hsd_row_dual(
     program::NativeConeProgram{T},
     constraint_dual::Vector{T},
 ) where {T<:AbstractFloat}
-    row_dual = zeros(T, program_num_rows(program))
+    row_dual = alloc_zeros(T, program_num_rows(program))
     @inbounds for row in eachindex(row_dual)
         reference = program.constraint_dual_reconstruction[row]
         row_dual[row] = constraint_dual[_result_constraint_index(model, reference)]
@@ -1716,8 +1716,8 @@ function _public_result_from_native_hsd(
     outputs::Outputs,
 ) where {T<:AbstractFloat}
     primal = copy(core.x)
-    constraint_dual = zeros(T, num_constraints(model))
-    dual_slack = zeros(T, num_variables(model))
+    constraint_dual = alloc_zeros(T, num_constraints(model))
+    dual_slack = alloc_zeros(T, num_variables(model))
     if core.status in (Optimal, PrimalInfeasible)
         constraint_dual, dual_slack = _native_hsd_frontend_dual(
             model,

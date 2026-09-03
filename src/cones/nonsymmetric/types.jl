@@ -148,23 +148,23 @@ function NonsymmetricConjugateWorkspace(
     settings = NonsymmetricConjugateSettings(T; kwargs...)
     return NonsymmetricConjugateWorkspace{T}(
         settings,
-        zeros(T, 3),
-        zeros(T, 3),
-        zeros(T, 3),
-        zeros(T, 3),
-        zeros(T, 3),
-        zeros(T, 3),
-        zeros(T, 3),
-        zeros(T, 3, 3),
-        zeros(T, 3, 3),
-        zeros(T, 3, 3),
-        zeros(T, 3, 3),
-        zeros(T, 3),
-        zeros(T, 3),
-        zeros(T, 3),
-        zeros(T, 3, 3),
-        zeros(T, 3, 3),
-        zeros(T, 3, 3),
+        alloc_zeros(T, 3),
+        alloc_zeros(T, 3),
+        alloc_zeros(T, 3),
+        alloc_zeros(T, 3),
+        alloc_zeros(T, 3),
+        alloc_zeros(T, 3),
+        alloc_zeros(T, 3),
+        alloc_zeros(T, 3, 3),
+        alloc_zeros(T, 3, 3),
+        alloc_zeros(T, 3, 3),
+        alloc_zeros(T, 3, 3),
+        alloc_zeros(T, 3),
+        alloc_zeros(T, 3),
+        alloc_zeros(T, 3),
+        alloc_zeros(T, 3, 3),
+        alloc_zeros(T, 3, 3),
+        alloc_zeros(T, 3, 3),
         T(Inf),
         T(Inf),
         zero(T),
@@ -301,8 +301,8 @@ function NonsymmetricScalingWorkspace(
         degeneracy_tolerance=degeneracy_tolerance,
     )
     conjugate = NonsymmetricConjugateWorkspace(T; conjugate_kwargs...)
-    z3() = zeros(T, 3)
-    m3() = zeros(T, 3, 3)
+    z3() = alloc_zeros(T, 3)
+    m3() = alloc_zeros(T, 3, 3)
     return NonsymmetricScalingWorkspace{T,typeof(conjugate)}(
         settings,
         conjugate,

@@ -71,16 +71,16 @@ function hsd_retain_equalities(
         Int[],
         identity_rows,
         copy(identity_rows),
-        zeros(T, n),
+        alloc_zeros(T, n),
         IdentityRankBasis(T, n),
-        zeros(T, n, 0),
-        zeros(T, 0, 0),
+        alloc_zeros(T, n, 0),
+        alloc_zeros(T, 0, 0),
         Int[], Int[], Int[],
-        zeros(T, 0, 0),
+        alloc_zeros(T, 0, 0),
         0,
         zero(T),
         T(100) * eps(T),
-        zeros(T, m),
+        alloc_zeros(T, m),
     )
 end
 
@@ -219,7 +219,7 @@ function _hsd_eq_verified_equality_ray(
     local_ray::Vector{T},
     tolerance::T,
 ) where {T}
-    full_ray = zeros(T, canonical_num_slack(canonical))
+    full_ray = alloc_zeros(T, canonical_num_slack(canonical))
     full_ray[zero_rows] .= local_ray
     stationarity = transpose(canonical.A) * full_ray
     pairing = dot(canonical.b, full_ray)
@@ -240,7 +240,7 @@ function _hsd_eq_singleton_qr(E::Matrix{T}) where {T<:AbstractFloat}
     first_variable = Vector{Int}(undef,me)
     second_variable = zeros(Int,me)
     first_coefficient = Vector{T}(undef,me)
-    second_coefficient = zeros(T,me)
+    second_coefficient = alloc_zeros(T,me)
     used = falses(n)
     @inbounds for row in 1:me
         count = 0
@@ -261,9 +261,9 @@ function _hsd_eq_singleton_qr(E::Matrix{T}) where {T<:AbstractFloat}
         end
         count >= 1 || return nothing
     end
-    range_basis = zeros(T,n,me)
-    null_basis = zeros(T,n,n-me)
-    R = zeros(T,me,me)
+    range_basis = alloc_zeros(T,n,me)
+    null_basis = alloc_zeros(T,n,n-me)
+    R = alloc_zeros(T,me,me)
     next_null = 1
     @inbounds for row in 1:me
         first = first_variable[row]
@@ -304,7 +304,7 @@ function _hsd_eq_sparse_disjoint_qr(
     row_index = zeros(Int,size(A,1))
     @inbounds for i in 1:me; row_index[zero_rows[i]] = i; end
     first_variable = zeros(Int,me); second_variable = zeros(Int,me)
-    first_coefficient = zeros(T,me); second_coefficient = zeros(T,me)
+    first_coefficient = alloc_zeros(T,me); second_coefficient = alloc_zeros(T,me)
     counts = zeros(UInt8,me); used = falses(n)
     @inbounds for column in 1:n
         for pointer in nzrange(A,column)
@@ -335,7 +335,7 @@ function _hsd_eq_sparse_disjoint_qr(
     null_i=Int[]; null_j=Int[]; null_v=T[]
     sizehint!(null_i,null_nnz); sizehint!(null_j,null_nnz)
     sizehint!(null_v,null_nnz)
-    R=zeros(T,me,me); next_null=1; scaleE=one(T)
+    R=alloc_zeros(T,me,me); next_null=1; scaleE=one(T)
     @inbounds for row in 1:me
         first = first_variable[row]; second = second_variable[row]
         a = first_coefficient[row]; scaleE = max(scaleE,abs(a))
@@ -398,18 +398,18 @@ function hsd_equality_reduce(
             zero_rows,
             active_rows,
             full_to_reduced,
-            zeros(T, n),
+            alloc_zeros(T, n),
             identity_basis,
-            zeros(T, n, 0),
-            zeros(T, 0, 0),
+            alloc_zeros(T, n, 0),
+            alloc_zeros(T, 0, 0),
             Int[],
             Int[],
             Int[],
-            zeros(T, 0, 0),
+            alloc_zeros(T, 0, 0),
             0,
             zero(T),
             T(100) * eps(T),
-            zeros(T, m),
+            alloc_zeros(T, m),
         )
     end
 
@@ -423,8 +423,8 @@ function hsd_equality_reduce(
 
     if n == 0
         pivots = collect(1:me)
-        R = zeros(T,0,me)
-        Q = zeros(T,0,0)
+        R = alloc_zeros(T,0,me)
+        Q = alloc_zeros(T,0,0)
     else
         if structural === nothing
             factor = LinearAlgebra.qr(B,LinearAlgebra.ColumnNorm())
@@ -434,7 +434,7 @@ function hsd_equality_reduce(
         else
             pivots = structural.pivots
             R = structural.R
-            Q = zeros(T,0,0) # unused on the structural branch
+            Q = alloc_zeros(T,0,0) # unused on the structural branch
         end
     end
 
@@ -477,16 +477,16 @@ function hsd_equality_reduce(
     independent = rank == 0 ? Int[] : Vector{Int}(pivots[1:rank])
     dependent = rank == me ? Int[] : Vector{Int}(pivots[(rank + 1):me])
     range_basis = structural === nothing ?
-        (rank == 0 ? zeros(T,n,0) : Matrix{T}(Q[:,1:rank])) :
+        (rank == 0 ? alloc_zeros(T,n,0) : Matrix{T}(Q[:,1:rank])) :
         structural.range_basis
     null_basis = structural === nothing ?
-        (rank == n ? zeros(T,n,0) : Matrix{T}(Q[:,(rank+1):n])) :
+        (rank == n ? alloc_zeros(T,n,0) : Matrix{T}(Q[:,(rank+1):n])) :
         structural.null_basis
-    upper = rank == 0 ? zeros(T, 0, 0) : Matrix{T}(R[1:rank, 1:rank])
-    transfer = zeros(T, rank, length(dependent))
+    upper = rank == 0 ? alloc_zeros(T, 0, 0) : Matrix{T}(R[1:rank, 1:rank])
+    transfer = alloc_zeros(T, rank, length(dependent))
     if rank > 0 && !isempty(dependent)
-        rhs = zeros(T, rank)
-        solution = zeros(T, rank)
+        rhs = alloc_zeros(T, rank)
+        solution = alloc_zeros(T, rank)
         for q in eachindex(dependent)
             @inbounds for i in 1:rank
                 rhs[i] = R[i, rank + q]
@@ -496,9 +496,9 @@ function hsd_equality_reduce(
                 return HSDEqualityReduction{T}(
                     HSDEqualityNumericalFailure, canonical, nothing,
                     zero_rows, active_rows, full_to_reduced,
-                    zeros(T, n), zeros(T, n, 0), range_basis, upper,
+                    alloc_zeros(T, n), alloc_zeros(T, n, 0), range_basis, upper,
                     pivots, independent, dependent, transfer, rank,
-                    rank_tol, rank_tol, zeros(T, m),
+                    rank_tol, rank_tol, alloc_zeros(T, m),
                 )
             transfer[:, q] .= solution
         end
@@ -510,23 +510,23 @@ function hsd_equality_reduce(
         return HSDEqualityReduction{T}(
             HSDEqualityRankAmbiguous, canonical, nothing,
             zero_rows, active_rows, full_to_reduced,
-            zeros(T, n), zeros(T, n, 0), range_basis, upper,
+            alloc_zeros(T, n), alloc_zeros(T, n, 0), range_basis, upper,
             pivots, independent, dependent, transfer, rank,
-            rank_tol, consistency_tol, zeros(T, m),
+            rank_tol, consistency_tol, alloc_zeros(T, m),
         )
     end
 
-    x_particular = zeros(T, n)
+    x_particular = alloc_zeros(T, n)
     if rank > 0
         rhs = Vector{T}(h[independent])
-        coefficients = zeros(T, rank)
+        coefficients = alloc_zeros(T, rank)
         if !_hsd_eq_upper_transpose_solve!(coefficients, upper, rhs)
             return HSDEqualityReduction{T}(
                 HSDEqualityNumericalFailure, canonical, nothing,
                 zero_rows, active_rows, full_to_reduced,
-                zeros(T, n), zeros(T, n, 0), range_basis, upper,
+                alloc_zeros(T, n), alloc_zeros(T, n, 0), range_basis, upper,
                 pivots, independent, dependent, transfer, rank,
-                rank_tol, consistency_tol, zeros(T, m),
+                rank_tol, consistency_tol, alloc_zeros(T, m),
             )
         end
         mul!(x_particular, range_basis, coefficients)
@@ -546,7 +546,7 @@ function hsd_equality_reduce(
     end
 
     if bad_q != 0
-        local_ray = zeros(T, me)
+        local_ray = alloc_zeros(T, me)
         alpha = bad_residual > zero(T) ? -one(T) : one(T)
         local_ray[dependent[bad_q]] = alpha
         @inbounds for i in 1:rank
@@ -577,7 +577,7 @@ function hsd_equality_reduce(
             rank,
             rank_tol,
             consistency_tol,
-            valid ? full_ray : zeros(T, m),
+            valid ? full_ray : alloc_zeros(T, m),
         )
     end
 
@@ -605,7 +605,7 @@ function hsd_equality_reduce(
             zero_rows, active_rows, full_to_reduced,
             x_particular, null_basis, range_basis, upper,
             pivots, independent, dependent, transfer, rank,
-            rank_tol, consistency_tol, zeros(T, m),
+            rank_tol, consistency_tol, alloc_zeros(T, m),
         )
     end
 
@@ -630,7 +630,7 @@ function hsd_equality_reduce(
         rank,
         rank_tol,
         consistency_tol,
-        zeros(T, m),
+        alloc_zeros(T, m),
     )
 end
 
@@ -668,10 +668,10 @@ function hsd_recover_equality_dual!(
     _hsd_eq_all_finite(rhs) || return false
     tolerance = _hsd_eq_recovery_tolerance(reduction, tol)
     rank = reduction.rank
-    temporary = zeros(T, length(destination))
+    temporary = alloc_zeros(T, length(destination))
     if rank > 0
         projected = Vector{T}(transpose(reduction.range_basis) * rhs)
-        coefficients = zeros(T, rank)
+        coefficients = alloc_zeros(T, rank)
         _hsd_eq_upper_solve!(coefficients, reduction.upper, projected) || return false
         @inbounds for i in 1:rank
             temporary[reduction.independent[i]] = coefficients[i]
@@ -741,8 +741,8 @@ function hsd_recover_optimal!(
     tolerance = _hsd_eq_recovery_tolerance(reduction, tol)
 
     x = reduction.x_particular + reduction.null_basis * x_reduced
-    s = zeros(T, canonical_num_slack(original))
-    y = zeros(T, canonical_num_slack(original))
+    s = alloc_zeros(T, canonical_num_slack(original))
+    y = alloc_zeros(T, canonical_num_slack(original))
     _hsd_eq_scatter_active!(s, reduction, s_reduced)
     _hsd_eq_scatter_active!(y, reduction, y_reduced)
 
@@ -754,7 +754,7 @@ function hsd_recover_optimal!(
     if !isempty(reduction.zero_rows)
         dual_rhs = -original.c -
                    transpose(original.A[reduction.reduced_to_full, :]) * y_reduced
-        equality_dual = zeros(T, length(reduction.zero_rows))
+        equality_dual = alloc_zeros(T, length(reduction.zero_rows))
         hsd_recover_equality_dual!(equality_dual, reduction, dual_rhs; tol=tolerance) ||
             return false
         y[reduction.zero_rows] .= equality_dual
@@ -829,14 +829,14 @@ function hsd_recover_primal_ray!(
     length(y_reduced) == length(reduction.reduced_to_full) || throw(DimensionMismatch("y_reduced"))
     _hsd_eq_all_finite(y_reduced) || return false
     tolerance = _hsd_eq_recovery_tolerance(reduction, tol)
-    y = zeros(T, canonical_num_slack(original))
+    y = alloc_zeros(T, canonical_num_slack(original))
     _hsd_eq_scatter_active!(y, reduction, y_reduced)
     # See `hsd_recover_optimal!`: the full ray residual is checked below on
     # the appropriate ray/data scale, so an empty equality panel must not
     # impose a second absolute-scale check.
     if !isempty(reduction.zero_rows)
         rhs = -transpose(original.A[reduction.reduced_to_full, :]) * y_reduced
-        equality_dual = zeros(T, length(reduction.zero_rows))
+        equality_dual = alloc_zeros(T, length(reduction.zero_rows))
         hsd_recover_equality_dual!(equality_dual, reduction, rhs; tol=tolerance) ||
             return false
         y[reduction.zero_rows] .= equality_dual
@@ -875,7 +875,7 @@ function hsd_recover_dual_ray!(
     _hsd_eq_all_finite(x_reduced) && _hsd_eq_all_finite(s_reduced) || return false
     tolerance = _hsd_eq_recovery_tolerance(reduction, tol)
     x = reduction.null_basis * x_reduced
-    s = zeros(T, canonical_num_slack(original))
+    s = alloc_zeros(T, canonical_num_slack(original))
     _hsd_eq_scatter_active!(s, reduction, s_reduced)
     residual = original.A * x + s
     improvement = dot(original.c, x)
@@ -952,17 +952,17 @@ function hsd_recover_optimal_source!(
         _hsd_eq_all_finite(y_source) || return false
 
     x_canonical = copy(x_source)
-    s_canonical = zeros(T, canonical_num_slack(reduced))
+    s_canonical = alloc_zeros(T, canonical_num_slack(reduced))
     primal_backward!(reduced, x_canonical, s_canonical, x_source)
-    expected_x = zeros(T, length(x_source))
-    expected_s = zeros(T, length(s_source))
+    expected_x = alloc_zeros(T, length(x_source))
+    expected_s = alloc_zeros(T, length(s_source))
     primal_forward!(
         reduced, expected_x, expected_s, x_canonical, s_canonical,
     )
     source_scale = _hsd_eq_source_data_scale(reduced)
     _hsd_eq_source_match(expected_s, s_source, tolerance, source_scale) ||
         return false
-    y_canonical = zeros(T, length(y_source))
+    y_canonical = alloc_zeros(T, length(y_source))
     dual_backward!(reduced, y_canonical, y_source)
     return hsd_recover_optimal!(
         x_full, s_full, y_full, reduction,
@@ -982,7 +982,7 @@ function hsd_recover_primal_ray_source!(
     length(y_source) == canonical_num_slack(reduced) ||
         throw(DimensionMismatch("reduced source dual ray length"))
     _hsd_eq_all_finite(y_source) || return false
-    y_canonical = zeros(T, length(y_source))
+    y_canonical = alloc_zeros(T, length(y_source))
     dual_backward!(reduced, y_canonical, y_source)
     return hsd_recover_primal_ray!(
         y_full, reduction, y_canonical; tol=tol,
@@ -1008,8 +1008,8 @@ function hsd_recover_dual_ray_source!(
     tolerance = _hsd_eq_recovery_tolerance(reduction, tol)
     x_canonical = copy(x_source)
     s_canonical = Vector{T}(-reduced.A * x_canonical)
-    expected_x = zeros(T, length(x_source))
-    expected_s = zeros(T, length(s_source))
+    expected_x = alloc_zeros(T, length(x_source))
+    expected_s = alloc_zeros(T, length(s_source))
     primal_forward!(
         reduced, expected_x, expected_s, x_canonical, s_canonical,
     )

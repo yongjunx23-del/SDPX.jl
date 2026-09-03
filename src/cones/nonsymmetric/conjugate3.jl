@@ -471,17 +471,24 @@ end
         return false
     end
     @inbounds for i in 1:3
-        workspace.shadow[i] = workspace.accepted_shadow[i]
+        _store_owned_scalar!(workspace.shadow, i, workspace.accepted_shadow[i])
     end
     @inbounds for j in 1:3, i in 1:3
-        workspace.hessian[i, j] = workspace.accepted_hessian[i, j]
-        workspace.hessian_factor[i, j] =
-            workspace.accepted_hessian_factor[i, j]
+        index = CartesianIndex(i, j)
+        _store_owned_scalar!(
+            workspace.hessian, index, workspace.accepted_hessian[i, j],
+        )
+        _store_owned_scalar!(
+            workspace.hessian_factor, index,
+            workspace.accepted_hessian_factor[i, j],
+        )
     end
     if workspace.accepted_inverse_valid
         @inbounds for j in 1:3, i in 1:3
-            workspace.inverse_hessian[i, j] =
-                workspace.accepted_inverse_hessian[i, j]
+            _store_owned_scalar!(
+                workspace.inverse_hessian, CartesianIndex(i, j),
+                workspace.accepted_inverse_hessian[i, j],
+            )
         end
     end
     workspace.gap = workspace.accepted_gap
@@ -499,21 +506,28 @@ end
     inverse_valid::Bool,
 ) where {T}
     workspace.valid && workspace.hessian_factor_valid || return false
-    workspace.accepted_dual[1] = y1
-    workspace.accepted_dual[2] = y2
-    workspace.accepted_dual[3] = y3
+    _store_owned_scalar!(workspace.accepted_dual, 1, y1)
+    _store_owned_scalar!(workspace.accepted_dual, 2, y2)
+    _store_owned_scalar!(workspace.accepted_dual, 3, y3)
     @inbounds for i in 1:3
-        workspace.accepted_shadow[i] = workspace.shadow[i]
+        _store_owned_scalar!(workspace.accepted_shadow, i, workspace.shadow[i])
     end
     @inbounds for j in 1:3, i in 1:3
-        workspace.accepted_hessian[i, j] = workspace.hessian[i, j]
-        workspace.accepted_hessian_factor[i, j] =
-            workspace.hessian_factor[i, j]
+        index = CartesianIndex(i, j)
+        _store_owned_scalar!(
+            workspace.accepted_hessian, index, workspace.hessian[i, j],
+        )
+        _store_owned_scalar!(
+            workspace.accepted_hessian_factor, index,
+            workspace.hessian_factor[i, j],
+        )
     end
     if inverse_valid
         @inbounds for j in 1:3, i in 1:3
-            workspace.accepted_inverse_hessian[i, j] =
-                workspace.inverse_hessian[i, j]
+            _store_owned_scalar!(
+                workspace.accepted_inverse_hessian, CartesianIndex(i, j),
+                workspace.inverse_hessian[i, j],
+            )
         end
     end
     workspace.accepted_gap = workspace.gap
@@ -702,9 +716,9 @@ end
             workspace.hessian_factor, solution, rhs, forward, action,
         )
         solve_ok || return false
-        inverse_hessian[1, column] = solution[1]
-        inverse_hessian[2, column] = solution[2]
-        inverse_hessian[3, column] = solution[3]
+        _store_owned_scalar!(inverse_hessian, CartesianIndex(1, column), solution[1])
+        _store_owned_scalar!(inverse_hessian, CartesianIndex(2, column), solution[2])
+        _store_owned_scalar!(inverse_hessian, CartesianIndex(3, column), solution[3])
     end
     # The three independent solves differ only by roundoff.  Store the
     # mathematically symmetric conjugate Hessian explicitly.
@@ -730,9 +744,9 @@ end
         rhs[1] = column == 1 ? o : z
         rhs[2] = column == 2 ? o : z
         rhs[3] = column == 3 ? o : z
-        solution[1] = inverse_hessian[1, column]
-        solution[2] = inverse_hessian[2, column]
-        solution[3] = inverse_hessian[3, column]
+        _store_owned_scalar!(solution, 1, inverse_hessian[1, column])
+        _store_owned_scalar!(solution, 2, inverse_hessian[2, column])
+        _store_owned_scalar!(solution, 3, inverse_hessian[3, column])
         solve_ok, _ = _ns_structural_hessian_solve_certificate!(
             workspace.hessian_factor, solution, rhs, forward, action,
         )
@@ -864,9 +878,9 @@ function _ns_conjugate_cartesian_shadow!(
         workspace.gradient, tag, workspace.shadow, y1, y2, y3,
     ) : T(Inf)
     if isfinite(warm_score) && warm_score <= cold_score
-        workspace.shadow[1] = workspace.warm_shadow[1]
-        workspace.shadow[2] = workspace.warm_shadow[2]
-        workspace.shadow[3] = workspace.warm_shadow[3]
+        _store_owned_scalar!(workspace.shadow, 1, workspace.warm_shadow[1])
+        _store_owned_scalar!(workspace.shadow, 2, workspace.warm_shadow[2])
+        _store_owned_scalar!(workspace.shadow, 3, workspace.warm_shadow[3])
         workspace.last_seed_mode = NS_CONJUGATE_PREDICTED_WARM_SEED
     elseif !isfinite(cold_score)
         return _ns_conjugate_failure(
@@ -975,9 +989,9 @@ function _ns_conjugate_cartesian_shadow!(
                 trial_residual = _ns_conjugate_maxabs3(tr1, tr2, tr3)
                 sufficient = (one(T) - settings.armijo * alpha) * last_residual
                 if isfinite(trial_residual) && trial_residual <= sufficient
-                    workspace.shadow[1] = workspace.trial[1]
-                    workspace.shadow[2] = workspace.trial[2]
-                    workspace.shadow[3] = workspace.trial[3]
+                    _store_owned_scalar!(workspace.shadow, 1, workspace.trial[1])
+                    _store_owned_scalar!(workspace.shadow, 2, workspace.trial[2])
+                    _store_owned_scalar!(workspace.shadow, 3, workspace.trial[3])
                     last_step = alpha
                     accepted = true
                     break

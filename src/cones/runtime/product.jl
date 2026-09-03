@@ -275,8 +275,8 @@ function _runtime_make_line_search(
         one(T),
         64,
         _ns_initialization_default_bisections(T),
-        zeros(T, 3),
-        zeros(T, 3),
+        alloc_zeros(T, 3),
+        alloc_zeros(T, 3),
         _runtime_initial_step_result(T),
         _runtime_initial_step_result(T),
     )
@@ -285,12 +285,12 @@ end
 function _runtime_make_scaling_checkpoint(::Type{T}) where {T}
     return NonsymmetricRuntimeScalingCheckpoint{T}(
         false,
-        zeros(T, 3),
-        zeros(T, 3),
-        zeros(T, 3),
-        zeros(T, 3, 3),
-        zeros(T, 3, 3),
-        zeros(T, 3, 3),
+        alloc_zeros(T, 3),
+        alloc_zeros(T, 3),
+        alloc_zeros(T, 3),
+        alloc_zeros(T, 3, 3),
+        alloc_zeros(T, 3, 3),
+        alloc_zeros(T, 3, 3),
         zero(T),
         false,
         false,
@@ -298,15 +298,15 @@ function _runtime_make_scaling_checkpoint(::Type{T}) where {T}
         NS_SCALING_INVALID_PARAMETER,
         NS_SCALING_NO_FALLBACK,
         NS_CONJUGATE_INVALID_PARAMETER,
-        zeros(T, 3),
-        zeros(T, 3, 3),
-        zeros(T, 3),
-        zeros(T, 3),
-        zeros(T, 3, 3),
-        zeros(T, 3, 3),
-        zeros(T, 3, 3),
-        zeros(T, 3, 3),
-        zeros(T, 3, 3),
+        alloc_zeros(T, 3),
+        alloc_zeros(T, 3, 3),
+        alloc_zeros(T, 3),
+        alloc_zeros(T, 3),
+        alloc_zeros(T, 3, 3),
+        alloc_zeros(T, 3, 3),
+        alloc_zeros(T, 3, 3),
+        alloc_zeros(T, 3, 3),
+        alloc_zeros(T, 3, 3),
         T(Inf),
         T(Inf),
         zero(T),
@@ -325,7 +325,7 @@ function _runtime_make_orthant(::Type{T}, block) where {T}
     dim = block.dimension
     cone = SymmetricCones.NonnegativeCone(dim)
     state = SymmetricCones.OrthantNTScaling{T}(dim)
-    z = zeros(T, dim)
+    z = alloc_zeros(T, dim)
     return OrthantRuntimeBlock{T}(
         block.offset, dim, cone, state,
         copy(z), copy(z), copy(z), copy(z), copy(z), Ref{T}(zero(T)),
@@ -337,7 +337,7 @@ function _runtime_make_soc(::Type{T}, block) where {T}
     dim >= 2 || throw(ArgumentError("SOC block dimension must be at least 2"))
     cone = SymmetricCones.SOCone(dim)
     state = SymmetricCones.SOCNTScaling{T}(dim)
-    z = zeros(T, dim)
+    z = alloc_zeros(T, dim)
     return SOCRuntimeBlock{T}(
         block.offset, dim, cone, state,
         copy(z), copy(z), copy(z), copy(z), copy(z), Ref{T}(zero(T)),
@@ -352,7 +352,7 @@ function _runtime_make_psd(::Type{T}, block) where {T}
     ))
     cone = SymmetricCones.PSDTriangleCone{T}(n)
     state = SymmetricCones.PSDNTScaling{T}(n)
-    z = zeros(T, len)
+    z = alloc_zeros(T, len)
     return PSDRuntimeBlock{T}(
         block.offset, n, len, cone, state,
         copy(z), copy(z), copy(z), copy(z), copy(z), copy(z), copy(z), Ref{T}(zero(T)),
@@ -377,9 +377,9 @@ function _runtime_make_exp(::Type{T}, block) where {T}
         line_search,
         scaling.primal,
         scaling.dual,
-        zeros(T, 3),
-        zeros(T, 3),
-        zeros(T, 3),
+        alloc_zeros(T, 3),
+        alloc_zeros(T, 3),
+        alloc_zeros(T, 3),
         _runtime_make_scaling_checkpoint(T),
         NS_SCALING_FAILED,
         NS_SCALING_INVALID_PARAMETER,
@@ -415,9 +415,9 @@ function _runtime_make_power(::Type{T}, block) where {T}
         line_search,
         scaling.primal,
         scaling.dual,
-        zeros(T, 3),
-        zeros(T, 3),
-        zeros(T, 3),
+        alloc_zeros(T, 3),
+        alloc_zeros(T, 3),
+        alloc_zeros(T, 3),
         _runtime_make_scaling_checkpoint(T),
         false,
         0,

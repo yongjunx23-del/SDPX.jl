@@ -338,18 +338,18 @@ function _product_cone_hsd_state(
     # pure O(nr^2) allocation that the hot path never touches.  Only allocate
     # them when a nonsymmetric Schur session actually exists.
     has_ns_schur = ns_schur !== nothing
-    ns_H = has_ns_schur ? zeros(T, base.workspace.nr, base.workspace.nr) : Matrix{T}(undef, 0, 0)
-    ns_metrics = has_ns_schur ? zeros(T, 3, 3, block_count) : zeros(T, 3, 3, 0)
-    ns_at_g_b = has_ns_schur ? zeros(T, base.workspace.nr) : T[]
-    ns_bt_g_a = has_ns_schur ? zeros(T, base.workspace.nr) : T[]
-    ns_at_g_rhs = has_ns_schur ? zeros(T, base.workspace.nr) : T[]
-    ns_zero_rhs = has_ns_schur ? zeros(T, m) : T[]
+    ns_H = has_ns_schur ? alloc_zeros(T, base.workspace.nr, base.workspace.nr) : Matrix{T}(undef, 0, 0)
+    ns_metrics = has_ns_schur ? alloc_zeros(T, 3, 3, block_count) : alloc_zeros(T, 3, 3, 0)
+    ns_at_g_b = has_ns_schur ? alloc_zeros(T, base.workspace.nr) : T[]
+    ns_bt_g_a = has_ns_schur ? alloc_zeros(T, base.workspace.nr) : T[]
+    ns_at_g_rhs = has_ns_schur ? alloc_zeros(T, base.workspace.nr) : T[]
+    ns_zero_rhs = has_ns_schur ? alloc_zeros(T, m) : T[]
     parallel_schur = !prepare_symmetric_core && block_count == 0 &&
         isempty(runtime.psd) && base.workspace.nr > 1 && schur_threads > 1 &&
         schur_threads >= Threads.nthreads()
     schur_slots = parallel_schur ? Threads.maxthreadid() : 0
-    schur_g_inputs = [zeros(T, m) for _ in 1:schur_slots]
-    schur_g_outputs = [zeros(T, m) for _ in 1:schur_slots]
+    schur_g_inputs = [alloc_zeros(T, m) for _ in 1:schur_slots]
+    schur_g_outputs = [alloc_zeros(T, m) for _ in 1:schur_slots]
     return ProductConeHSDState{
         T,R,typeof(runtime),typeof(ns_schur),typeof(coupled),
         typeof(symmetric_bordered),typeof(expanded),typeof(sparse_schur),
@@ -357,18 +357,18 @@ function _product_cone_hsd_state(
     }(
         base,
         runtime,
-        zeros(T, m),
-        zeros(T, m),
-        zeros(T, m),
-        zeros(T, m),
+        alloc_zeros(T, m),
+        alloc_zeros(T, m),
+        alloc_zeros(T, m),
+        alloc_zeros(T, m),
         schur_g_inputs,
         schur_g_outputs,
-        zeros(T, m),
-        zeros(T, m),
-        zeros(T, m),
-        zeros(T, m),
-        zeros(T, m),
-        zeros(T, m),
+        alloc_zeros(T, m),
+        alloc_zeros(T, m),
+        alloc_zeros(T, m),
+        alloc_zeros(T, m),
+        alloc_zeros(T, m),
+        alloc_zeros(T, m),
         false,
         ns_schur,
         ns_metrics,
@@ -1007,7 +1007,9 @@ Base.@noinline function _product_hsd_form_schur_column!(
     H = base.workspace.H
     fill!(g_input, zero(T))
     @inbounds for ptr in nzrange(A, j)
-        g_input[A.rowval[ptr]] = A.nzval[ptr]
+        _store_owned_scalar!(
+            g_input, A.rowval[ptr], A.nzval[ptr],
+        )
     end
     _product_hsd_apply_symmetric_G!(state.runtime, g_output, g_input)
     @inbounds for i in 1:j
@@ -3247,6 +3249,9 @@ function _product_hsd_bordered_route_direction!(
             end
             false
         end
+        if !direction_ok && get(ENV, "SDPX_DEBUG_SYMMETRIC_CORE", "0") == "1"
+            println(stderr, "SYMMETRIC_CORE_DIRECTION_FALSE diagnostic=", state.diagnostic)
+        end
         return direction_ok ? HSDStepOK : HSDStepDirectionFailed
     end
     if has_nonsymmetric
@@ -3413,7 +3418,12 @@ function product_hsd_step!(state::ProductConeHSDState{T,R,RT,NS,CW,SB,EW,SW,SCW}
         false
     end
     timings.scaling_seconds += Float64(time_ns() - t0) * 1.0e-9
-    scaling_ok || return HSDStepDirectionFailed
+    if !scaling_ok
+        if get(ENV, "SDPX_DEBUG_SYMMETRIC_CORE", "0") == "1"
+            println(stderr, "PRODUCT_SCALING_FALSE result=", state.runtime.last_nonsymmetric)
+        end
+        return HSDStepDirectionFailed
+    end
     base.epoch += 1
     has_nonsymmetric = _product_hsd_has_nonsymmetric(state)
     t0 = time_ns()
@@ -3470,7 +3480,11 @@ function product_hsd_step!(state::ProductConeHSDState{T,R,RT,NS,CW,SB,EW,SW,SCW}
     t0 = time_ns()
     accepted = try
         _product_hsd_line_search!(state)
-    catch
+    catch exception
+        if get(ENV, "SDPX_DEBUG_SYMMETRIC_CORE", "0") == "1"
+            showerror(stderr, exception, catch_backtrace())
+            println(stderr)
+        end
         # Unexpected scaling-kernel failure remains fail-closed.  Restore the
         # runtime/base consistency when the original iterate is still valid.
         if !isempty(state.runtime.exp) || !isempty(state.runtime.power)

@@ -203,6 +203,7 @@ end
                 strict=product_strictly_interior(
                     state.runtime, base.st, base.yt,
                 ),
+                nonsymmetric=state.runtime.last_nonsymmetric,
             ))
         end
         if !accepted

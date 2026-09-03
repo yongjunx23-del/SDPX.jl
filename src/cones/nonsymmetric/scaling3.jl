@@ -387,9 +387,9 @@ end
         _ns_conjugate_spd_solve!(
             solution, matrix, rhs, workspace.factor,
         ) || return false
-        destination[1, column] = solution[1]
-        destination[2, column] = solution[2]
-        destination[3, column] = solution[3]
+        _store_owned_scalar!(destination, CartesianIndex(1, column), solution[1])
+        _store_owned_scalar!(destination, CartesianIndex(2, column), solution[2])
+        _store_owned_scalar!(destination, CartesianIndex(3, column), solution[3])
     end
     two = o + o
     h12 = (destination[1, 2] + destination[2, 1]) / two
@@ -503,9 +503,9 @@ end
         _ns_scaling_factor_solve!(
             solution, workspace.factor, rhs, forward,
         ) || return NS_SCALING_INVERSE_MISMATCH
-        workspace.g[1, column] = solution[1]
-        workspace.g[2, column] = solution[2]
-        workspace.g[3, column] = solution[3]
+        _store_owned_scalar!(workspace.g, CartesianIndex(1, column), solution[1])
+        _store_owned_scalar!(workspace.g, CartesianIndex(2, column), solution[2])
+        _store_owned_scalar!(workspace.g, CartesianIndex(3, column), solution[3])
     end
     half = inv(T(2))
     h12 = half * workspace.g[1, 2] + half * workspace.g[2, 1]
@@ -1271,8 +1271,8 @@ function _try_update_nonsymmetric_scaling!(
         return _ns_scaling_failure(workspace, NS_SCALING_INVALID_PARAMETER)
 
     @inbounds for i in 1:3
-        workspace.primal[i] = convert(T, primal[i])
-        workspace.dual[i] = convert(T, dual[i])
+        _store_owned_scalar!(workspace.primal, i, convert(T, primal[i]))
+        _store_owned_scalar!(workspace.dual, i, convert(T, dual[i]))
     end
     _ns_scaling_finite_vector(workspace.primal) &&
         _ns_scaling_finite_vector(workspace.dual) ||

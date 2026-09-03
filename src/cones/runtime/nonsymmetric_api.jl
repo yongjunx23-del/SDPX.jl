@@ -210,34 +210,43 @@ end
     )
 end
 
+@inline function _runtime_owned_copy!(destination, source)
+    axes(destination) == axes(source) || throw(DimensionMismatch(
+        "nonsymmetric owned-copy dimensions disagree",
+    ))
+    @inbounds for index in eachindex(destination, source)
+        _store_owned_scalar!(destination, index, source[index])
+    end
+    return destination
+end
+
 @inline function _runtime_ns_checkpoint_block_commit!(block)
     scaling = block.scaling
     conjugate = scaling.conjugate
     checkpoint = block.checkpoint
-    @inbounds for i in 1:3
-        checkpoint.primal[i] = scaling.primal[i]
-        checkpoint.dual[i] = scaling.dual[i]
-        checkpoint.dual_shadow[i] = scaling.dual_shadow[i]
-        checkpoint.conjugate_shadow[i] = conjugate.shadow[i]
-        checkpoint.accepted_dual[i] = conjugate.accepted_dual[i]
-        checkpoint.accepted_shadow[i] = conjugate.accepted_shadow[i]
-    end
-    @inbounds for j in 1:3, i in 1:3
-        checkpoint.g[i, j] = scaling.g[i, j]
-        checkpoint.theta[i, j] = scaling.theta[i, j]
-        checkpoint.scaling_factor[i, j] = scaling.factor[i, j]
-        checkpoint.conjugate_inverse_hessian[i, j] =
-            conjugate.inverse_hessian[i, j]
-        checkpoint.conjugate_hessian[i, j] = conjugate.hessian[i, j]
-        checkpoint.conjugate_hessian_factor[i, j] =
-            conjugate.hessian_factor[i, j]
-        checkpoint.accepted_hessian[i, j] =
-            conjugate.accepted_hessian[i, j]
-        checkpoint.accepted_hessian_factor[i, j] =
-            conjugate.accepted_hessian_factor[i, j]
-        checkpoint.accepted_inverse_hessian[i, j] =
-            conjugate.accepted_inverse_hessian[i, j]
-    end
+    _runtime_owned_copy!(checkpoint.primal, scaling.primal)
+    _runtime_owned_copy!(checkpoint.dual, scaling.dual)
+    _runtime_owned_copy!(checkpoint.dual_shadow, scaling.dual_shadow)
+    _runtime_owned_copy!(checkpoint.conjugate_shadow, conjugate.shadow)
+    _runtime_owned_copy!(checkpoint.accepted_dual, conjugate.accepted_dual)
+    _runtime_owned_copy!(checkpoint.accepted_shadow, conjugate.accepted_shadow)
+    _runtime_owned_copy!(checkpoint.g, scaling.g)
+    _runtime_owned_copy!(checkpoint.theta, scaling.theta)
+    _runtime_owned_copy!(checkpoint.scaling_factor, scaling.factor)
+    _runtime_owned_copy!(
+        checkpoint.conjugate_inverse_hessian, conjugate.inverse_hessian,
+    )
+    _runtime_owned_copy!(checkpoint.conjugate_hessian, conjugate.hessian)
+    _runtime_owned_copy!(
+        checkpoint.conjugate_hessian_factor, conjugate.hessian_factor,
+    )
+    _runtime_owned_copy!(checkpoint.accepted_hessian, conjugate.accepted_hessian)
+    _runtime_owned_copy!(
+        checkpoint.accepted_hessian_factor, conjugate.accepted_hessian_factor,
+    )
+    _runtime_owned_copy!(
+        checkpoint.accepted_inverse_hessian, conjugate.accepted_inverse_hessian,
+    )
     checkpoint.mu = scaling.mu
     checkpoint.scaling_valid = scaling.valid
     checkpoint.used_fallback = scaling.used_fallback
@@ -313,30 +322,29 @@ end
     checkpoint = block.checkpoint
     scaling = block.scaling
     conjugate = scaling.conjugate
-    @inbounds for i in 1:3
-        scaling.primal[i] = checkpoint.primal[i]
-        scaling.dual[i] = checkpoint.dual[i]
-        scaling.dual_shadow[i] = checkpoint.dual_shadow[i]
-        conjugate.shadow[i] = checkpoint.conjugate_shadow[i]
-        conjugate.accepted_dual[i] = checkpoint.accepted_dual[i]
-        conjugate.accepted_shadow[i] = checkpoint.accepted_shadow[i]
-    end
-    @inbounds for j in 1:3, i in 1:3
-        scaling.g[i, j] = checkpoint.g[i, j]
-        scaling.theta[i, j] = checkpoint.theta[i, j]
-        scaling.factor[i, j] = checkpoint.scaling_factor[i, j]
-        conjugate.inverse_hessian[i, j] =
-            checkpoint.conjugate_inverse_hessian[i, j]
-        conjugate.hessian[i, j] = checkpoint.conjugate_hessian[i, j]
-        conjugate.hessian_factor[i, j] =
-            checkpoint.conjugate_hessian_factor[i, j]
-        conjugate.accepted_hessian[i, j] =
-            checkpoint.accepted_hessian[i, j]
-        conjugate.accepted_hessian_factor[i, j] =
-            checkpoint.accepted_hessian_factor[i, j]
-        conjugate.accepted_inverse_hessian[i, j] =
-            checkpoint.accepted_inverse_hessian[i, j]
-    end
+    _runtime_owned_copy!(scaling.primal, checkpoint.primal)
+    _runtime_owned_copy!(scaling.dual, checkpoint.dual)
+    _runtime_owned_copy!(scaling.dual_shadow, checkpoint.dual_shadow)
+    _runtime_owned_copy!(conjugate.shadow, checkpoint.conjugate_shadow)
+    _runtime_owned_copy!(conjugate.accepted_dual, checkpoint.accepted_dual)
+    _runtime_owned_copy!(conjugate.accepted_shadow, checkpoint.accepted_shadow)
+    _runtime_owned_copy!(scaling.g, checkpoint.g)
+    _runtime_owned_copy!(scaling.theta, checkpoint.theta)
+    _runtime_owned_copy!(scaling.factor, checkpoint.scaling_factor)
+    _runtime_owned_copy!(
+        conjugate.inverse_hessian, checkpoint.conjugate_inverse_hessian,
+    )
+    _runtime_owned_copy!(conjugate.hessian, checkpoint.conjugate_hessian)
+    _runtime_owned_copy!(
+        conjugate.hessian_factor, checkpoint.conjugate_hessian_factor,
+    )
+    _runtime_owned_copy!(conjugate.accepted_hessian, checkpoint.accepted_hessian)
+    _runtime_owned_copy!(
+        conjugate.accepted_hessian_factor, checkpoint.accepted_hessian_factor,
+    )
+    _runtime_owned_copy!(
+        conjugate.accepted_inverse_hessian, checkpoint.accepted_inverse_hessian,
+    )
     scaling.mu = checkpoint.mu
     scaling.valid = checkpoint.scaling_valid
     scaling.used_fallback = checkpoint.used_fallback
@@ -1399,7 +1407,7 @@ function try_nonsymmetric_runtime_higher_correction!(
     _runtime_check_vector(runtime, chi)
     _runtime_check_vector(runtime, ds_aff)
     _runtime_check_vector(runtime, dy_aff)
-    fill!(chi, zero(T))
+    zero_owned!(chi)
     for block in runtime.exp
         _runtime_copy_in!(block.input, ds_aff, block.offset, 3)
         _runtime_copy_in!(block.direction, dy_aff, block.offset, 3)

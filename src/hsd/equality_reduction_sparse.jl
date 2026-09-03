@@ -92,7 +92,7 @@ end
 """Max row-sum (Inf-norm) scale of a sparse matrix, dense-compatible order."""
 function _hsd_sparse_scaleA(A::SparseMatrixCSC{T,Int}) where {T}
     m, n = size(A)
-    row_sums = zeros(T, m)
+    row_sums = alloc_zeros(T, m)
     values = nonzeros(A)
     @inbounds for column in 1:n
         for pointer in nzrange(A, column)
@@ -245,10 +245,10 @@ function hsd_sparse_rowspace_reduction(
     if n == 0
         return SparseEqualityReduction{T}(
             SparseEqualityReady, :preserve_original, 0,
-            SparseArrays.sparse(zeros(T, m, 0)),
+            SparseArrays.sparse(alloc_zeros(T, m, 0)),
             Vector{T}(undef, 0),
-            IdentityRankBasis(T, 0), zeros(T, 0), 0,
-            zero(T), zero(T), false, false, zeros(T, 0),
+            IdentityRankBasis(T, 0), alloc_zeros(T, 0), 0,
+            zero(T), zero(T), false, false, alloc_zeros(T, 0),
         )
     end
 
@@ -283,9 +283,9 @@ function hsd_sparse_rowspace_reduction(
         policy.status,
         policy.mode,
         sparse_rank,
-        Ar, cr, V, zeros(T, n), n,
+        Ar, cr, V, alloc_zeros(T, n), n,
         rank_tolerance, objective_tolerance,
-        ambiguous, false, zeros(T, n),
+        ambiguous, false, alloc_zeros(T, n),
     )
 end
 
@@ -305,10 +305,10 @@ function hsd_structural_full_rank_reduction(
     return SparseEqualityReduction{T}(
         SparseEqualityReady, :preserve_original, n,
         SparseArrays.sparse(A), copy(c), IdentityRankBasis(T, n),
-        zeros(T, n), n,
+        alloc_zeros(T, n), n,
         T(max(m,n)) * eps(T) * scaleA,
         T(100 * max(m,n)) * eps(T) * scaleC,
-        false, false, zeros(T, n),
+        false, false, alloc_zeros(T, n),
     )
 end
 

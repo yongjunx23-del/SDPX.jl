@@ -1,3 +1,11 @@
+# Ownership-safe scalar store. Fixed-width arithmetic uses an ordinary
+# assignment; `kernels/bigfloat.jl` specializes this seam to copy into the
+# preallocated MPFR destination instead of aliasing a mutable source object.
+@inline function _store_owned_scalar!(destination::AbstractArray{T}, index, value) where {T}
+    destination[index] = value
+    return destination
+end
+
 #=====================================================================
     Generic kernel implementations (§1.4): correct for any T, built on
     Base LinearAlgebra so BLAS-backed types (Float64, ComplexF64, …)

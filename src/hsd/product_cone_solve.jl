@@ -82,6 +82,21 @@ free in both affine equations; this removes a second-order cone residual
 without altering stationarity or the gap. No cone-membership check or
 tolerance is relaxed.
 """
+function _product_hsd_owned_dense(
+    A::SparseMatrixCSC{T,Int},
+) where {T<:AbstractFloat}
+    dense = alloc_zeros(T, size(A, 1), size(A, 2))
+    @inbounds for column in axes(A, 2)
+        for pointer in nzrange(A, column)
+            _store_owned_scalar!(
+                dense, CartesianIndex(A.rowval[pointer], column),
+                A.nzval[pointer],
+            )
+        end
+    end
+    return dense
+end
+
 function _product_hsd_terminal_la_backend(::Type{T}) where {T<:AbstractFloat}
     T === Float64 && return nothing
     config = plan_la_backend(
@@ -218,7 +233,7 @@ function _product_hsd_refined_optimal_result!(
         scalar_bytes = ExtendedPrecisionBLAS._element_storage_bytes(T)
         required = saturating_bytes(scalar_bytes, size(A,1), size(A,2))
         required <= 512 * 1024^2 || return nothing
-        Matrix{T}(A)
+        _product_hsd_owned_dense(A)
     else
         A
     end
@@ -265,14 +280,15 @@ function _product_hsd_refined_optimal_result!(
                     return nothing
             else
                 _product_hsd_apply_primal_refinement!(
-                    x, A, Matrix{T}(A), primal_residual, backend,
+                    x, A, _product_hsd_owned_dense(A), primal_residual, backend,
                 ) || return nothing
             end
         end
 
         dual_residual = transpose(A) * y + canonical.c
         gap = dot(canonical.c, x) + dot(canonical.b, y)
-        dual_dense_A = T === Float64 ? refinement_A : Matrix{T}(A)
+        dual_dense_A = T === Float64 ? refinement_A :
+                       _product_hsd_owned_dense(A)
         _product_hsd_apply_dual_refinement!(
             y, A, dual_dense_A, canonical.b, dual_residual, gap, backend,
         ) || return nothing
@@ -556,9 +572,9 @@ function product_hsd_solve!(
     reset_phase_timings!(state.phase_timings)
     empty!(state.kkt_route_attempts)
     push!(state.kkt_route_attempts, state.kkt_route)
-    x_original = zeros(T, base.n)
-    s_original = zeros(T, base.m)
-    y_original = zeros(T, base.m)
+    x_original = alloc_zeros(T, base.n)
+    s_original = alloc_zeros(T, base.m)
+    y_original = alloc_zeros(T, base.m)
 
     if base.workspace.rank_ambiguous
         return _product_hsd_make_result(

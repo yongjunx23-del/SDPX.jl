@@ -469,6 +469,27 @@ end
 end
 
 
+@testset "BigFloat cone workspace ownership" begin
+    setprecision(BigFloat, 256) do
+        source = BigFloat[1, 2, 3]
+        destination = SDPX.alloc_zeros(BigFloat, 3)
+        SDPX._runtime_copy_in!(destination, source, 1, 3)
+        @test all(destination[i] !== source[i] for i in 1:3)
+        @test all(destination[i] !== destination[j] for i in 1:3 for j in 1:3 if i != j)
+
+        initialization = SDPX.NonsymmetricInitializationWorkspace(BigFloat)
+        SDPX._ns_initialization_seed!(initialization, SDPX.ExpConjugateTag())
+        @test initialization.dual[2] == initialization.dual[3] == 1
+        @test initialization.dual[2] !== initialization.dual[3]
+
+        scaling = SDPX.NonsymmetricScalingWorkspace(BigFloat)
+        @test all(scaling.primal[i] !== scaling.primal[j]
+                  for i in 1:3 for j in 1:3 if i != j)
+        @test all(scaling.g[i] !== scaling.g[j]
+                  for i in eachindex(scaling.g) for j in eachindex(scaling.g) if i != j)
+    end
+end
+
 @testset "Sparse augmented public route" begin
     model = SDPX.Model(Float64)
     x = SDPX.variable!(model, :x, 2; domain=SDPX.Reals())

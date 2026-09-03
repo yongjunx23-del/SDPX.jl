@@ -34,6 +34,13 @@
 
 import MutableArithmetics as MA
 
+@inline function _store_owned_scalar!(
+    destination::AbstractArray{BigFloat}, index, value::BigFloat,
+)
+    MA.operate_to!(destination[index], copy, value)
+    return destination
+end
+
 @inline _coo_owned_scalar(value::BigFloat) = MA.mutable_copy(value)
 
 """

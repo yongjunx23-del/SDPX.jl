@@ -6,6 +6,17 @@
 # Cone descriptors
 # ---------------------------------------------------------------------------
 
+# Setup-owned arrays must not contain aliased mutable `BigFloat` zeros.
+# Construct each element independently; fixed-width types retain ordinary
+# isbits stores and this function never appears on the hot path.
+function _cone_zeros(::Type{T}, dimensions::Integer...) where {T}
+    output = Array{T}(undef, Int.(dimensions)...)
+    @inbounds for index in eachindex(output)
+        output[index] = zero(T)
+    end
+    return output
+end
+
 """Nonnegative orthant cone `R_+^dim`. Self-dual; identity `(1, …, 1)`."""
 struct NonnegativeCone
     dim::Int
@@ -32,11 +43,11 @@ function OrthantNTScaling{T}(dim::Int) where {T}
     return OrthantNTScaling{T}(
         dim,
         zeros(Bool, 1),
-        zeros(T, dim),
-        zeros(T, dim),
-        zeros(T, dim),
-        zeros(T, dim),
-        zeros(T, dim),
+        _cone_zeros(T, dim),
+        _cone_zeros(T, dim),
+        _cone_zeros(T, dim),
+        _cone_zeros(T, dim),
+        _cone_zeros(T, dim),
     )
 end
 
@@ -64,7 +75,7 @@ end
 
 function SOCNTScaling{T}(dim::Int) where {T}
     dim >= 2 || throw(ArgumentError("SOC dimension must be >= 2"))
-    buffers = ntuple(_ -> zeros(T, dim), 10)
+    buffers = ntuple(_ -> _cone_zeros(T, dim), 10)
     return SOCNTScaling{T}(dim, zeros(Bool, 1), buffers...)
 end
 
@@ -90,11 +101,11 @@ end
 function PSDEigenScratch{T}(n::Int) where {T}
     PSDEigenScratch{T}(
         n,
-        zeros(T, n, n),
-        zeros(T, n, n),
-        zeros(T, n, n),
-        zeros(T, n, n),
-        zeros(T, n),
+        _cone_zeros(T, n, n),
+        _cone_zeros(T, n, n),
+        _cone_zeros(T, n, n),
+        _cone_zeros(T, n, n),
+        _cone_zeros(T, n),
     )
 end
 
@@ -164,7 +175,7 @@ function PSDNTScaling{T}(dim::Int; eigen_route::Symbol=:setup_jacobi) where {T}
     len = packed_len(dim)
     sqrt2 = sqrt(one(T) + one(T))
     invsqrt2 = one(T) / sqrt2
-    matrices = ntuple(_ -> zeros(T, dim, dim), 14)
+    matrices = ntuple(_ -> _cone_zeros(T, dim, dim), 14)
     return PSDNTScaling{T}(
         dim,
         len,
@@ -180,7 +191,7 @@ function PSDNTScaling{T}(dim::Int; eigen_route::Symbol=:setup_jacobi) where {T}
         matrices[6],
         matrices[7],
         matrices[8],
-        zeros(T, dim),
+        _cone_zeros(T, dim),
         matrices[9],
         matrices[10],
         matrices[11],
