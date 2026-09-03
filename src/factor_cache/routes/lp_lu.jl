@@ -184,10 +184,11 @@ mutable struct ProviderLPLUCache{T} <: AbstractFactorCache{T}
     factor_epoch::Int
     status::FactorCacheState
     backend::Union{Nothing,AbstractLABackend}
-    # Narrowed from `Any` (TASK-P0-TYPED-CORE): both the MFLA and BFLA
-    # `la_lu_factor!` methods return `ProviderLALUFactor`, whose payload
-    # type varies by provider, so the field admits the abstract handle.
-    provider_factor::Union{Nothing,AbstractLAFactorization{T}}
+    # REVERTED (TASK-P0-TYPED-CORE narrowing removed): the bounded-union form
+    # correlated with fresh LLVM codegen crashes at solve start on the N14
+    # Float64x4 path, with zero measured benefit.  Restore only with a
+    # crash-free sysimage receipt and a measured >=2% win.
+    provider_factor::Any
 end
 
 function _lp_lu_provider_backend(

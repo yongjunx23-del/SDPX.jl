@@ -50,12 +50,9 @@ mutable struct IntermediatePrecisionKKTWorkspace{U}
     p::Vector{U}
     dx::Vector{U}
     dy::Vector{U}
-    # Narrowed from `Any` (TASK-P0-TYPED-CORE): `_blocked_intermediate_cholesky!`
-    # returns `IntermediateCholeskyFactor`, `_factor_float64_preconditioner!`
-    # returns `LinearAlgebra.Cholesky`, both exposing `.L`; `nothing` is the
-    # pre-factorization state.
-    Sfactor::Union{Nothing,IntermediateCholeskyFactor,LinearAlgebra.Cholesky}
-    Qfactor::Union{Nothing,IntermediateCholeskyFactor,LinearAlgebra.Cholesky}
+    # REVERTED (see ProviderLPLUCache note above).
+    Sfactor::Any
+    Qfactor::Any
     thread_count::Int
 end
 
@@ -88,9 +85,10 @@ mutable struct MixedPrecisionKKTWorkspace
     p64::Vector{Float64}
     dx64::Vector{Float64}
     dy64::Vector{Float64}
-    Sfactor::Union{Nothing,IntermediateCholeskyFactor,LinearAlgebra.Cholesky}
-    Qfactor::Union{Nothing,IntermediateCholeskyFactor,LinearAlgebra.Cholesky}
-    intermediate::Union{Nothing,IntermediatePrecisionKKTWorkspace}
+    # REVERTED (see ProviderLPLUCache note above).
+    Sfactor::Any
+    Qfactor::Any
+    intermediate::Any
     intermediate_active::Bool
 end
 

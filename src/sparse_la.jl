@@ -406,10 +406,8 @@ mutable struct GenericSparseSchurSDPWorkspace{T}
     primal_diagonal_values::Vector{T}
     constraint_rhs::Matrix{T}
     equality_scaling::Vector{T}
-    # Narrowed from `Any` (TASK-P0-TYPED-CORE): `instantiate_sparse_factor`
-    # returns `GenericSparseCholeskyFactor` or `CHOLMODSparseFactor`, both
-    # `<: AbstractSparseFactor`; `nothing` is the pre-factorization state.
-    factor::Union{Nothing,AbstractSparseFactor}
+    # REVERTED (see ProviderLPLUCache note above).
+    factor::Any
     equality_requires_pivoting::Bool
     regularization::T
     factorization_quality::T
