@@ -506,7 +506,8 @@ end
     end
     # As for the conjugate inverse, averaging independently rounded
     # off-diagonal column solves can spoil the most sensitive column.  Select
-    # an exact symmetric combination of the computed upper/lower entries and
+    # the historical midpoint first, then (only for mutable BigFloat storage)
+    # an exact symmetric combination of the computed upper/lower entries, and
     # require the existing factor-aware inverse-column certificate.  The
     # accepted Theta factor is already fixed, so this is a bounded selection
     # among rounded representations of the same mathematical inverse, not a
@@ -517,10 +518,21 @@ end
     lower13 = _coo_owned_scalar(workspace.g[3, 1])
     upper23 = _coo_owned_scalar(workspace.g[2, 3])
     lower23 = _coo_owned_scalar(workspace.g[3, 2])
-    @inbounds for selection in 0:7
-        h12 = iszero(selection & 0x01) ? lower12 : upper12
-        h13 = iszero(selection & 0x02) ? lower13 : upper13
-        h23 = iszero(selection & 0x04) ? lower23 : upper23
+    half = inv(T(2))
+    candidate_limit = T === BigFloat ? 8 : 0
+    @inbounds for candidate in 0:candidate_limit
+        if iszero(candidate)
+            # Preserve the historical midpoint whenever it remains fully
+            # certified; the exact selections are a fail-closed rescue only.
+            h12 = half * upper12 + half * lower12
+            h13 = half * upper13 + half * lower13
+            h23 = half * upper23 + half * lower23
+        else
+            selection = candidate - 1
+            h12 = iszero(selection & 0x01) ? lower12 : upper12
+            h13 = iszero(selection & 0x02) ? lower13 : upper13
+            h23 = iszero(selection & 0x04) ? lower23 : upper23
+        end
         _store_owned_scalar!(workspace.g, CartesianIndex(1, 2), h12)
         _store_owned_scalar!(workspace.g, CartesianIndex(2, 1), h12)
         _store_owned_scalar!(workspace.g, CartesianIndex(1, 3), h13)

@@ -725,21 +725,33 @@ end
     # off-diagonal entry differently.  Averaging those copies is not always
     # backward stable: near a cone face, changing the sensitive column by
     # half an ulp from the other solve can violate its otherwise tiny solve
-    # residual.  Instead, enumerate the eight exact symmetric selections of
-    # the already-computed upper/lower entries.  Accept only a matrix whose
-    # three columns all pass the existing componentwise solve certificate and
-    # which is itself SPD.  This changes no tolerance and introduces no
-    # unverified regularization.
+    # residual.  Preserve the historical midpoint when it certifies.  Only
+    # mutable BigFloat storage then enumerates the eight exact symmetric
+    # selections of the already-computed upper/lower entries.  Accept only a
+    # matrix whose three columns all pass the existing componentwise solve
+    # certificate and which is itself SPD.  This changes no tolerance and
+    # introduces no unverified regularization.
     upper12 = _coo_owned_scalar(inverse_hessian[1, 2])
     lower12 = _coo_owned_scalar(inverse_hessian[2, 1])
     upper13 = _coo_owned_scalar(inverse_hessian[1, 3])
     lower13 = _coo_owned_scalar(inverse_hessian[3, 1])
     upper23 = _coo_owned_scalar(inverse_hessian[2, 3])
     lower23 = _coo_owned_scalar(inverse_hessian[3, 2])
-    @inbounds for selection in 0:7
-        h12 = iszero(selection & 0x01) ? lower12 : upper12
-        h13 = iszero(selection & 0x02) ? lower13 : upper13
-        h23 = iszero(selection & 0x04) ? lower23 : upper23
+    half = inv(o + o)
+    candidate_limit = T === BigFloat ? 8 : 0
+    @inbounds for candidate in 0:candidate_limit
+        if iszero(candidate)
+            # Preserve the historical midpoint whenever it remains fully
+            # certified; the exact selections are a fail-closed rescue only.
+            h12 = half * upper12 + half * lower12
+            h13 = half * upper13 + half * lower13
+            h23 = half * upper23 + half * lower23
+        else
+            selection = candidate - 1
+            h12 = iszero(selection & 0x01) ? lower12 : upper12
+            h13 = iszero(selection & 0x02) ? lower13 : upper13
+            h23 = iszero(selection & 0x04) ? lower23 : upper23
+        end
         _store_owned_scalar!(inverse_hessian, CartesianIndex(1, 2), h12)
         _store_owned_scalar!(inverse_hessian, CartesianIndex(2, 1), h12)
         _store_owned_scalar!(inverse_hessian, CartesianIndex(1, 3), h13)
