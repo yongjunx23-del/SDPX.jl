@@ -79,7 +79,7 @@ audit read a stale desktop checkout 147 commits behind; `workspace.jl`,
 | TASK-P1-LEGACY-DELETE | already satisfied | `engine=:legacy` rejected at construction; `prepared.jl` funnels to native HSD; legacy = arithmetic provider + schemas only |
 | TASK-P1-OWNER-ALL | confirmed present | sparse assembly already owner-style (`SchurAssemblyMap`); dense Float64 column-owner kept |
 | TASK-P1-CONE-ORACLE | accepted as designed | per-family NT + LHSCB oracles exist; no unified `BarrierOracle` by decision (symmetric self-duality needs no conjugate adapter) |
-| TASK-P0-ZERO-ALLOC | open (residual scoped) | harness `benchmark/general/performance/hsd_allocation.jl` exists; Float64 exact at 288 B; x2/x3/x4 exceed stale ceilings by +320/+352/+352 B (2096/2176/2336 B, stable samples, bit-identical on pre-change base commit `077c520` — pre-existing, not a regression). Profile.Allocs attributes the residual to the per-step provider-LU factorize path (`MFLA._owned_lu_pivots` copy, payload getproperty/setproperty). 320 B/step is noise beside O(n^3) factor work; no ceiling widening without a measured ≥2% win. BigFloat record-only |
+| TASK-P0-ZERO-ALLOC | done | Replaced transient provider LU factor snapshots with reusable provider-native caches (`MFLUFactorCache` / `BFLALUFactorCache`). Allocations dropped by ~85%: Float64=288 B (ceiling 288), x2=304 B (ceiling 1776), x3=320 B (ceiling 1824), x4=336 B (ceiling 1984); BigFloat256 peak RSS drift=0 B across 60 steps. `benchmark/general/performance/hsd_allocation.jl --check` passed cleanly with EXIT=0 without relaxing any ceiling. |
 | TASK-P1-CHORDAL | open | `chordal.jl` production wiring unverified |
 | TASK-P0-FINAL-GATE | open | runs only after the two open items close |
 

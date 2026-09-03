@@ -943,8 +943,13 @@ mutable struct MFLUFactorCache{MF<:MultiFloat} <: SDPX.AbstractFactorCache{MF}
     status::SDPX.FactorCacheState
 end
 
-MFLUFactorCache(::Type{MF}) where {MF<:MultiFloat} = MFLUFactorCache{MF}(
-    MFLUCache(MF), 0, -1, 0, SDPX.Unprepared,
+MFLUFactorCache(
+    ::Type{MF}; threads::Integer=1,
+) where {MF<:MultiFloat} = MFLUFactorCache{MF}(
+    MFLUCache(
+        MF; config=KernelConfig(thread_count=max(Int(threads), 1)),
+    ),
+    0, -1, 0, SDPX.Unprepared,
 )
 
 function SDPX.prepare!(
@@ -956,6 +961,15 @@ function SDPX.prepare!(
     cache.matrix_epoch = -1
     cache.factor_epoch = 0
     cache.status = SDPX.Prepared
+    return cache
+end
+
+function SDPX.instantiate_provider_lu_factor_cache(
+    ::Type{MF}, n::Integer; threads::Integer=1,
+) where {MF<:MultiFloat}
+    _supported_multifloat(MF) || return nothing
+    cache = MFLUFactorCache(MF; threads=threads)
+    SDPX.prepare!(cache, SDPX.FactorRequirements(n))
     return cache
 end
 
@@ -1024,6 +1038,8 @@ function SDPX.invalidate!(cache::MFLUFactorCache{MF}) where {MF<:MultiFloat}
 end
 
 SDPX.factor_status(cache::MFLUFactorCache) = cache.status
+SDPX.lu_factor_storage(cache::MFLUFactorCache) = factor_matrix(cache.inner)
+SDPX.lu_factor_pivots(cache::MFLUFactorCache) = cache.inner.ipiv
 SDPX.factor_matrix_epoch(cache::MFLUFactorCache) = cache.matrix_epoch
 SDPX.factor_symbolic_epoch(cache::MFLUFactorCache) = cache.symbolic_epoch
 SDPX.factor_epoch(cache::MFLUFactorCache) = cache.factor_epoch

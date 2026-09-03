@@ -67,7 +67,9 @@ mutable struct SymmetricBorderedWorkspace{
     last_reason::SymmetricBorderedReason
 end
 
-function SymmetricBorderedWorkspace(::Type{T}, nr::Integer) where {T}
+function SymmetricBorderedWorkspace(
+    ::Type{T}, nr::Integer; threads::Integer=1,
+) where {T}
     reduced = Int(nr)
     reduced >= 0 || throw(ArgumentError("negative bordered reduced dimension"))
     dimension = reduced + 1
@@ -76,7 +78,10 @@ function SymmetricBorderedWorkspace(::Type{T}, nr::Integer) where {T}
     # provider cache owns independent BigFloat/MultiFloat objects so the
     # in-place provider solve never aliases caller or operator storage.
     route = T === Float64 ? LPLUCache{T}(dimension) :
-        _provider_lp_lu_supported(T) ? ProviderLPLUCache{T}(dimension) :
+        _provider_lp_lu_supported(T) ?
+            _provider_lu_factor_cache(
+                T, dimension; threads=max(Int(threads), 1),
+            ) :
         throw(ArgumentError(
             "bordered route requires MFLA/BFLA for high precision, or Float64",
         ))
@@ -290,7 +295,9 @@ function _product_cone_hsd_state(
     # LPLU. `base.workspace.driver` remains part of the generic HSD storage contract but
     # is never factored by this route, even when a caller supplied it.
     symmetric_bordered = prepare_symmetric_core ? nothing :
-        SymmetricBorderedWorkspace(T, base.workspace.nr)
+        SymmetricBorderedWorkspace(
+            T, base.workspace.nr; threads=schur_threads,
+        )
     # Expanded storage is opt-in ownership, not an eager shadow workspace.
     # The default bordered route must not pay the dense O((n+m)^2) memory cost
     # of a factorization session it can never execute.
@@ -1244,7 +1251,7 @@ end
     workspace::SymmetricBorderedWorkspace,
 )
     n = workspace.dimension
-    pivots = workspace.driver.route.ipiv
+    pivots = lu_factor_pivots(workspace.driver.route)
     @inbounds for i in 1:n
         workspace.permutation[i] = i
     end
@@ -1266,7 +1273,7 @@ end
     T(8n) * eps(one(T)) < one(T) || return false
     _product_bordered_transform_matrix_ok(workspace) || return false
     _product_bordered_permutation!(workspace) || return false
-    F = workspace.driver.route.factors
+    F = lu_factor_storage(workspace.driver.route)
     P = workspace.permutation
     E = workspace.factor_error
     gamma = _product_bordered_gamma(T, 4n)
@@ -1324,13 +1331,10 @@ end
         workspace.last_reason = SYMMETRIC_BORDERED_FACTOR_FAILED
         return false
     end
-    @inbounds for i in 1:workspace.dimension
-        pivot = workspace.driver.route.factors[i, i]
-        isfinite(pivot) && !iszero(pivot) || begin
-            workspace.last_reason = SYMMETRIC_BORDERED_FACTOR_FAILED
-            return false
-        end
-    end
+    # Do not inspect route-private packed factors here. Every FactorCache
+    # reports numerical failure from `factorize!`; the provider-neutral
+    # identity replay below then certifies the actual solve map and catches
+    # any non-finite, singular, or incorrectly pivoted result.
     if !_product_bordered_factor_certificate!(workspace)
         workspace.last_reason = SYMMETRIC_BORDERED_FACTOR_CERT_FAILED
         return false
@@ -2302,7 +2306,7 @@ end
 ) where {T}
     n = workspace.dimension
     length(solution) == n && length(rhs) == n || return false
-    F = workspace.driver.route.factors
+    F = lu_factor_storage(workspace.driver.route)
     P = workspace.permutation
     py = workspace.permuted_rhs
     y = workspace.staged_y
@@ -2364,7 +2368,7 @@ end
     _product_bordered_recompute_staged!(workspace, solution, rhs) ||
         return false
     n = workspace.dimension
-    F = workspace.driver.route.factors
+    F = lu_factor_storage(workspace.driver.route)
     py = workspace.permuted_rhs
     y = workspace.staged_y
     f = workspace.forward_residual
@@ -2455,7 +2459,7 @@ end
             workspace, solution, workspace.factor_rhs, 8n,
         ) || return false
     end
-    F = workspace.driver.route.factors
+    F = lu_factor_storage(workspace.driver.route)
     E = workspace.factor_error
     P = workspace.permutation
     f = workspace.forward_residual

@@ -707,6 +707,17 @@ function SDPX.prepare!(
     return cache
 end
 
+function SDPX.instantiate_provider_lu_factor_cache(
+    ::Type{BigFloat}, n::Integer; threads::Integer=1,
+)
+    cache = BFLALUFactorCache()
+    requirements = BigFloatFactorRequirements(
+        Int(n), 0, precision(BigFloat), max(Int(threads), 1),
+    )
+    SDPX.prepare!(cache, requirements)
+    return cache
+end
+
 function SDPX.factorize!(
     cache::BFLALUFactorCache,
     A::AbstractMatrix{BigFloat},
@@ -775,6 +786,9 @@ function SDPX.invalidate!(cache::BFLALUFactorCache)
 end
 
 SDPX.factor_status(cache::BFLALUFactorCache) = cache.status
+SDPX.lu_factor_storage(cache::BFLALUFactorCache) =
+    BFLA.factor_matrix(cache.inner)
+SDPX.lu_factor_pivots(cache::BFLALUFactorCache) = cache.inner.pivots
 SDPX.factor_matrix_epoch(cache::BFLALUFactorCache) = cache.matrix_epoch
 SDPX.factor_symbolic_epoch(cache::BFLALUFactorCache) = cache.symbolic_epoch
 SDPX.factor_epoch(cache::BFLALUFactorCache) = cache.factor_epoch

@@ -77,6 +77,12 @@ function _lp_lu_factor!(F::Matrix{T}, ipiv::Vector{Int}) where {T}
     return nothing
 end
 
+# Provider-neutral packed-LU certificate access. These are deliberately
+# narrower than exposing cache fields: the bordered verifier needs exactly
+# the packed matrix and pivot sequence used by the solve map.
+lu_factor_storage(cache::LPLUCache) = cache.factors
+lu_factor_pivots(cache::LPLUCache) = cache.ipiv
+
 function _lp_lu_solve!(F::Matrix{T}, ipiv::Vector{Int}, rhs::AbstractVector{T}) where {T}
     if T <: _LAPACK_LU && _LP_LU_HAS_OWNED_LAPACK
         LinearAlgebra.LAPACK.getrs!('N', F, ipiv, rhs)
@@ -191,6 +197,16 @@ mutable struct ProviderLPLUCache{T} <: AbstractFactorCache{T}
     provider_factor::Any
 end
 
+"""Optional extension hook for a provider-owned, reusable LU FactorCache.
+
+MFLA/BFLA implement this with their native caches so numeric refactorization
+updates prepared storage in place instead of returning a fresh factor snapshot
+on every IPM iteration.  The core fallback remains `ProviderLPLUCache`.
+"""
+instantiate_provider_lu_factor_cache(
+    ::Type{T}, ::Integer; threads::Integer=1,
+) where {T} = nothing
+
 function _lp_lu_provider_backend(
     ::Type{T}; threads::Int=1,
 ) where {T}
@@ -220,6 +236,16 @@ function _provider_lp_lu_supported(::Type{T}) where {T}
            _lp_lu_provider_backend(T) !== nothing
 end
 
+
+function _provider_lu_factor_cache(
+    ::Type{T}, n::Int; threads::Int=1,
+) where {T}
+    native = instantiate_provider_lu_factor_cache(
+        T, n; threads=max(threads, 1),
+    )
+    native === nothing || return native
+    return ProviderLPLUCache{T}(n; threads=max(threads, 1))
+end
 
 function ProviderLPLUCache{T}(
     n::Int; threads::Int=1,
@@ -292,6 +318,9 @@ function factorize!(cache::ProviderLPLUCache{T}, A::AbstractMatrix{T}, matrix_ep
     end
     return cache
 end
+
+lu_factor_storage(cache::ProviderLPLUCache) = cache.factors
+lu_factor_pivots(cache::ProviderLPLUCache) = cache.ipiv
 
 function _provider_lu_solve_owned!(
     cache::ProviderLPLUCache{T}, rhs::AbstractVector{T},

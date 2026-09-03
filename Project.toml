@@ -1,6 +1,6 @@
 name = "SDPX"
 uuid = "9c19f76d-03c5-4610-b403-7c8fdd8897fd"
-version = "0.6.0"
+version = "0.6.1"
 authors = ["Yongjun Xu <yongjunx23@gmail.com>"]
 
 [deps]
