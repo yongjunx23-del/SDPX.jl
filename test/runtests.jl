@@ -487,6 +487,43 @@ end
                   for i in 1:3 for j in 1:3 if i != j)
         @test all(scaling.g[i] !== scaling.g[j]
                   for i in eachindex(scaling.g) for j in eachindex(scaling.g) if i != j)
+
+        # Near-face exponential point that requires the certified dual-Hessian
+        # fallback.  Independent inverse-column solves round their symmetric
+        # off-diagonal copies differently here; averaging them fails a strict
+        # column residual, while the certified lower-triangle selection passes.
+        primal = parse.(BigFloat, [
+            "0.0",
+            "2.135486156203307807125203687430552324604577836863533951313882060506511257451629",
+            "2.135486156656605740413307428264774665989642941064119456422389475001525254929289",
+        ])
+        dual = parse.(BigFloat, [
+            "-2.135507441348494728706192297306651756570831091618540976805334411105477359399342",
+            "-2.135486151123264430569167365696961089040332278356532943435095222619360472441528",
+            "2.135486156203307807125203687430552324604577836863533951313882060506511257451629",
+        ])
+        mu = parse(BigFloat,
+            "3.938791254906679703039418022829962432010487208156490135959528092299181028425105e-09")
+        fallback = SDPX.try_update_nonsymmetric_scaling!(
+            scaling,
+            SDPX.DoubleSecantWithDualHessianFallback(),
+            SDPX.ExpConjugateTag(),
+            primal,
+            dual,
+            mu,
+        )
+        @test fallback.status === SDPX.NS_SCALING_DUAL_HESSIAN_FALLBACK
+        @test fallback.reason === SDPX.NS_SCALING_CONVERGED
+        @test fallback.fallback_reason === SDPX.NS_SCALING_BFGS_DENOMINATOR
+        @test scaling.valid
+        @test scaling.conjugate.inverse_valid
+        @test SDPX._ns_scaling_validate_fallback_metric!(scaling)[1] ===
+              SDPX.NS_SCALING_CONVERGED
+        @test all(scaling.g[i] !== scaling.g[j]
+                  for i in eachindex(scaling.g) for j in eachindex(scaling.g) if i != j)
+        inverse = scaling.conjugate.inverse_hessian
+        @test all(inverse[i] !== inverse[j]
+                  for i in eachindex(inverse) for j in eachindex(inverse) if i != j)
     end
 end
 

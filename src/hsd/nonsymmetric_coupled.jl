@@ -244,7 +244,9 @@ end
     size(source) == (3, 3) && size(theta) == (3, 3) || return false
     L = workspace.factor_coordinate_factor
     @inbounds for j in 1:3, i in 1:3
-        L[local0 + i, local0 + j] = source[i, j]
+        _store_owned_scalar!(
+            L, CartesianIndex(local0 + i, local0 + j), source[i, j],
+        )
     end
     @inbounds for j in 1:3, i in 1:3
         value = L[local0 + i, local0 + j]
@@ -400,7 +402,7 @@ end
         workspace.last_reason = COUPLED_TRANSFORM_FAILED
         return false
     end
-    copyto!(workspace.factor_coordinate_matrix, workspace.matrix)
+    copy_owned!(workspace.factor_coordinate_matrix, workspace.matrix)
     # Left transform: every C_N row block is premultiplied by L^-1.
     @inbounds for block_index in eachindex(workspace.offsets)
         local0 = 3 * (block_index - 1)
@@ -474,7 +476,7 @@ end
 ) where {T}
     workspace.transform_valid || return false
     _product_coupled_transform_order_ok(workspace) || return false
-    copyto!(workspace.factor_coordinate_rhs, workspace.rhs)
+    copy_owned!(workspace.factor_coordinate_rhs, workspace.rhs)
     @inbounds for block_index in eachindex(workspace.offsets)
         local0 = 3 * (block_index - 1)
         row0 = local0 + 1
@@ -484,9 +486,18 @@ end
         _product_coupled_lower_solve3!(
             workspace, local0, old1, old2, old3,
         ) || return false
-        workspace.factor_coordinate_rhs[row0] = workspace.transform_scratch[1]
-        workspace.factor_coordinate_rhs[row0 + 1] = workspace.transform_scratch[2]
-        workspace.factor_coordinate_rhs[row0 + 2] = workspace.transform_scratch[3]
+        _store_owned_scalar!(
+            workspace.factor_coordinate_rhs, row0,
+            workspace.transform_scratch[1],
+        )
+        _store_owned_scalar!(
+            workspace.factor_coordinate_rhs, row0 + 1,
+            workspace.transform_scratch[2],
+        )
+        _store_owned_scalar!(
+            workspace.factor_coordinate_rhs, row0 + 2,
+            workspace.transform_scratch[3],
+        )
         _product_coupled_triangular_certificate!(
             workspace, local0, old1, old2, old3, false,
         ) || return false
@@ -692,7 +703,9 @@ end
         _product_coupled_transform_order_ok(workspace) || return false
         _product_coupled_factor_coordinate_finite(workspace) || return false
         @inbounds for i in 1:workspace.nr
-            workspace.physical_solution[i] = solution[i]
+            _store_owned_scalar!(
+                workspace.physical_solution, i, solution[i],
+            )
         end
         @inbounds for block_index in eachindex(workspace.offsets)
             local0 = 3 * (block_index - 1)
@@ -748,7 +761,7 @@ end
         workspace.physical_solution[workspace.nr + workspace.nonsymmetric_dimension + 2] =
             solution[workspace.nr + workspace.nonsymmetric_dimension + 2]
     else
-        copyto!(workspace.physical_solution, solution)
+        copy_owned!(workspace.physical_solution, solution)
     end
     @inbounds for value in workspace.physical_solution
         isfinite(value) || return false

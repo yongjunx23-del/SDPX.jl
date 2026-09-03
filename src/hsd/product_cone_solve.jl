@@ -127,13 +127,13 @@ function _product_hsd_apply_primal_refinement!(
         for pointer in nzrange(A, column)
             value -= A.nzval[pointer] * primal_residual[A.rowval[pointer]]
         end
-        rhs[column] = value
+        _store_owned_scalar!(rhs, column, value)
     end
     permuted = alloc_zeros(T, length(rhs))
     la_factor_solve!(factor, rhs, permuted)
     all(isfinite, rhs) || return false
     @inbounds for index in eachindex(x)
-        x[index] += rhs[index]
+        _store_owned_scalar!(x, index, x[index] + rhs[index])
     end
     return all(isfinite, x)
 end
@@ -145,18 +145,22 @@ function _product_hsd_apply_dual_refinement!(
     n = size(A, 2)
     m = size(A, 1)
     if T === Float64
-        affine_dual = Matrix{T}(undef, n + 1, m)
+        affine_dual = alloc_zeros(T, n + 1, m)
         @inbounds for column in 1:m
             for row in 1:n
-                affine_dual[row, column] = A[column, row]
+                _store_owned_scalar!(
+                    affine_dual, CartesianIndex(row, column), A[column, row],
+                )
             end
-            affine_dual[end, column] = b[column]
+            _store_owned_scalar!(
+                affine_dual, CartesianIndex(n + 1, column), b[column],
+            )
         end
-        rhs = Vector{T}(undef, n + 1)
+        rhs = alloc_zeros(T, n + 1)
         @inbounds for row in 1:n
-            rhs[row] = -dual_residual[row]
+            _store_owned_scalar!(rhs, row, -dual_residual[row])
         end
-        rhs[end] = -gap
+        _store_owned_scalar!(rhs, n + 1, -gap)
         y .+= affine_dual \ rhs
         return true
     end
@@ -175,11 +179,13 @@ function _product_hsd_apply_dual_refinement!(
             row = A.rowval[pointer]
             value += A.nzval[pointer] * b[row]
         end
-        atb[column] = value
-        gram[n + 1, column] = value
-        gram[column, n + 1] = value
+        _store_owned_scalar!(atb, column, value)
+        _store_owned_scalar!(gram, CartesianIndex(n + 1, column), value)
+        _store_owned_scalar!(gram, CartesianIndex(column, n + 1), value)
     end
-    gram[n + 1, n + 1] = dot(b, b)
+    _store_owned_scalar!(
+        gram, CartesianIndex(n + 1, n + 1), dot(b, b),
+    )
     all(isfinite, gram) || return false
     factor = la_cholesky_factor!(backend, gram)
     factor === nothing && return false
@@ -192,7 +198,7 @@ function _product_hsd_apply_dual_refinement!(
     all(isfinite, rhs) || return false
     correction = alloc_zeros(T, m)
     @inbounds for row in 1:m
-        correction[row] = b[row] * rhs[end]
+        _store_owned_scalar!(correction, row, b[row] * rhs[end])
     end
     @inbounds for column in 1:n
         coefficient = rhs[column]
@@ -201,7 +207,7 @@ function _product_hsd_apply_dual_refinement!(
         end
     end
     @inbounds for row in 1:m
-        y[row] += correction[row]
+        _store_owned_scalar!(y, row, y[row] + correction[row])
     end
     return all(isfinite, y)
 end
@@ -268,8 +274,8 @@ function _product_hsd_refined_optimal_result!(
             neighborhood = sqrt(tol) * scale
             if abs(s[u]) <= neighborhood &&
                abs(s[w] - s[v]) <= neighborhood && s[v] > zero(T)
-                s[u] = zero(T)
-                s[w] = s[v]
+                _store_owned_scalar!(s, u, zero(T))
+                _store_owned_scalar!(s, w, s[v])
                 exp_boundary_changed = true
             end
         end
@@ -292,12 +298,17 @@ function _product_hsd_refined_optimal_result!(
         _product_hsd_apply_dual_refinement!(
             y, A, dual_dense_A, canonical.b, dual_residual, gap, backend,
         ) || return nothing
-        affine_dual = Matrix{T}(undef, base.n + 1, base.m)
+        affine_dual = alloc_zeros(T, base.n + 1, base.m)
         @inbounds for column in 1:base.m
             for row in 1:base.n
-                affine_dual[row, column] = A[column, row]
+                _store_owned_scalar!(
+                    affine_dual, CartesianIndex(row, column), A[column, row],
+                )
             end
-            affine_dual[end, column] = canonical.b[column]
+            _store_owned_scalar!(
+                affine_dual, CartesianIndex(base.n + 1, column),
+                canonical.b[column],
+            )
         end
 
         # For K_exp^*, L_E(u,v,w)=(u-v,-u,w). When the u coordinate is
@@ -314,7 +325,8 @@ function _product_hsd_refined_optimal_result!(
                         break
                     end
                 end
-                structurally_free && (y[u] = y[u + 1])
+                structurally_free &&
+                    _store_owned_scalar!(y, u, y[u + 1])
             end
         end
     catch exception
@@ -345,9 +357,9 @@ function _product_hsd_refined_optimal_result!(
     in_canonical_cone(canonical, s; dual=false, tol=tol) || return nothing
     in_canonical_cone(canonical, y; dual=true, tol=tol) || return nothing
 
-    saved_x = copy(base.x)
-    saved_s = copy(base.s)
-    saved_y = copy(base.y)
+    saved_x = copy_owned!(alloc_zeros(T, length(base.x)), base.x)
+    saved_s = copy_owned!(alloc_zeros(T, length(base.s)), base.s)
+    saved_y = copy_owned!(alloc_zeros(T, length(base.y)), base.y)
     saved_kappa = base.kappa
     @inbounds for index in eachindex(base.x)
         base.x[index] = base.tau * x[index]
@@ -372,9 +384,9 @@ function _product_hsd_refined_optimal_result!(
         )
     end
 
-    copyto!(base.x, saved_x)
-    copyto!(base.s, saved_s)
-    copyto!(base.y, saved_y)
+    copy_owned!(base.x, saved_x)
+    copy_owned!(base.s, saved_s)
+    copy_owned!(base.y, saved_y)
     base.kappa = saved_kappa
     _product_hsd_residual!(state)
     return nothing
@@ -435,11 +447,17 @@ end
 ) where {T}
     base = state.base
     @inbounds for j in 1:base.n
-        base.xt[j] = base.x[j] + alpha * base.dx[j]
+        _store_owned_scalar!(
+            base.xt, j, base.x[j] + alpha * base.dx[j],
+        )
     end
     @inbounds for k in 1:base.m
-        base.st[k] = base.s[k] + alpha * base.ds[k]
-        base.yt[k] = base.y[k] + alpha * base.dy[k]
+        _store_owned_scalar!(
+            base.st, k, base.s[k] + alpha * base.ds[k],
+        )
+        _store_owned_scalar!(
+            base.yt, k, base.y[k] + alpha * base.dy[k],
+        )
     end
     base.tau_t = base.tau + alpha * base.dtau
     base.kappa_t = base.kappa + alpha * base.dkappa
@@ -490,14 +508,14 @@ function _product_hsd_terminal_verified_result!(
     (isfinite(alpha) && alpha > zero(T)) || return nothing
     _product_hsd_stage_terminal_trial!(state, alpha) || return nothing
 
-    saved_x = copy(base.x)
-    saved_s = copy(base.s)
-    saved_y = copy(base.y)
+    saved_x = copy_owned!(alloc_zeros(T, length(base.x)), base.x)
+    saved_s = copy_owned!(alloc_zeros(T, length(base.s)), base.s)
+    saved_y = copy_owned!(alloc_zeros(T, length(base.y)), base.y)
     saved_tau = base.tau
     saved_kappa = base.kappa
-    copyto!(base.x, base.xt)
-    copyto!(base.s, base.st)
-    copyto!(base.y, base.yt)
+    copy_owned!(base.x, base.xt)
+    copy_owned!(base.s, base.st)
+    copy_owned!(base.y, base.yt)
     base.tau = base.tau_t
     base.kappa = base.kappa_t
 
@@ -508,9 +526,9 @@ function _product_hsd_terminal_verified_result!(
 
     # Keep the mutable state on its last accepted pair: unlike the terminal
     # certificate, that pair has an NT runtime which may safely be reused.
-    copyto!(base.x, saved_x)
-    copyto!(base.s, saved_s)
-    copyto!(base.y, saved_y)
+    copy_owned!(base.x, saved_x)
+    copy_owned!(base.s, saved_s)
+    copy_owned!(base.y, saved_y)
     base.tau = saved_tau
     base.kappa = saved_kappa
     _product_hsd_residual!(state)
@@ -584,7 +602,7 @@ function product_hsd_solve!(
         )
     end
     if base.workspace.rank_incompatible
-        copyto!(base.x, base.workspace.rank_ray)
+        copy_owned!(base.x, base.workspace.rank_ray)
         if verify_dual_infeasibility!(
             base.canonical, base, x_original, s_original; tol=certificate_tol,
         )

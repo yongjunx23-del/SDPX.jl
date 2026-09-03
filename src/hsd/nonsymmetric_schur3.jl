@@ -109,7 +109,7 @@ function NonsymmetricSchur3Workspace(
     end
     entries = rowptr[end] - 1
     column_indices = Vector{Int}(undef, entries)
-    coefficients = Vector{T}(undef, entries)
+    coefficients = alloc_zeros(T, entries)
     next_slot = copy(@view rowptr[1:local_rows])
     @inbounds for column in 1:columns_count
         for pointer in nzrange(A, column)
@@ -155,11 +155,13 @@ end
 end
 
 @inline function _ns_schur3_clear!(H, at_g_b, bt_g_a, at_g_rhs)
-    T = eltype(H)
-    fill!(H, zero(T))
-    fill!(at_g_b, zero(T))
-    fill!(bt_g_a, zero(T))
-    fill!(at_g_rhs, zero(T))
+    # This API accepts arbitrary caller-owned destinations.  They may already
+    # contain aliased mutable scalars (notably after `fill!(A, zero(BigFloat))`),
+    # so rebuild distinct zero objects instead of mutating assumed-owned slots.
+    zero_distinct!(H)
+    zero_distinct!(at_g_b)
+    zero_distinct!(bt_g_a)
+    zero_distinct!(at_g_rhs)
     return nothing
 end
 
@@ -224,12 +226,12 @@ end
         isfinite(l22) && isfinite(l32) && isfinite(pivot3) &&
         pivot3 > zero(T) || return NS_SCHUR3_METRIC_NOT_SPD
 
-        packed[1, block] = g11
-        packed[2, block] = g22
-        packed[3, block] = g33
-        packed[4, block] = g12
-        packed[5, block] = g13
-        packed[6, block] = g23
+        _store_owned_scalar!(packed, CartesianIndex(1, block), g11)
+        _store_owned_scalar!(packed, CartesianIndex(2, block), g22)
+        _store_owned_scalar!(packed, CartesianIndex(3, block), g33)
+        _store_owned_scalar!(packed, CartesianIndex(4, block), g12)
+        _store_owned_scalar!(packed, CartesianIndex(5, block), g13)
+        _store_owned_scalar!(packed, CartesianIndex(6, block), g23)
     end
     return NS_SCHUR3_CONVERGED
 end
@@ -266,8 +268,11 @@ end
         for right in first:last
             right_column = columns[right]
             left_column >= right_column || continue
-            H[left_column, right_column] +=
-                coefficient * left_value * values[right]
+            index = CartesianIndex(left_column, right_column)
+            _store_owned_scalar!(
+                H, index,
+                H[index] + coefficient * left_value * values[right],
+            )
         end
     end
     return nothing
@@ -298,10 +303,12 @@ end
             right_column = columns[right]
             value = coefficient * left_value * values[right]
             if left_column >= right_column
-                H[left_column, right_column] +=
-                    left_column == right_column ? two * value : value
+                index = CartesianIndex(left_column, right_column)
+                increment = left_column == right_column ? two * value : value
+                _store_owned_scalar!(H, index, H[index] + increment)
             else
-                H[right_column, left_column] += value
+                index = CartesianIndex(right_column, left_column)
+                _store_owned_scalar!(H, index, H[index] + value)
             end
         end
     end
@@ -323,9 +330,15 @@ end
     @inbounds for pointer in first:last
         column = workspace.column_indices[pointer]
         coefficient = workspace.coefficients[pointer]
-        at_g_b[column] += coefficient * g_b
-        bt_g_a[column] += bt_g * coefficient
-        at_g_rhs[column] += coefficient * g_rhs
+        _store_owned_scalar!(
+            at_g_b, column, at_g_b[column] + coefficient * g_b,
+        )
+        _store_owned_scalar!(
+            bt_g_a, column, bt_g_a[column] + bt_g * coefficient,
+        )
+        _store_owned_scalar!(
+            at_g_rhs, column, at_g_rhs[column] + coefficient * g_rhs,
+        )
     end
     return nothing
 end
@@ -418,7 +431,7 @@ function try_assemble_nonsymmetric_schur3_theta!(
                     T, NS_SCHUR3_FAILED, NS_SCHUR3_NONFINITE_METRIC,
                 )
             end
-            theta[i, j] = value
+            _store_owned_scalar!(theta, CartesianIndex(i, j), value)
         end
         if !(theta[1, 2] == theta[2, 1] &&
              theta[1, 3] == theta[3, 1] &&
@@ -436,21 +449,24 @@ function try_assemble_nonsymmetric_schur3_theta!(
         end
 
         row1 = 3 * (block - 1) + 1
-        fill!(factor_a, zero(T))
+        zero_owned!(factor_a)
         for coordinate in 1:3
             local_row = row1 + coordinate - 1
             first = workspace.rowptr[local_row]
             last = workspace.rowptr[local_row + 1] - 1
             for pointer in first:last
                 column = workspace.column_indices[pointer]
-                factor_a[coordinate, column] +=
-                    workspace.coefficients[pointer]
+                index = CartesianIndex(coordinate, column)
+                _store_owned_scalar!(
+                    factor_a, index,
+                    factor_a[index] + workspace.coefficients[pointer],
+                )
             end
         end
         for column in 1:n
-            input[1] = factor_a[1, column]
-            input[2] = factor_a[2, column]
-            input[3] = factor_a[3, column]
+            _store_owned_scalar!(input, 1, factor_a[1, column])
+            _store_owned_scalar!(input, 2, factor_a[2, column])
+            _store_owned_scalar!(input, 3, factor_a[3, column])
             if !_runtime_nonsymmetric_forward_solve3!(
                 output, factor, input,
             )
@@ -459,15 +475,21 @@ function try_assemble_nonsymmetric_schur3_theta!(
                     T, NS_SCHUR3_FAILED, NS_SCHUR3_NONFINITE_RESULT,
                 )
             end
-            factor_a[1, column] = output[1]
-            factor_a[2, column] = output[2]
-            factor_a[3, column] = output[3]
+            _store_owned_scalar!(
+                factor_a, CartesianIndex(1, column), output[1],
+            )
+            _store_owned_scalar!(
+                factor_a, CartesianIndex(2, column), output[2],
+            )
+            _store_owned_scalar!(
+                factor_a, CartesianIndex(3, column), output[3],
+            )
         end
 
         offset = workspace.offsets[block]
-        input[1] = b[offset]
-        input[2] = b[offset + 1]
-        input[3] = b[offset + 2]
+        _store_owned_scalar!(input, 1, b[offset])
+        _store_owned_scalar!(input, 2, b[offset + 1])
+        _store_owned_scalar!(input, 3, b[offset + 2])
         if !_runtime_nonsymmetric_forward_solve3!(
             factor_b, factor, input,
         )
@@ -476,9 +498,9 @@ function try_assemble_nonsymmetric_schur3_theta!(
                 T, NS_SCHUR3_FAILED, NS_SCHUR3_NONFINITE_RESULT,
             )
         end
-        input[1] = rhs[offset]
-        input[2] = rhs[offset + 1]
-        input[3] = rhs[offset + 2]
+        _store_owned_scalar!(input, 1, rhs[offset])
+        _store_owned_scalar!(input, 2, rhs[offset + 1])
+        _store_owned_scalar!(input, 3, rhs[offset + 2])
         if !_runtime_nonsymmetric_forward_solve3!(
             factor_rhs, factor, input,
         )
@@ -495,16 +517,23 @@ function try_assemble_nonsymmetric_schur3_theta!(
             ag_rhs = factor_a[1, column] * factor_rhs[1] +
                      factor_a[2, column] * factor_rhs[2] +
                      factor_a[3, column] * factor_rhs[3]
-            at_g_b[column] += ag_b
+            _store_owned_scalar!(
+                at_g_b, column, at_g_b[column] + ag_b,
+            )
             # G is represented by one factor-space Gram operator, so the two
             # border orientations are the same arithmetic value.
-            bt_g_a[column] += ag_b
-            at_g_rhs[column] += ag_rhs
+            _store_owned_scalar!(
+                bt_g_a, column, bt_g_a[column] + ag_b,
+            )
+            _store_owned_scalar!(
+                at_g_rhs, column, at_g_rhs[column] + ag_rhs,
+            )
             for row in column:n
-                H[row, column] +=
-                    factor_a[1, row] * factor_a[1, column] +
-                    factor_a[2, row] * factor_a[2, column] +
-                    factor_a[3, row] * factor_a[3, column]
+                index = CartesianIndex(row, column)
+                increment = factor_a[1, row] * factor_a[1, column] +
+                            factor_a[2, row] * factor_a[2, column] +
+                            factor_a[3, row] * factor_a[3, column]
+                _store_owned_scalar!(H, index, H[index] + increment)
             end
         end
         b_g_b += factor_b[1] * factor_b[1] +
@@ -517,7 +546,9 @@ function try_assemble_nonsymmetric_schur3_theta!(
 
     @inbounds for column in 1:n
         for row in (column + 1):n
-            H[column, row] = H[row, column]
+            _store_owned_scalar!(
+                H, CartesianIndex(column, row), H[row, column],
+            )
         end
     end
     if !_ns_schur3_outputs_finite(
@@ -646,7 +677,9 @@ function try_assemble_nonsymmetric_schur3!(
     n = workspace.columns_count
     @inbounds for column in 1:n
         for row in (column + 1):n
-            H[column, row] = H[row, column]
+            _store_owned_scalar!(
+                H, CartesianIndex(column, row), H[row, column],
+            )
         end
     end
     if !_ns_schur3_outputs_finite(

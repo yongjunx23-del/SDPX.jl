@@ -156,11 +156,17 @@ Base.@noinline function _product_hsd_line_search!(
     while !accepted
         if !_trial_point_vec4!(state, alpha)
             @inbounds for j in 1:base.n
-                base.xt[j] = base.x[j] + alpha * base.dx[j]
+                _store_owned_scalar!(
+                    base.xt, j, base.x[j] + alpha * base.dx[j],
+                )
             end
             @inbounds for k in 1:base.m
-                base.st[k] = base.s[k] + alpha * base.ds[k]
-                base.yt[k] = base.y[k] + alpha * base.dy[k]
+                _store_owned_scalar!(
+                    base.st, k, base.s[k] + alpha * base.ds[k],
+                )
+                _store_owned_scalar!(
+                    base.yt, k, base.y[k] + alpha * base.dy[k],
+                )
             end
         end
         base.tau_t = base.tau + alpha * base.dtau
@@ -254,13 +260,9 @@ Base.@noinline function _product_hsd_line_search!(
         end
         return false
     end
-    @inbounds for j in 1:base.n
-        base.x[j] = base.xt[j]
-    end
-    @inbounds for k in 1:base.m
-        base.s[k] = base.st[k]
-        base.y[k] = base.yt[k]
-    end
+    copy_owned!(base.x, base.xt)
+    copy_owned!(base.s, base.st)
+    copy_owned!(base.y, base.yt)
     base.tau = base.tau_t
     base.kappa = base.kappa_t
     state.diagnostic = :none

@@ -104,8 +104,8 @@ function _product_hsd_expanded_linearization(
     # and Power blocks use their accepted fixed-size 3x3 contribution; other
     # blocks retain the authoritative Theta action one local column at a time.
     operator = session.cone_operator
-    fill!(operator, zero(T))
-    copyto!(session.cone_corrector_rhs, corrector_rhs)
+    zero_owned!(operator)
+    copy_owned!(session.cone_corrector_rhs, corrector_rhs)
     basis = state.g_input
     image = state.g_output
     for rows in session.cone_block_ranges
@@ -124,11 +124,13 @@ function _product_hsd_expanded_linearization(
             continue
         end
         @inbounds for column in rows
-            fill!(basis, zero(T))
-            basis[column] = one(T)
+            zero_distinct!(basis)
+            _store_owned_scalar!(basis, column, one(T))
             apply_Theta!(state.runtime, image, basis)
             for row in rows
-                operator[row, column] = image[row]
+                _store_owned_scalar!(
+                    operator, CartesianIndex(row, column), image[row],
+                )
             end
         end
     end
@@ -186,7 +188,7 @@ function _product_hsd_sparse_linearization(
     basis = state.g_input
     image = state.g_output
     forcing = T(64) * eps(T)
-    copyto!(state.expanded.cone_corrector_rhs, corrector_rhs)
+    copy_owned!(state.expanded.cone_corrector_rhs, corrector_rhs)
     for rows in ranges
         dimension = length(rows)
         operator = alloc_zeros(T, dimension, dimension)
@@ -204,11 +206,16 @@ function _product_hsd_sparse_linearization(
             reason === NS_SCALING_CONVERGED || return nothing
         else
             @inbounds for local_column in 1:dimension
-                fill!(basis, zero(T))
-                basis[rows[local_column]] = one(T)
+                zero_distinct!(basis)
+                _store_owned_scalar!(
+                    basis, rows[local_column], one(T),
+                )
                 apply_Theta!(state.runtime, image, basis)
                 for local_row in 1:dimension
-                    operator[local_row, local_column] = image[rows[local_row]]
+                    _store_owned_scalar!(
+                        operator, CartesianIndex(local_row, local_column),
+                        image[rows[local_row]],
+                    )
                 end
             end
         end
@@ -293,9 +300,9 @@ function _product_hsd_expanded_solve_shift!(
     end
     direction = recover_expanded_direction!(session, system, solution)
     base = state.base
-    copyto!(base.dx, direction.dx)
-    copyto!(base.dy, direction.dy)
-    copyto!(base.ds, direction.ds)
+    copy_owned!(base.dx, direction.dx)
+    copy_owned!(base.dy, direction.dy)
+    copy_owned!(base.ds, direction.ds)
     base.dtau = direction.dtau
     base.dkappa = direction.dkappa
     _hsd_direction_finite(base) || return false
@@ -393,9 +400,9 @@ function _product_hsd_expanded_direction!(
     _product_hsd_expanded_solve_shift!(
         state, cone, predictor_scalar,
     ) || return false
-    copyto!(base.dx_a, base.dx)
-    copyto!(base.dy_a, base.dy)
-    copyto!(base.ds_a, base.ds)
+    copy_owned!(base.dx_a, base.dx)
+    copy_owned!(base.dy_a, base.dy)
+    copy_owned!(base.ds_a, base.ds)
     base.dtau_a = base.dtau
     base.dkappa_a = base.dkappa
 
@@ -412,7 +419,7 @@ function _product_hsd_expanded_direction!(
     # The corrector RHS is constructed only after the predictor direction has
     # been solved and certified: the corrected shift is copied into the
     # session-owned cone buffer and the predictor cone operator is shared.
-    copyto!(state.expanded.cone_corrector_rhs, state.h)
+    copy_owned!(state.expanded.cone_corrector_rhs, state.h)
     corrector_cone = ProductConeLinearization{T}(
         state.expanded.cone_operator, state.expanded.cone_corrector_rhs,
         state.expanded.cone_block_ranges,
@@ -447,9 +454,9 @@ function _product_hsd_sparse_solve_shift!(
         )
     end
     base = state.base
-    copyto!(base.dx, direction.dx)
-    copyto!(base.dy, direction.dy)
-    copyto!(base.ds, direction.ds)
+    copy_owned!(base.dx, direction.dx)
+    copy_owned!(base.dy, direction.dy)
+    copy_owned!(base.ds, direction.ds)
     base.dtau = direction.dtau
     base.dkappa = direction.dkappa
     if !_hsd_direction_finite(base)
@@ -495,9 +502,9 @@ function _product_hsd_sparse_direction!(state::ProductConeHSDState{T}) where {T}
     _product_hsd_sparse_solve_shift!(
         state, cone, predictor_scalar; factor_operator=true,
     ) || return false
-    copyto!(base.dx_a, base.dx)
-    copyto!(base.dy_a, base.dy)
-    copyto!(base.ds_a, base.ds)
+    copy_owned!(base.dx_a, base.dx)
+    copy_owned!(base.dy_a, base.dy)
+    copy_owned!(base.ds_a, base.ds)
     base.dtau_a = base.dtau
     base.dkappa_a = base.dkappa
 
@@ -522,7 +529,7 @@ function _product_hsd_sparse_direction!(state::ProductConeHSDState{T}) where {T}
     # The corrected shift is copied into the session-owned cone buffer; the
     # sparse block operators are shared with the predictor cone and the same
     # reduced-Schur factor is reused for the corrector solve.
-    copyto!(state.expanded.cone_corrector_rhs, state.h)
+    copy_owned!(state.expanded.cone_corrector_rhs, state.h)
     corrector_cone = BlockProductConeLinearization{T}(
         cone.operators, state.expanded.cone_corrector_rhs, cone.block_ranges,
     )
@@ -598,15 +605,18 @@ function _product_hsd_core_scatter!(state::ProductConeHSDState{T}) where {T}
     if core isa FixedTraceQ3CoreWorkspace{T}
         # The fixed-trace core already computed A*dx into `core.ax`;
         # reuse it instead of a second full sparse scan.
-        copyto!(base.ax, core.ax)
+        copy_owned!(base.ax, core.ax)
         @inbounds for row in 1:base.m
-            state.g_input[row] = base.ax[row] + state.h[row] +
-                                 base.rP[row] - base.b[row] * base.dtau
+            _store_owned_scalar!(
+                state.g_input, row,
+                base.ax[row] + state.h[row] + base.rP[row] -
+                base.b[row] * base.dtau,
+            )
         end
         apply_cone_linearization!(base.e, core.system.cone, base.dy)
         return false
     end
-    fill!(base.ax, zero(T))
+    zero_owned!(base.ax)
     @inbounds for j in 1:base.n
         value = base.dx[j]
         iszero(value) && continue
@@ -616,8 +626,11 @@ function _product_hsd_core_scatter!(state::ProductConeHSDState{T}) where {T}
         end
     end
     @inbounds for row in 1:base.m
-        state.g_input[row] = base.ax[row] + state.h[row] +
-                             base.rP[row] - base.b[row] * base.dtau
+        _store_owned_scalar!(
+            state.g_input, row,
+            base.ax[row] + state.h[row] + base.rP[row] -
+            base.b[row] * base.dtau,
+        )
     end
     # The cone complementarity term for the frozen five-equation gate must
     # use the exact operator carried by this NewtonSystem.  Fixed-trace HKM
@@ -657,11 +670,11 @@ function _product_hsd_fixed_trace_hkm_linearization!(
     base = state.base
     plan = core.plan
     length(plan.soc_blocks) == length(plan.soc_operator_indices) || return false
-    fill!(state.h, zero(T))
-    fill!(cone.corrector_rhs, zero(T))
+    zero_owned!(state.h)
+    zero_owned!(cone.corrector_rhs)
     if refresh_metric
         for operator in cone.operators
-            fill!(operator, zero(T))
+            zero_owned!(operator)
         end
     elseif core.linearization_epoch != base.epoch
         return false
@@ -779,8 +792,10 @@ function _product_hsd_symmetric_core_linearization!(
             continue
         end
         @inbounds for local_column in 1:dimension
-            fill!(basis, zero(T))
-            basis[rows[local_column]] = one(T)
+            zero_distinct!(basis)
+            _store_owned_scalar!(
+                basis, rows[local_column], one(T),
+            )
             apply_Theta!(state.runtime, image, basis)
             for local_row in 1:dimension
                 operator[local_row, local_column] =
@@ -901,9 +916,9 @@ function _product_hsd_symmetric_core_direction!(
     # the solve bucket keeps the remainder of the call wall, extended
     # through direction materialization (copy/scatter/finite/residual
     # gates) so every wall fraction of the direction is attributed.
-    copyto!(base.dx, predictor_candidate.dx)
-    copyto!(base.dy, predictor_candidate.dy)
-    copyto!(base.ds, predictor_candidate.ds)
+    copy_owned!(base.dx, predictor_candidate.dx)
+    copy_owned!(base.dy, predictor_candidate.dy)
+    copy_owned!(base.ds, predictor_candidate.ds)
     base.dtau = predictor_candidate.dtau
     base.dkappa = predictor_candidate.dkappa
     _product_hsd_core_scatter!(state)
@@ -922,9 +937,9 @@ function _product_hsd_symmetric_core_direction!(
     timings.predictor_linear_solve_seconds +=
         Float64(time_ns() - t0) * 1.0e-9 -
         (timings.refinement_seconds - refinement_wall0)
-    copyto!(base.dx_a, base.dx)
-    copyto!(base.dy_a, base.dy)
-    copyto!(base.ds_a, base.ds)
+    copy_owned!(base.dx_a, base.dx)
+    copy_owned!(base.dy_a, base.dy)
+    copy_owned!(base.ds_a, base.ds)
     base.dtau_a = base.dtau
     base.dkappa_a = base.dkappa
 
@@ -976,9 +991,9 @@ function _product_hsd_symmetric_core_direction!(
         _core_solve_raw!(core, corrector_system)
     timings.refinement_iterations =
         core.refinements - refinement_iter0
-    copyto!(base.dx, corrector_candidate.dx)
-    copyto!(base.dy, corrector_candidate.dy)
-    copyto!(base.ds, corrector_candidate.ds)
+    copy_owned!(base.dx, corrector_candidate.dx)
+    copy_owned!(base.dy, corrector_candidate.dy)
+    copy_owned!(base.ds, corrector_candidate.ds)
     base.dtau = corrector_candidate.dtau
     base.dkappa = corrector_candidate.dkappa
     _product_hsd_core_scatter!(state)
@@ -989,9 +1004,9 @@ function _product_hsd_symmetric_core_direction!(
         return false
     end
     if !_product_hsd_newton_residual_ok(state, corrector_scalar)
-        copyto!(base.dx, base.dx_a)
-        copyto!(base.dy, base.dy_a)
-        copyto!(base.ds, base.ds_a)
+        copy_owned!(base.dx, base.dx_a)
+        copy_owned!(base.dy, base.dy_a)
+        copy_owned!(base.ds, base.ds_a)
         base.dtau = base.dtau_a
         base.dkappa = base.dkappa_a
         _product_hsd_core_scatter!(state)

@@ -220,7 +220,9 @@ function _hsd_eq_verified_equality_ray(
     tolerance::T,
 ) where {T}
     full_ray = alloc_zeros(T, canonical_num_slack(canonical))
-    full_ray[zero_rows] .= local_ray
+    @inbounds for (index, row) in enumerate(zero_rows)
+        _store_owned_scalar!(full_ray, row, local_ray[index])
+    end
     stationarity = transpose(canonical.A) * full_ray
     pairing = dot(canonical.b, full_ray)
     scale = max(
@@ -489,9 +491,9 @@ function hsd_equality_reduce(
         solution = alloc_zeros(T, rank)
         for q in eachindex(dependent)
             @inbounds for i in 1:rank
-                rhs[i] = R[i, rank + q]
+                _store_owned_scalar!(rhs, i, R[i, rank + q])
             end
-            fill!(solution, zero(T))
+            zero_owned!(solution)
             _hsd_eq_upper_solve!(solution, upper, rhs) ||
                 return HSDEqualityReduction{T}(
                     HSDEqualityNumericalFailure, canonical, nothing,
@@ -500,7 +502,11 @@ function hsd_equality_reduce(
                     pivots, independent, dependent, transfer, rank,
                     rank_tol, rank_tol, alloc_zeros(T, m),
                 )
-            transfer[:, q] .= solution
+            @inbounds for i in 1:rank
+                _store_owned_scalar!(
+                    transfer, CartesianIndex(i, q), solution[i],
+                )
+            end
         end
     end
 
@@ -674,7 +680,9 @@ function hsd_recover_equality_dual!(
         coefficients = alloc_zeros(T, rank)
         _hsd_eq_upper_solve!(coefficients, reduction.upper, projected) || return false
         @inbounds for i in 1:rank
-            temporary[reduction.independent[i]] = coefficients[i]
+            _store_owned_scalar!(
+                temporary, reduction.independent[i], coefficients[i],
+            )
         end
     end
     E = reduction.original.A[reduction.zero_rows, :]
@@ -686,7 +694,7 @@ function hsd_recover_equality_dual!(
     )
     _hsd_eq_all_finite(temporary) && _hsd_eq_all_finite(residual) &&
         _hsd_eq_maxabs(residual) <= tolerance * scale || return false
-    copyto!(destination, temporary)
+    copy_owned!(destination, temporary)
     return true
 end
 
@@ -699,9 +707,9 @@ function _hsd_eq_scatter_active!(
         throw(DimensionMismatch("full canonical row vector length"))
     length(active) == length(reduction.reduced_to_full) ||
         throw(DimensionMismatch("reduced canonical row vector length"))
-    fill!(full, zero(T))
+    zero_distinct!(full)
     @inbounds for (reduced, original) in enumerate(reduction.reduced_to_full)
-        full[original] = active[reduced]
+        _store_owned_scalar!(full, original, active[reduced])
     end
     return full
 end
@@ -757,7 +765,9 @@ function hsd_recover_optimal!(
         equality_dual = alloc_zeros(T, length(reduction.zero_rows))
         hsd_recover_equality_dual!(equality_dual, reduction, dual_rhs; tol=tolerance) ||
             return false
-        y[reduction.zero_rows] .= equality_dual
+        @inbounds for (index, row) in enumerate(reduction.zero_rows)
+            _store_owned_scalar!(y, row, equality_dual[index])
+        end
     end
 
     primal_residual = original.A * x + s - original.b
@@ -806,9 +816,9 @@ function hsd_recover_optimal!(
         ))
     end
     valid || return false
-    copyto!(x_full, x)
-    copyto!(s_full, s)
-    copyto!(y_full, y)
+    copy_owned!(x_full, x)
+    copy_owned!(s_full, s)
+    copy_owned!(y_full, y)
     return true
 end
 
@@ -839,7 +849,9 @@ function hsd_recover_primal_ray!(
         equality_dual = alloc_zeros(T, length(reduction.zero_rows))
         hsd_recover_equality_dual!(equality_dual, reduction, rhs; tol=tolerance) ||
             return false
-        y[reduction.zero_rows] .= equality_dual
+        @inbounds for (index, row) in enumerate(reduction.zero_rows)
+            _store_owned_scalar!(y, row, equality_dual[index])
+        end
     end
     residual = transpose(original.A) * y
     pairing = dot(original.b, y)
@@ -849,7 +861,7 @@ function hsd_recover_primal_ray!(
             isfinite(pairing) && pairing < -tolerance * scale &&
             in_canonical_cone(original, y; dual=true, tol=tolerance)
     valid || return false
-    copyto!(y_full, y)
+    copy_owned!(y_full, y)
     return true
 end
 
@@ -886,8 +898,8 @@ function hsd_recover_dual_ray!(
             isfinite(improvement) && improvement < -tolerance * scale &&
             in_canonical_cone(original, s; dual=false, tol=tolerance)
     valid || return false
-    copyto!(x_full, x)
-    copyto!(s_full, s)
+    copy_owned!(x_full, x)
+    copy_owned!(s_full, s)
     return true
 end
 

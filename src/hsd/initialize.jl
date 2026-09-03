@@ -42,23 +42,25 @@ end
 function _assemble_affine_start_kkt!(matrix, A, regularization)
     T = eltype(matrix)
     m, n = size(A)
-    fill!(matrix, zero(T))
+    zero_owned!(matrix)
     @inbounds for j in 1:n
-        matrix[j, j] = one(T)
+        _store_owned_scalar!(matrix, CartesianIndex(j, j), one(T))
         for i in 1:m
             value = A[i, j]
-            matrix[j, n + i] = value
-            matrix[n + i, j] = value
+            _store_owned_scalar!(matrix, CartesianIndex(j, n + i), value)
+            _store_owned_scalar!(matrix, CartesianIndex(n + i, j), value)
         end
     end
     @inbounds for i in 1:m
-        matrix[n + i, n + i] = -regularization
+        _store_owned_scalar!(
+            matrix, CartesianIndex(n + i, n + i), -regularization,
+        )
     end
     return matrix
 end
 
 function _product_symmetric_identity!(runtime::ProductConeRuntime{T}, identity) where {T}
-    fill!(identity, zero(T))
+    zero_owned!(identity)
     for block in runtime.orthant
         _runtime_copy_identity!(identity, block.offset, block.dim, Val(:orthant))
     end
@@ -88,12 +90,18 @@ end
 function _copy_nonsymmetric_central_blocks!(runtime, destination, central)
     for block in runtime.exp
         @inbounds for index in 0:2
-            destination[block.offset + index] = central[block.offset + index]
+            _store_owned_scalar!(
+                destination, block.offset + index,
+                central[block.offset + index],
+            )
         end
     end
     for block in runtime.power
         @inbounds for index in 0:2
-            destination[block.offset + index] = central[block.offset + index]
+            _store_owned_scalar!(
+                destination, block.offset + index,
+                central[block.offset + index],
+            )
         end
     end
     return destination
@@ -170,17 +178,17 @@ function kkt_derived_start!(state::ProductConeHSDState{T}) where {T<:AbstractFlo
         return _failed_hsd_start_report(T, :affine_kkt_factorization)
     rhs = alloc_zeros(T, dimension, 2)
     @inbounds for i in 1:m
-        rhs[n + i, 1] = b[i]
+        _store_owned_scalar!(rhs, CartesianIndex(n + i, 1), b[i])
     end
     @inbounds for j in 1:n
-        rhs[j, 2] = -c[j]
+        _store_owned_scalar!(rhs, CartesianIndex(j, 2), -c[j])
     end
-    solution = similar(rhs)
+    solution = alloc_zeros(T, size(rhs, 1), size(rhs, 2))
     solve_pivoted_lu!(solution, factor, rhs) ||
         return _failed_hsd_start_report(T, :affine_kkt_solve)
 
-    x = copy(@view solution[1:n, 1])
-    y = copy(@view solution[(n + 1):(n + m), 2])
+    x = copy_owned!(alloc_zeros(T, n), @view solution[1:n, 1])
+    y = copy_owned!(alloc_zeros(T, m), @view solution[(n + 1):(n + m), 2])
     s = b - A * x
 
     # Runtime-generated central points are the only initialization authority
@@ -236,9 +244,9 @@ function kkt_derived_start!(state::ProductConeHSDState{T}) where {T<:AbstractFlo
     all(isfinite, x) && all(isfinite, s) && all(isfinite, y) ||
         return _failed_hsd_start_report(T, :nonfinite_start)
 
-    copyto!(base.x, x)
-    copyto!(base.s, s)
-    copyto!(base.y, y)
+    copy_owned!(base.x, x)
+    copy_owned!(base.s, s)
+    copy_owned!(base.y, y)
     base.tau = one(T)
     base.kappa = one(T)
     return HSDKKTStartReport{T}(

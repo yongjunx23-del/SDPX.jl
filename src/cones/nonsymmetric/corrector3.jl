@@ -736,7 +736,7 @@ function nonsymmetric_affine_shift!(
         return _ns_corrector_failure(
             workspace, NS_CORRECTOR_LINEARIZATION_MISMATCH,
         )
-    fill!(workspace.chi, zero(T))
+    zero_distinct!(workspace.chi)
     return _ns_corrector_result(
         workspace, NS_CORRECTOR_AFFINE_READY, NS_CORRECTOR_CONVERGED,
         zero(T), linearization_error,

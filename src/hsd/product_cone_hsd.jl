@@ -338,7 +338,7 @@ function _product_cone_hsd_state(
     # pure O(nr^2) allocation that the hot path never touches.  Only allocate
     # them when a nonsymmetric Schur session actually exists.
     has_ns_schur = ns_schur !== nothing
-    ns_H = has_ns_schur ? alloc_zeros(T, base.workspace.nr, base.workspace.nr) : Matrix{T}(undef, 0, 0)
+    ns_H = has_ns_schur ? alloc_zeros(T, base.workspace.nr, base.workspace.nr) : alloc_zeros(T, 0, 0)
     ns_metrics = has_ns_schur ? alloc_zeros(T, 3, 3, block_count) : alloc_zeros(T, 3, 3, 0)
     ns_at_g_b = has_ns_schur ? alloc_zeros(T, base.workspace.nr) : T[]
     ns_bt_g_a = has_ns_schur ? alloc_zeros(T, base.workspace.nr) : T[]
@@ -641,7 +641,7 @@ The initial point is strictly interior but intentionally infeasible-start.
 """
 function product_hsd_cold_start!(state::ProductConeHSDState{T}) where {T}
     base = state.base
-    fill!(base.x, zero(T))
+    zero_owned!(base.x)
     initialize_primal_dual!(state.runtime, base.s, base.y)
     base.tau = one(T)
     base.kappa = one(T)
@@ -828,8 +828,8 @@ Lorentz or PSD map solely because its condition number is large.
     target = state.g_input
     psd_budget_inconclusive = false
     state.soc_bounds_certified = false
-    fill!(state.soc_g_error_bound, zero(T))
-    fill!(state.soc_roundtrip_bound, zero(T))
+    zero_owned!(state.soc_g_error_bound)
+    zero_owned!(state.soc_roundtrip_bound)
 
     @inbounds for block in runtime.orthant
         gamma = T(5) * eps(T) / (one(T) - T(5) * eps(T))
@@ -846,7 +846,9 @@ Lorentz or PSD map solely because its condition number is large.
 
     @inbounds for block in runtime.soc
         for i in 1:block.dim
-            block.direction[i] = target[block.offset + i - 1]
+            _store_owned_scalar!(
+                block.direction, i, target[block.offset + i - 1],
+            )
         end
         _product_hsd_soc_roundtrip_ok(
             target, block, state.soc_g_error_bound,
@@ -857,7 +859,9 @@ Lorentz or PSD map solely because its condition number is large.
     @inbounds for block in runtime.psd
         n = block.dim
         for i in 1:block.len
-            block.direction[i] = target[block.offset + i - 1]
+            _store_owned_scalar!(
+                block.direction, i, target[block.offset + i - 1],
+            )
         end
         pnorm = zero(T)
         pinvnorm = zero(T)
@@ -903,8 +907,10 @@ Lorentz or PSD map solely because its condition number is large.
         _product_hsd_nonsymmetric_roundtrip_ok(target, block) ||
             return false, false
     end
-    copyto!(state.certified_soc_g_error_bound, state.soc_g_error_bound)
-    copyto!(
+    copy_owned!(
+        state.certified_soc_g_error_bound, state.soc_g_error_bound,
+    )
+    copy_owned!(
         state.certified_soc_roundtrip_bound,
         state.soc_roundtrip_bound,
     )
@@ -919,12 +925,14 @@ excluding them here prevents both a dense product-column pass and double
 counting in mixed products.
 """
 Base.@noinline function _product_hsd_apply_symmetric_G!(runtime, dst, src)
-    fill!(dst, zero(eltype(dst)))
+    zero_distinct!(dst)
     @inbounds for block in runtime.orthant
         offset = block.offset
         g = block.state.g
         for i in 1:block.dim
-            dst[offset + i - 1] = g[i] * src[offset + i - 1]
+            _store_owned_scalar!(
+                dst, offset + i - 1, g[i] * src[offset + i - 1],
+            )
         end
     end
     @inbounds for block in runtime.soc
@@ -941,11 +949,17 @@ Base.@noinline function _product_hsd_apply_symmetric_G!(runtime, dst, src)
             wz += wi * src[offset + i - 1]
         end
         two = one(eltype(dst)) + one(eltype(dst))
-        dst[offset] = (w0 * w0 + ww) * z0 + two * w0 * wz
+        _store_owned_scalar!(
+            dst, offset, (w0 * w0 + ww) * z0 + two * w0 * wz,
+        )
         tail_diag = w0 * w0 - ww
         for i in 2:dim
             wi = w[i]
-            dst[offset + i - 1] = two * w0 * z0 * wi + tail_diag * src[offset + i - 1] + two * wi * wz
+            _store_owned_scalar!(
+                dst, offset + i - 1,
+                two * w0 * z0 * wi + tail_diag * src[offset + i - 1] +
+                two * wi * wz,
+            )
         end
     end
     @inbounds for block in runtime.psd
@@ -969,13 +983,19 @@ end
     @inbounds for block in state.runtime.exp
         block_index += 1
         for j in 1:3, i in 1:3
-            metrics[i, j, block_index] = block.scaling.theta[i, j]
+            _store_owned_scalar!(
+                metrics, CartesianIndex(i, j, block_index),
+                block.scaling.theta[i, j],
+            )
         end
     end
     @inbounds for block in state.runtime.power
         block_index += 1
         for j in 1:3, i in 1:3
-            metrics[i, j, block_index] = block.scaling.theta[i, j]
+            _store_owned_scalar!(
+                metrics, CartesianIndex(i, j, block_index),
+                block.scaling.theta[i, j],
+            )
         end
     end
     return block_index
@@ -1506,7 +1526,7 @@ inverse.
     dkappa_column = dtau_column + 1
     gap_row = nsdim + nr + 1
     scalar_row = gap_row + 1
-    fill!(K, zero(T))
+    zero_owned!(K)
 
     # Static A_N coefficients in C_N and D.
     @inbounds for j in 1:nr
@@ -1515,35 +1535,45 @@ inverse.
             local_row = workspace.row_to_local[row]
             iszero(local_row) && continue
             value = base.workspace.Ar.nzval[pointer]
-            K[local_row, j] -= value
-            K[dual_row0 + j, dy_col0 + local_row] += value
+            index = CartesianIndex(local_row, j)
+            _store_owned_scalar!(K, index, K[index] - value)
+            index = CartesianIndex(dual_row0 + j, dy_col0 + local_row)
+            _store_owned_scalar!(K, index, K[index] + value)
         end
     end
     @inbounds for local_row in 1:nsdim
         row = workspace.offsets[div(local_row - 1, 3) + 1] +
               mod(local_row - 1, 3)
-        K[local_row, dtau_column] = base.b[row]
-        K[gap_row, dy_col0 + local_row] = -base.b[row]
+        _store_owned_scalar!(
+            K, CartesianIndex(local_row, dtau_column), base.b[row],
+        )
+        _store_owned_scalar!(
+            K, CartesianIndex(gap_row, dy_col0 + local_row), -base.b[row],
+        )
     end
 
     # Accepted original nonsymmetric Theta blocks.
     @inbounds for block in runtime.exp
         local0 = workspace.row_to_local[block.offset] - 1
         for j in 1:3, i in 1:3
-            K[local0 + i, dy_col0 + local0 + j] =
-                block.scaling.theta[i, j]
+            _store_owned_scalar!(
+                K, CartesianIndex(local0 + i, dy_col0 + local0 + j),
+                block.scaling.theta[i, j],
+            )
         end
     end
     @inbounds for block in runtime.power
         local0 = workspace.row_to_local[block.offset] - 1
         for j in 1:3, i in 1:3
-            K[local0 + i, dy_col0 + local0 + j] =
-                block.scaling.theta[i, j]
+            _store_owned_scalar!(
+                K, CartesianIndex(local0 + i, dy_col0 + local0 + j),
+                block.scaling.theta[i, j],
+            )
         end
     end
 
     # d=A_S'G_S*b_S and beta=b_S'G_S*b_S.
-    copyto!(state.g_input, base.b)
+    copy_owned!(state.g_input, base.b)
     _product_hsd_apply_symmetric_G!(runtime, state.gb, state.g_input)
     beta = zero(T)
     @inbounds for row in 1:base.m
@@ -1555,13 +1585,13 @@ inverse.
             row = base.workspace.Ar.rowval[pointer]
             dj += base.workspace.Ar.nzval[pointer] * state.gb[row]
         end
-        state.ns_at_g_b[j] = dj
+        _store_owned_scalar!(state.ns_at_g_b, j, dj)
     end
 
     # H_S=A_S'G_S*A_S.  The symmetric-only map zeros all N rows, so the
     # sparse contractions below cannot double count an Exp/Power block.
     @inbounds for column in 1:nr
-        fill!(state.g_input, zero(T))
+        zero_owned!(state.g_input)
         for pointer in nzrange(base.workspace.Ar, column)
             state.g_input[base.workspace.Ar.rowval[pointer]] +=
                 base.workspace.Ar.nzval[pointer]
@@ -1575,19 +1605,26 @@ inverse.
                 row = base.workspace.Ar.rowval[pointer]
                 value += base.workspace.Ar.nzval[pointer] * state.g_output[row]
             end
-            K[dual_row0 + row_column, column] = value
+            _store_owned_scalar!(
+                K, CartesianIndex(dual_row0 + row_column, column), value,
+            )
         end
     end
 
     @inbounds for j in 1:nr
         dj = state.ns_at_g_b[j]
-        K[dual_row0 + j, dtau_column] = base.workspace.cr[j] - dj
-        K[gap_row, j] = -(base.workspace.cr[j] + dj)
+        _store_owned_scalar!(
+            K, CartesianIndex(dual_row0 + j, dtau_column),
+            base.workspace.cr[j] - dj,
+        )
+        _store_owned_scalar!(
+            K, CartesianIndex(gap_row, j), -(base.workspace.cr[j] + dj),
+        )
     end
-    K[gap_row, dtau_column] = beta
-    K[gap_row, dkappa_column] = one(T)
-    K[scalar_row, dtau_column] = base.kappa
-    K[scalar_row, dkappa_column] = base.tau
+    _store_owned_scalar!(K, CartesianIndex(gap_row, dtau_column), beta)
+    _store_owned_scalar!(K, CartesianIndex(gap_row, dkappa_column), one(T))
+    _store_owned_scalar!(K, CartesianIndex(scalar_row, dtau_column), base.kappa)
+    _store_owned_scalar!(K, CartesianIndex(scalar_row, dkappa_column), base.tau)
 
     _hsd_matrix_finite(K) || begin
         workspace.last_reason = COUPLED_ASSEMBLY_NONFINITE
@@ -1597,7 +1634,7 @@ inverse.
     # source is the scaling workspace's certified lower Cholesky factor for
     # the current Theta; the coupled path keeps its own copy so line-search
     # checkpoints cannot mutate the matrix being factored.
-    fill!(workspace.factor_coordinate_factor, zero(T))
+    zero_owned!(workspace.factor_coordinate_factor)
     @inbounds for block in runtime.exp
         local0 = workspace.row_to_local[block.offset] - 1
         _product_coupled_copy_factor_block!(
@@ -1636,7 +1673,9 @@ end
     scalar_row = gap_row + 1
 
     @inbounds for row in 1:base.m
-        state.g_input[row] = state.h[row] + base.rP[row]
+        _store_owned_scalar!(
+            state.g_input, row, state.h[row] + base.rP[row],
+        )
     end
     _product_hsd_apply_symmetric_G!(
         state.runtime, state.g_output, state.g_input,
@@ -1644,7 +1683,9 @@ end
     @inbounds for local_row in 1:nsdim
         row = workspace.offsets[div(local_row - 1, 3) + 1] +
               mod(local_row - 1, 3)
-        rhs[local_row] = state.h[row] + base.rP[row]
+        _store_owned_scalar!(
+            rhs, local_row, state.h[row] + base.rP[row],
+        )
     end
     @inbounds for j in 1:nr
         pj = zero(T)
@@ -1652,7 +1693,7 @@ end
             row = base.workspace.Ar.rowval[pointer]
             pj += base.workspace.Ar.nzval[pointer] * state.g_output[row]
         end
-        state.ns_at_g_rhs[j] = pj
+        _store_owned_scalar!(state.ns_at_g_rhs, j, pj)
         rhs[dual_row0 + j] = -base.workspace.rDr[j] - pj
     end
     zeta = zero(T)
@@ -1695,13 +1736,13 @@ end
     end
     physical = workspace.physical_solution
     @inbounds for j in 1:nr
-        base.workspace.dxr[j] = physical[j]
+        _store_owned_scalar!(base.workspace.dxr, j, physical[j])
     end
     base.dtau = physical[dtau_index]
     base.dkappa = physical[dkappa_index]
     _hsd_scatter_dx!(base)
 
-    fill!(base.ax, zero(T))
+    zero_owned!(base.ax)
     @inbounds for j in 1:base.n
         value = base.dx[j]
         iszero(value) && continue
@@ -1711,8 +1752,11 @@ end
         end
     end
     @inbounds for row in 1:base.m
-        state.g_input[row] = base.ax[row] + state.h[row] + base.rP[row] -
-                             base.b[row] * base.dtau
+        _store_owned_scalar!(
+            state.g_input, row,
+            base.ax[row] + state.h[row] + base.rP[row] -
+            base.b[row] * base.dtau,
+        )
     end
     _product_hsd_apply_symmetric_G!(
         state.runtime, base.dy, state.g_input,
@@ -1720,15 +1764,17 @@ end
     @inbounds for local_row in 1:nsdim
         row = workspace.offsets[div(local_row - 1, 3) + 1] +
               mod(local_row - 1, 3)
-        base.dy[row] = physical[nr + local_row]
+        _store_owned_scalar!(base.dy, row, physical[nr + local_row])
     end
     apply_Theta!(state.runtime, base.e, base.dy)
     roundtrip_certified, psd_budget_inconclusive =
         _product_hsd_roundtrip_backward_status(state)
     (roundtrip_certified || psd_budget_inconclusive) || return false
     @inbounds for row in 1:base.m
-        base.ds[row] = -base.ax[row] - base.rP[row] +
-                       base.b[row] * base.dtau
+        _store_owned_scalar!(
+            base.ds, row,
+            -base.ax[row] - base.rP[row] + base.b[row] * base.dtau,
+        )
     end
     _hsd_direction_finite(base) || return false
     return roundtrip_certified ||
@@ -2136,7 +2182,9 @@ end
         # `g_input` is dead after recovery's authoritative solve and is reused as
         # a preallocated row-sum scratch for ||[A I -b]||_infinity.
         @inbounds for k in 1:base.m
-            state.g_input[k] = one(T) + abs(base.b[k])
+            _store_owned_scalar!(
+                state.g_input, k, one(T) + abs(base.b[k]),
+            )
             rhs_norm = max(rhs_norm, abs(base.rP[k]))
             direction_norm = max(
                 direction_norm, abs(base.ds[k]),
@@ -2479,7 +2527,7 @@ end
     _product_bordered_triangular_solution_ok!(
         workspace, z, workspace.factor_rhs, 8n,
     ) || return false
-    copyto!(workspace.certified_solution, z)
+    copy_owned!(workspace.certified_solution, z)
     workspace.accumulated_candidate = false
     workspace.candidate_epoch = workspace.factor_epoch
     return true
@@ -2712,10 +2760,10 @@ end
     @inbounds for i in 1:base.workspace.nr
         value = base.workspace.dxr[i]
         isfinite(value) || return false
-        workspace.solution[i] = value
+        _store_owned_scalar!(workspace.solution, i, value)
     end
     isfinite(base.dtau) || return false
-    workspace.solution[end] = base.dtau
+    _store_owned_scalar!(workspace.solution, workspace.dimension, base.dtau)
     _product_bordered_factor_solution_ok!(workspace) || begin
         workspace.last_reason = SYMMETRIC_BORDERED_SOLVE_CERT_FAILED
         return false
@@ -2875,19 +2923,19 @@ end
     state::ProductConeHSDState{T}, original_rG::T,
 ) where {T}
     base = state.base
-    copyto!(base.rP, base.rPt)
-    copyto!(base.rD, base.rDt)
-    copyto!(state.h, base.st)
+    copy_owned!(base.rP, base.rPt)
+    copy_owned!(base.rD, base.rDt)
+    copy_owned!(state.h, base.st)
     base.rG = original_rG
     if _hsd_is_identity_basis(base.workspace.rank_basis)
-        copyto!(base.workspace.rDr, base.rD)
+        copy_owned!(base.workspace.rDr, base.rD)
     else
         @inbounds for j in 1:base.workspace.nr
             acc = zero(T)
             for i in 1:base.n
                 acc += base.workspace.rank_basis[i, j] * base.rD[i]
             end
-            base.workspace.rDr[j] = acc
+            _store_owned_scalar!(base.workspace.rDr, j, acc)
         end
     end
     return nothing
@@ -2898,7 +2946,7 @@ end
 ) where {T}
     base = state.base
     reduced_authoritative && _hsd_scatter_dx!(base)
-    fill!(base.ax, zero(T))
+    zero_owned!(base.ax)
     @inbounds for j in 1:base.n
         value = base.dx[j]
         iszero(value) && continue
@@ -2908,20 +2956,22 @@ end
     end
     if !reduced_authoritative
         if _hsd_is_identity_basis(base.workspace.rank_basis)
-            copyto!(base.workspace.dxr, base.dx)
+            copy_owned!(base.workspace.dxr, base.dx)
         else
             @inbounds for j in 1:base.workspace.nr
                 acc = zero(T)
                 for i in 1:base.n
                     acc += base.workspace.rank_basis[i, j] * base.dx[i]
                 end
-                base.workspace.dxr[j] = acc
+                _store_owned_scalar!(base.workspace.dxr, j, acc)
             end
         end
     end
     @inbounds for k in 1:base.m
-        state.g_input[k] = base.ax[k] + state.h[k] + base.rP[k] -
-                           base.b[k] * base.dtau
+        _store_owned_scalar!(
+            state.g_input, k,
+            base.ax[k] + state.h[k] + base.rP[k] - base.b[k] * base.dtau,
+        )
     end
     # Re-evaluate the frozen linear map on the accumulated correction RHS.
     # Summing two individually accurate `dy=G*q` vectors can lose every
@@ -2934,8 +2984,10 @@ end
         _product_hsd_roundtrip_backward_status(state)
     (roundtrip_certified || psd_budget_inconclusive) || return false
     @inbounds for k in 1:base.m
-        base.ds[k] = -base.ax[k] - base.rP[k] +
-                     base.b[k] * base.dtau
+        _store_owned_scalar!(
+            base.ds, k,
+            -base.ax[k] - base.rP[k] + base.b[k] * base.dtau,
+        )
     end
     cd = zero(T)
     bd = zero(T)
@@ -2967,9 +3019,9 @@ Base.@noinline function _product_hsd_refine_shift!(
     # onward, and a perfectly good direction was rejected as
     # SYMMETRIC_BORDERED_FIVE_EQUATION_FAILED.
     workspace.refinements = 0
-    copyto!(base.rPt, base.rP)
-    copyto!(base.rDt, base.rD)
-    copyto!(base.st, state.h)
+    copy_owned!(base.rPt, base.rP)
+    copy_owned!(base.rDt, base.rD)
+    copy_owned!(base.st, state.h)
     original_rG = base.rG
     initial_error = _product_hsd_max_normalized_newton_error(
         state, scalar_rhs,
@@ -2977,8 +3029,8 @@ Base.@noinline function _product_hsd_refine_shift!(
     isfinite(initial_error) && initial_error > zero(T) || return false
 
     for refinement in 1:2
-        copyto!(base.xt, base.dx)
-        copyto!(base.yt, base.dy)
+        copy_owned!(base.xt, base.dx)
+        copy_owned!(base.yt, base.dy)
         previous_snapshot_ok = true
         @inbounds for i in 1:workspace.dimension
             if workspace.solution[i] != workspace.certified_solution[i]
@@ -2990,7 +3042,7 @@ Base.@noinline function _product_hsd_refine_shift!(
             workspace.last_reason = SYMMETRIC_BORDERED_SOLVE_CERT_FAILED
             return false
         end
-        copyto!(workspace.previous_solution, workspace.solution)
+        copy_owned!(workspace.previous_solution, workspace.solution)
         total_dtau = base.dtau
 
         # Substitute the five current residuals into the same frozen Newton
@@ -3002,8 +3054,8 @@ Base.@noinline function _product_hsd_refine_shift!(
                 base.ax[k] + base.ds[k] + base.rPt[k],
             )
             cone_residual = base.ds[k] + base.e[k] - base.st[k]
-            base.rP[k] = primal_residual
-            state.h[k] = -cone_residual
+            _store_owned_scalar!(base.rP, k, primal_residual)
+            _store_owned_scalar!(state.h, k, -cone_residual)
         end
         @inbounds for j in 1:base.n
             dual_residual = muladd(
@@ -3015,17 +3067,17 @@ Base.@noinline function _product_hsd_refine_shift!(
                     base.dy[base.A.rowval[ptr]], dual_residual,
                 )
             end
-            base.rD[j] = dual_residual
+            _store_owned_scalar!(base.rD, j, dual_residual)
         end
         if _hsd_is_identity_basis(base.workspace.rank_basis)
-            copyto!(base.workspace.rDr, base.rD)
+            copy_owned!(base.workspace.rDr, base.rD)
         else
             @inbounds for j in 1:base.workspace.nr
                 acc = zero(T)
                 for i in 1:base.n
                     acc = muladd(base.workspace.rank_basis[i, j], base.rD[i], acc)
                 end
-                base.workspace.rDr[j] = acc
+                _store_owned_scalar!(base.workspace.rDr, j, acc)
             end
         end
         gap_residual = original_rG + base.dkappa
@@ -3045,8 +3097,8 @@ Base.@noinline function _product_hsd_refine_shift!(
             state, -scalar_residual,
         )
         if !correction_ok
-            copyto!(base.dx, base.xt)
-            copyto!(base.dy, base.yt)
+            copy_owned!(base.dx, base.xt)
+            copy_owned!(base.dy, base.yt)
             base.dtau = total_dtau
             _product_hsd_restore_refinement_equations!(state, original_rG)
             _product_hsd_rebuild_refined_direction!(state)
@@ -3060,15 +3112,15 @@ Base.@noinline function _product_hsd_refine_shift!(
             end
         end
         raw_snapshot_ok || begin
-            copyto!(base.dx, base.xt)
-            copyto!(base.dy, base.yt)
+            copy_owned!(base.dx, base.xt)
+            copy_owned!(base.dy, base.yt)
             base.dtau = total_dtau
             _product_hsd_restore_refinement_equations!(state, original_rG)
             _product_hsd_rebuild_refined_direction!(state)
             workspace.last_reason = SYMMETRIC_BORDERED_SOLVE_CERT_FAILED
             return false
         end
-        copyto!(workspace.correction_solution, workspace.solution)
+        copy_owned!(workspace.correction_solution, workspace.solution)
         accumulation_ok = true
         @inbounds for i in 1:workspace.dimension
             value = workspace.previous_solution[i] +
@@ -3077,12 +3129,12 @@ Base.@noinline function _product_hsd_refine_shift!(
                 accumulation_ok = false
                 break
             end
-            workspace.solution[i] = value
-            workspace.certified_solution[i] = value
+            _store_owned_scalar!(workspace.solution, i, value)
+            _store_owned_scalar!(workspace.certified_solution, i, value)
         end
         accumulation_ok || begin
-            copyto!(base.dx, base.xt)
-            copyto!(base.dy, base.yt)
+            copy_owned!(base.dx, base.xt)
+            copy_owned!(base.dy, base.yt)
             base.dtau = total_dtau
             _product_hsd_restore_refinement_equations!(state, original_rG)
             _product_hsd_rebuild_refined_direction!(state)
@@ -3090,7 +3142,9 @@ Base.@noinline function _product_hsd_refine_shift!(
             return false
         end
         @inbounds for j in 1:base.workspace.nr
-            base.workspace.dxr[j] = workspace.solution[j]
+            _store_owned_scalar!(
+                base.workspace.dxr, j, workspace.solution[j],
+            )
         end
         base.dtau = workspace.solution[end]
         workspace.accumulated_candidate = true
@@ -3170,7 +3224,9 @@ end
 
     @inbounds for _ in 1:2
         for i in 1:workspace.dimension
-            workspace.correction_rhs[i] = -workspace.residual[i]
+            _store_owned_scalar!(
+                workspace.correction_rhs, i, -workspace.residual[i],
+            )
         end
         correction_ok, _ = _product_coupled_solve!(
             workspace, workspace.correction, workspace.correction_rhs,
@@ -3182,7 +3238,7 @@ end
                 workspace.last_reason = COUPLED_SOLVE_CERT_FAILED
                 return false
             end
-            workspace.solution[i] = value
+            _store_owned_scalar!(workspace.solution, i, value)
         end
         workspace.refinements += 1
         total_ok, total_solve_merit =
@@ -3224,9 +3280,9 @@ end
     affine_shift!(state.runtime, state.h, base.s, base.y)
     predictor_scalar = -base.tau * base.kappa
     _product_hsd_coupled_solve_shift!(state, predictor_scalar) || return false
-    copyto!(base.dx_a, base.dx)
-    copyto!(base.dy_a, base.dy)
-    copyto!(base.ds_a, base.ds)
+    copy_owned!(base.dx_a, base.dx)
+    copy_owned!(base.dy_a, base.dy)
+    copy_owned!(base.ds_a, base.ds)
     base.dtau_a = base.dtau
     base.dkappa_a = base.dkappa
 

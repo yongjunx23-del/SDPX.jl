@@ -1015,7 +1015,7 @@ function _public_native_hsd_core(
     y_full = alloc_zeros(T, m)
 
     if reduction.status === HSDEqualityInconsistent
-        copyto!(y_full, reduction.primal_infeasibility_ray)
+        copy_owned!(y_full, reduction.primal_infeasibility_ray)
         plan = _native_hsd_plan(program, canonical, reduction, route, settings)
         return canonical, reduction, _native_hsd_core_result(
             T,
@@ -1533,7 +1533,10 @@ function _native_hsd_row_dual(
     row_dual = alloc_zeros(T, program_num_rows(program))
     @inbounds for row in eachindex(row_dual)
         reference = program.constraint_dual_reconstruction[row]
-        row_dual[row] = constraint_dual[_result_constraint_index(model, reference)]
+        _store_owned_scalar!(
+            row_dual, row,
+            constraint_dual[_result_constraint_index(model, reference)],
+        )
     end
     return row_dual
 end
@@ -1716,7 +1719,7 @@ function _public_result_from_native_hsd(
     settings::Settings{T},
     outputs::Outputs,
 ) where {T<:AbstractFloat}
-    primal = copy(core.x)
+    primal = copy_owned!(alloc_zeros(T, length(core.x)), core.x)
     constraint_dual = alloc_zeros(T, num_constraints(model))
     dual_slack = alloc_zeros(T, num_variables(model))
     if core.status in (Optimal, PrimalInfeasible)
@@ -1727,9 +1730,9 @@ function _public_result_from_native_hsd(
         )
     end
     if core.status === PrimalInfeasible
-        fill!(primal, zero(T))
+        zero_owned!(primal)
     elseif core.status !== Optimal && core.status !== DualInfeasible
-        fill!(primal, zero(T))
+        zero_owned!(primal)
     end
 
     row_dual = _native_hsd_row_dual(model, program, constraint_dual)

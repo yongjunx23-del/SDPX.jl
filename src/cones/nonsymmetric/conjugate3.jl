@@ -703,12 +703,13 @@ end
     forward = workspace.trial
     action = workspace.trial_gradient
     inverse_hessian = workspace.inverse_hessian
-    z = zero(T)
     o = one(T)
+    # A prior symmetric publication may have paired off-diagonal BigFloat
+    # objects. Rebuild independent storage before column-wise owned stores.
+    zero_distinct!(inverse_hessian)
     @inbounds for column in 1:3
-        rhs[1] = column == 1 ? o : z
-        rhs[2] = column == 2 ? o : z
-        rhs[3] = column == 3 ? o : z
+        zero_distinct!(rhs)
+        _store_owned_scalar!(rhs, column, o)
         _ns_structural_hessian_solve!(
             solution, workspace.hessian_factor, rhs, forward,
         ) || return false
@@ -720,49 +721,59 @@ end
         _store_owned_scalar!(inverse_hessian, CartesianIndex(2, column), solution[2])
         _store_owned_scalar!(inverse_hessian, CartesianIndex(3, column), solution[3])
     end
-    # The three independent solves differ only by roundoff.  Store the
-    # mathematically symmetric conjugate Hessian explicitly.
-    half = inv(o + o)
-    h12 = half * inverse_hessian[1, 2] +
-          half * inverse_hessian[2, 1]
-    h13 = half * inverse_hessian[1, 3] +
-          half * inverse_hessian[3, 1]
-    h23 = half * inverse_hessian[2, 3] +
-          half * inverse_hessian[3, 2]
-    inverse_hessian[1, 2] = h12
-    inverse_hessian[2, 1] = h12
-    inverse_hessian[1, 3] = h13
-    inverse_hessian[3, 1] = h13
-    inverse_hessian[2, 3] = h23
-    inverse_hessian[3, 2] = h23
-    @inbounds for value in inverse_hessian
-        isfinite(value) || return false
+    # The independent inverse-column solves can round the two copies of an
+    # off-diagonal entry differently.  Averaging those copies is not always
+    # backward stable: near a cone face, changing the sensitive column by
+    # half an ulp from the other solve can violate its otherwise tiny solve
+    # residual.  Instead, enumerate the eight exact symmetric selections of
+    # the already-computed upper/lower entries.  Accept only a matrix whose
+    # three columns all pass the existing componentwise solve certificate and
+    # which is itself SPD.  This changes no tolerance and introduces no
+    # unverified regularization.
+    upper12 = _coo_owned_scalar(inverse_hessian[1, 2])
+    lower12 = _coo_owned_scalar(inverse_hessian[2, 1])
+    upper13 = _coo_owned_scalar(inverse_hessian[1, 3])
+    lower13 = _coo_owned_scalar(inverse_hessian[3, 1])
+    upper23 = _coo_owned_scalar(inverse_hessian[2, 3])
+    lower23 = _coo_owned_scalar(inverse_hessian[3, 2])
+    @inbounds for selection in 0:7
+        h12 = iszero(selection & 0x01) ? lower12 : upper12
+        h13 = iszero(selection & 0x02) ? lower13 : upper13
+        h23 = iszero(selection & 0x04) ? lower23 : upper23
+        _store_owned_scalar!(inverse_hessian, CartesianIndex(1, 2), h12)
+        _store_owned_scalar!(inverse_hessian, CartesianIndex(2, 1), h12)
+        _store_owned_scalar!(inverse_hessian, CartesianIndex(1, 3), h13)
+        _store_owned_scalar!(inverse_hessian, CartesianIndex(3, 1), h13)
+        _store_owned_scalar!(inverse_hessian, CartesianIndex(2, 3), h23)
+        _store_owned_scalar!(inverse_hessian, CartesianIndex(3, 2), h23)
+
+        columns_certified = true
+        for column in 1:3
+            zero_distinct!(rhs)
+            _store_owned_scalar!(rhs, column, o)
+            _store_owned_scalar!(solution, 1, inverse_hessian[1, column])
+            _store_owned_scalar!(solution, 2, inverse_hessian[2, column])
+            _store_owned_scalar!(solution, 3, inverse_hessian[3, column])
+            solve_ok, _ = _ns_structural_hessian_solve_certificate!(
+                workspace.hessian_factor, solution, rhs, forward, action,
+            )
+            if !solve_ok
+                columns_certified = false
+                break
+            end
+        end
+        columns_certified || continue
+
+        # The returned conjugate Hessian is required to be symmetric positive
+        # definite in its own right.  A zero-RHS Cholesky solve is an
+        # allocation-free factorization gate and does not impose a fragile
+        # output-relative H*Hinv-I test on a strongly conditioned metric.
+        zero_distinct!(rhs)
+        _ns_conjugate_spd_solve!(
+            solution, inverse_hessian, rhs, workspace.factor,
+        ) && return true
     end
-    # Symmetrization changes every off-diagonal column entry.  Validate the
-    # matrix actually returned to callers, not only the pre-average solves.
-    @inbounds for column in 1:3
-        rhs[1] = column == 1 ? o : z
-        rhs[2] = column == 2 ? o : z
-        rhs[3] = column == 3 ? o : z
-        _store_owned_scalar!(solution, 1, inverse_hessian[1, column])
-        _store_owned_scalar!(solution, 2, inverse_hessian[2, column])
-        _store_owned_scalar!(solution, 3, inverse_hessian[3, column])
-        solve_ok, _ = _ns_structural_hessian_solve_certificate!(
-            workspace.hessian_factor, solution, rhs, forward, action,
-        )
-        solve_ok || return false
-    end
-    # The returned conjugate Hessian is required to be symmetric positive
-    # definite in its own right.  A zero-RHS Cholesky solve is an
-    # allocation-free factorization gate and does not impose a fragile
-    # output-relative H*Hinv-I test on a strongly conditioned metric.
-    rhs[1] = z
-    rhs[2] = z
-    rhs[3] = z
-    _ns_conjugate_spd_solve!(
-        solution, inverse_hessian, rhs, workspace.factor,
-    ) || return false
-    return true
+    return false
 end
 
 """Build the optional conjugate Hessian for the current certified shadow.

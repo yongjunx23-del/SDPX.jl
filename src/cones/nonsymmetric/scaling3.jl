@@ -365,10 +365,8 @@ end
 
 @inline function _ns_scaling_spd!(workspace, matrix)
     rhs = workspace.work1
-    z = zero(eltype(rhs))
-    rhs[1] = one(eltype(rhs))
-    rhs[2] = z
-    rhs[3] = z
+    zero_distinct!(rhs)
+    _store_owned_scalar!(rhs, 1, one(eltype(rhs)))
     return _ns_conjugate_spd_solve!(
         workspace.work2, matrix, rhs, workspace.factor,
     )
@@ -378,12 +376,10 @@ end
     rhs = workspace.work1
     solution = workspace.work2
     T = eltype(rhs)
-    z = zero(T)
     o = one(T)
     @inbounds for column in 1:3
-        rhs[1] = column == 1 ? o : z
-        rhs[2] = column == 2 ? o : z
-        rhs[3] = column == 3 ? o : z
+        zero_distinct!(rhs)
+        _store_owned_scalar!(rhs, column, o)
         _ns_conjugate_spd_solve!(
             solution, matrix, rhs, workspace.factor,
         ) || return false
@@ -484,22 +480,23 @@ end
     solution = workspace.work2
     forward = workspace.work3
     T = typeof(workspace.mu)
-    z = zero(T)
     o = one(T)
 
-    rhs[1] = o
-    rhs[2] = z
-    rhs[3] = z
+    zero_distinct!(rhs)
+    _store_owned_scalar!(rhs, 1, o)
     _ns_conjugate_spd_solve!(
         solution, workspace.theta, rhs, workspace.factor,
     ) || return NS_SCALING_FALLBACK_NOT_SPD
     factor_ok, _ = _ns_scaling_theta_factor_certificate!(workspace)
     factor_ok || return NS_SCALING_INVERSE_MISMATCH
 
+    # The primary double-secant matrix can contain paired off-diagonal
+    # BigFloat objects from symmetric publication. Break any such aliases
+    # before storing independently solved inverse columns.
+    zero_distinct!(workspace.g)
     @inbounds for column in 1:3
-        rhs[1] = column == 1 ? o : z
-        rhs[2] = column == 2 ? o : z
-        rhs[3] = column == 3 ? o : z
+        zero_distinct!(rhs)
+        _store_owned_scalar!(rhs, column, o)
         _ns_scaling_factor_solve!(
             solution, workspace.factor, rhs, forward,
         ) || return NS_SCALING_INVERSE_MISMATCH
@@ -507,27 +504,34 @@ end
         _store_owned_scalar!(workspace.g, CartesianIndex(2, column), solution[2])
         _store_owned_scalar!(workspace.g, CartesianIndex(3, column), solution[3])
     end
-    half = inv(T(2))
-    h12 = half * workspace.g[1, 2] + half * workspace.g[2, 1]
-    h13 = half * workspace.g[1, 3] + half * workspace.g[3, 1]
-    h23 = half * workspace.g[2, 3] + half * workspace.g[3, 2]
-    workspace.g[1, 2] = h12
-    workspace.g[2, 1] = h12
-    workspace.g[1, 3] = h13
-    workspace.g[3, 1] = h13
-    workspace.g[2, 3] = h23
-    workspace.g[3, 2] = h23
-    _ns_scaling_finite_matrix(workspace.g) ||
-        return NS_SCALING_NONFINITE_RESULT
-
-    # Theta and its certified factor are authoritative.  Near the cone
-    # boundary, cond(Theta) can legitimately approach inv(eps(T)); the rounded
-    # explicit inverse G can then lose a resolvable Cholesky pivot even though
-    # it is a backward-stable inverse of the certified SPD Theta.  Do not make
-    # a second, cancellation-sensitive Cholesky of diagnostic G authoritative.
-    # `_ns_scaling_inverse_columns_certificate!` below certifies the matrix
-    # actually returned, and the propagated fallback secant certifies G*s=y.
-    return NS_SCALING_CONVERGED
+    # As for the conjugate inverse, averaging independently rounded
+    # off-diagonal column solves can spoil the most sensitive column.  Select
+    # an exact symmetric combination of the computed upper/lower entries and
+    # require the existing factor-aware inverse-column certificate.  The
+    # accepted Theta factor is already fixed, so this is a bounded selection
+    # among rounded representations of the same mathematical inverse, not a
+    # provider or tolerance change.
+    upper12 = _coo_owned_scalar(workspace.g[1, 2])
+    lower12 = _coo_owned_scalar(workspace.g[2, 1])
+    upper13 = _coo_owned_scalar(workspace.g[1, 3])
+    lower13 = _coo_owned_scalar(workspace.g[3, 1])
+    upper23 = _coo_owned_scalar(workspace.g[2, 3])
+    lower23 = _coo_owned_scalar(workspace.g[3, 2])
+    @inbounds for selection in 0:7
+        h12 = iszero(selection & 0x01) ? lower12 : upper12
+        h13 = iszero(selection & 0x02) ? lower13 : upper13
+        h23 = iszero(selection & 0x04) ? lower23 : upper23
+        _store_owned_scalar!(workspace.g, CartesianIndex(1, 2), h12)
+        _store_owned_scalar!(workspace.g, CartesianIndex(2, 1), h12)
+        _store_owned_scalar!(workspace.g, CartesianIndex(1, 3), h13)
+        _store_owned_scalar!(workspace.g, CartesianIndex(3, 1), h13)
+        _store_owned_scalar!(workspace.g, CartesianIndex(2, 3), h23)
+        _store_owned_scalar!(workspace.g, CartesianIndex(3, 2), h23)
+        _ns_scaling_finite_matrix(workspace.g) || continue
+        inverse_ok, _ = _ns_scaling_inverse_columns_certificate!(workspace)
+        inverse_ok && return NS_SCALING_CONVERGED
+    end
+    return NS_SCALING_INVERSE_MISMATCH
 end
 
 # Apply a backward-error-sized correction only on the subspace orthogonal to
