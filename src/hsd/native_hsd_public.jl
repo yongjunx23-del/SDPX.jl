@@ -32,7 +32,17 @@ end
 function _native_hsd_kkt_descriptor(
     route::Symbol, formulation::Symbol, ::Type{T}=Float64,
 ) where {T<:AbstractFloat}
-    if route === :sparse_schur
+    if route === :sparse_augmented
+        T === Float64 || throw(ArgumentError(
+            "sparse_augmented requires Float64 CHOLMOD arithmetic",
+        ))
+        return NativeHSDKKTDescriptor(
+            route, :symmetric_augmented_hsd_core, :sparse,
+            :symmetric_augmented_core, :symmetric_ldl,
+            :factor_once_homogeneous_predictor_corrector,
+            :cholmod_symmetric_ldl, :cholmod, (),
+        )
+    elseif route === :sparse_schur
         return NativeHSDKKTDescriptor(
             route, :sparse_reduced_schur, :sparse,
             :sparse_reduced_schur, :sparse_lu,
@@ -1156,7 +1166,7 @@ function _public_native_hsd_core(
         )
     end
 
-    if settings.kkt_route === :bordered
+    if settings.kkt_route in (:bordered, :sparse_augmented)
         row_reduction = if fixed_trace_plan !== nothing
             hsd_structural_full_rank_reduction(
                 solve_reduced.A, solve_reduced.c,
@@ -1271,7 +1281,8 @@ function _public_native_hsd_core(
         ) : length(fixed_trace_plan.zero_rows) +
             length(fixed_trace_plan.reduction.free_ids)
         compact_dimension = saturating_sum_bytes(product_rank, 1)
-        use_compact_schur = fixed_trace_plan === nothing &&
+        use_compact_schur = settings.kkt_route === :bordered &&
+            fixed_trace_plan === nothing &&
             full_core_dimension > 4 * compact_dimension
         core_dimension = use_compact_schur ? compact_dimension : full_core_dimension
         block_sizes=_product_hsd_core_block_sizes(
@@ -1367,7 +1378,7 @@ function _public_native_hsd_core(
         )
         state = _product_cone_hsd_state(
             base;
-            kkt_route=:bordered,
+            kkt_route=settings.kkt_route,
             prepare_symmetric_core=!use_compact_schur,
             fixed_trace_plan,
             symmetric_core_memory_limit=memory_limit,

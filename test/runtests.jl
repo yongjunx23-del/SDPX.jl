@@ -469,6 +469,36 @@ end
 end
 
 
+@testset "Sparse augmented public route" begin
+    model = SDPX.Model(Float64)
+    x = SDPX.variable!(model, :x, 2; domain=SDPX.Reals())
+    SDPX.constraint!(model, :soc, Any[1.0, x[1], x[2]], SDPX.LorentzCone())
+    SDPX.objective!(model, SDPX.Minimize(), -x[1])
+    settings = SDPX.Settings{Float64}(
+        kkt_route=:sparse_augmented,
+        verbosity=0,
+        limits=SDPX.Limits(iterations=200, time=60.0, threads=1),
+    )
+    outputs = SDPX.Outputs(
+        :all, :all, :all; objectives=true, certificate=:summary,
+        diagnostics=:full, history=false, trace=false,
+    )
+    result = SDPX.optimize!(model; settings, outputs)
+    @test SDPX.status(result) === :optimal
+    @test SDPX.certificate(result).valid
+    @test isapprox(SDPX.primal_objective(result), -1.0; atol=1e-9)
+    selected = SDPX.diagnostics(result).selected_algorithms
+    @test selected.requested_kkt_route === :sparse_augmented
+    @test selected.planned_kkt_route === :sparse_augmented
+    @test selected.executed_kkt_route === :sparse_augmented
+    @test selected.executed_kkt_storage === :sparse
+    @test selected.executed_factorization_kernel === :cholmod_symmetric_ldl
+    @test selected.la_executed_provider === :cholmod
+    @test_throws ArgumentError SDPX.Settings{BigFloat}(
+        kkt_route=:sparse_augmented,
+    )
+end
+
 include(joinpath(@__DIR__, "..", "benchmark", "optimization", "test_profile_catalog.jl"))
 include(joinpath(@__DIR__, "..", "benchmark", "optimization", "test_compare_contract.jl"))
 include(joinpath(@__DIR__, "..", "benchmark", "optimization", "test_measure_target.jl"))

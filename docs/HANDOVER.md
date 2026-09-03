@@ -204,22 +204,22 @@ flowchart TD
 | :--- | :--- | :--- | :--- |
 | **Phase 1** | 热循环纯零分配闭环 | 消除预测-校正内层循环中的全部无谓内存分配 | **100% 已完成** |
 | **Phase 2** | 弦图分解现代接口落地 | `src/chordal.jl` 原生支持 `CanonicalConicProgram{T}` 并通过单元测试 | **100% 已完成** |
-| **Phase 3** | 稀疏增广 KKT 路由收敛 | 完善超大稀疏等式约束系统在大规模下的迭代精化与互补残差恢复 | **核心已集成，推进中** |
-| **Phase 4** | 非对称锥二阶修正挂钩 | 为 Exp/Power 锥提供 Mehrotra 风格二阶 Hessian 变化校正 | **待推进** |
-| **Phase 5** | 历史冗余代码清理归档 | 归档过时文档，清理未引用的死代码 | **待推进** |
+| **Phase 3** | 稀疏增广 KKT 路由收敛 | 一般 Float64 稀疏等式通过显式 `:sparse_augmented` 路由进入 CHOLMOD symmetric core；计划/执行/存储/provider 收据一致 | **公共 E2E 已打通；大规模精化继续验证** |
+| **Phase 4** | 非对称锥高阶校正 | Exp/Power 的三阶 contraction 已由 `_runtime_ns_corrector_shift!` 调用 `try_nonsymmetric_higher_correction!` 并接入统一 corrector | **已完成并由现有 EXP/Power/mixed 测试覆盖** |
+| **Phase 5** | 历史冗余代码清理归档 | 活跃规划归并为 `HANDOVER.md`；过时计划从工作树删除、历史仍由 Git 保存 | **已完成** |
 | **Phase 6** | 全量基准验证与发版验收 | 运行 10/10 物理/通用综合基准，输出正式发布报告 | **待推进** |
 
 ### 5.2 下一步核心待办（P3~P6）
 
-1. **完善 Phase 3 稀疏增广路由的锥互补恢复**：
-   - 现状：在 `kkt_route = :sparse_augmented` 下，CHOLMOD 稀疏准定分解已成功调用并计算出预测方向。
-   - 待办：在加入动态正则化时，为防止 $ds + \Theta dy = h$ 在极端条件数下触发门禁误报，需在 `_product_hsd_newton_residual_ok` 中针对增广路由启用松弛或通过迭代精化（iterative refinement）消除正则化漂移。
-2. **实现 Phase 4 非对称锥高阶校正**：
-   - 现状：`src/cones/nonsymmetric/corrector3.jl` 中已具备非对称锥三阶导数计算。
-   - 待办：在 `src/hsd/predictor_corrector.jl` 的校正步中接入非对称锥的高阶变化张量项，缩减 Exp/Power 锥模型的迭代轮数。
-3. **执行 Phase 5 & 6 最终验收**：
-   - 清理过期文档至 `docs/archive/`。
-   - 运行全量多精度基准矩阵。
+1. **完成 Phase 3 大规模稀疏增广验证**：
+   - 已完成：公共 `Settings(kkt_route=:sparse_augmented)`、planner descriptor、强制非 compact sparse core、CHOLMOD factor receipt、原坐标证书与 E2E 测试。
+   - 待办：在大规模病态稀疏等式样本上验证现有原系统 iterative refinement；不得放宽 `_product_hsd_newton_residual_ok` 或五方程门禁。
+2. **Phase 4 已闭环，转为性能验证**：
+   - `_product_hsd_corrector_shift!` 对含 Exp/Power 的产品调用 runtime `corrector_shift!`；`_runtime_ns_corrector_shift!` 已调用 `try_nonsymmetric_higher_correction!`。
+   - 后续只保留有独立证书且稳定中位数提升至少 2% 的优化。
+3. **执行 Phase 6 最终验收**：
+   - 运行全量多精度基准矩阵和 fresh-process 三样本性能活动。
+   - 收集 N14 SOCP/2×2 SDP 的原坐标证书、峰值 RSS 和 sysimage/route 收据。
 
 ---
 

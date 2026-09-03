@@ -230,6 +230,9 @@ struct Settings{T<:AbstractFloat}
             "formulation",
         )
         _validate_symbol(kkt_route, (:bordered, :expanded, :sparse_schur, :sparse_augmented), "kkt_route")
+        kkt_route === :sparse_augmented && T !== Float64 && throw(ArgumentError(
+            "kkt_route=:sparse_augmented requires Float64 CHOLMOD arithmetic",
+        ))
         _validate_symbol(provider, (:auto, :standard, :bfla, :multifloat, :legacy), "provider")
         _validate_algorithm(algorithm)
         _validate_symbol(presolve, (:auto, :on, :off), "presolve")
