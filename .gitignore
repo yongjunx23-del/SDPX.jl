@@ -18,6 +18,7 @@ lcov.info
 flamegraph*.svg
 
 # Generated benchmark inputs and results can be large.
+benchmark/CSDR/
 benchmark/general/data/**
 !benchmark/general/data/.gitignore
 !benchmark/general/data/MANIFEST.sha256
