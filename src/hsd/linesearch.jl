@@ -124,7 +124,7 @@ propagate to the caller."""
 end
 
 """Single-alpha product-cone fraction-to-boundary line search."""
-@inline function _product_hsd_line_search!(
+Base.@noinline function _product_hsd_line_search!(
     state::ProductConeHSDState{T}; allow_conditioned_soc::Bool=false,
 ) where {T}
     base = state.base

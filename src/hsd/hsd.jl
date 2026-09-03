@@ -437,8 +437,8 @@ function _hsd_state_from_reduction(
         "route cache n=$(driver.n) does not match reduced matrix n=$nr"))
     Ar = reduction.Ar
     dense_or_sparse_A = retain_dense_operator ? Matrix{T}(A) : A
-    schur_storage = retain_dense_schur ? Matrix{T}(undef, nr, nr) :
-                    Matrix{T}(undef, 0, 0)
+    schur_storage = retain_dense_schur ? alloc_zeros(T, nr, nr) :
+                    alloc_zeros(T, 0, 0)
     workspace = BorderedHSDWorkspace{T,R}(
         SparseArrays.sparse(transpose(A)), dense_or_sparse_A, Ar,
         SparseArrays.sparse(transpose(Ar)), reduction.cr, nr, orthant_only,
@@ -511,7 +511,10 @@ function hsd_primal_residual!(state::HSDState{T}) where {T}
     A = state.A
     mul!(state.ax, A, state.x)          # ax = A x
     @inbounds for k in 1:state.m
-        state.rP[k] = state.s[k] - state.b[k] * state.tau + state.ax[k]
+        _store_owned_scalar!(
+            state.rP, k,
+            state.s[k] - state.b[k] * state.tau + state.ax[k],
+        )
     end
     return state.rP
 end
@@ -523,25 +526,25 @@ The frozen dual homogeneous residual `rD = A'y + c·τ`.
 """
 function hsd_dual_residual!(state::HSDState{T}) where {T}
     A = state.A
-    fill!(state.rD, zero(T))
+    zero_owned!(state.rD)
     @inbounds for j in 1:state.n
         acc = zero(T)
         for pointer in nzrange(A, j)
             acc += A.nzval[pointer] * state.y[A.rowval[pointer]]
         end
-        state.rD[j] = acc + state.c[j] * state.tau
+        _store_owned_scalar!(state.rD, j, acc + state.c[j] * state.tau)
     end
     # Keep the full residual for certificates/diagnostics and project it onto
     # the orthonormal row-space coordinates for the bordered Newton RHS.
     if _hsd_is_identity_basis(state.workspace.rank_basis)
-        copyto!(state.workspace.rDr, state.rD)
+        copy_owned!(state.workspace.rDr, state.rD)
     else
         @inbounds for j in 1:state.workspace.nr
             acc = zero(T)
             for i in 1:state.n
                 acc += state.workspace.rank_basis[i, j] * state.rD[i]
             end
-            state.workspace.rDr[j] = acc
+            _store_owned_scalar!(state.workspace.rDr, j, acc)
         end
     end
     return state.rD

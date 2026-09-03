@@ -222,7 +222,7 @@ function main(args=ARGS)
         proj = Base.active_project()
         proj_arg = proj === nothing ? String[] : ["--project=$proj"]
         for t in ("Float64x2", "Float64x3", "Float64x4", "BigFloat")
-            cmd_args = ["--startup-file=no"]
+            cmd_args = ["--startup-file=no", "--gcthreads=1", "--threads=1"]
             append!(cmd_args, proj_arg)
             push!(cmd_args, script, "--type=$t")
             check && push!(cmd_args, "--check")

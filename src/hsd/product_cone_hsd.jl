@@ -1005,7 +1005,7 @@ Base.@noinline function _product_hsd_form_schur_column!(
     base = state.base
     A = base.workspace.Ar
     H = base.workspace.H
-    fill!(g_input, zero(T))
+    zero_owned!(g_input)
     @inbounds for ptr in nzrange(A, j)
         _store_owned_scalar!(
             g_input, A.rowval[ptr], A.nzval[ptr],
@@ -1017,8 +1017,8 @@ Base.@noinline function _product_hsd_form_schur_column!(
         for ptr in nzrange(A, i)
             acc += A.nzval[ptr] * g_output[A.rowval[ptr]]
         end
-        H[i, j] = acc
-        H[j, i] = acc
+        _store_owned_scalar!(H, CartesianIndex(i, j), acc)
+        _store_owned_scalar!(H, CartesianIndex(j, i), acc)
     end
     return nothing
 end
@@ -1036,7 +1036,7 @@ Base.@noinline function _product_hsd_form_schur_border!(
     A = base.workspace.Ar
     H = base.workspace.H
     nr = base.workspace.nr
-    fill!(H, zero(T))
+    zero_owned!(H)
     if isempty(state.schur_g_inputs)
         @inbounds for j in 1:nr
             _product_hsd_form_schur_column!(
@@ -1054,7 +1054,7 @@ Base.@noinline function _product_hsd_form_schur_border!(
         end
     end
 
-    copyto!(state.g_input, base.b)
+    copy_owned!(state.g_input, base.b)
     _product_hsd_apply_symmetric_G!(state.runtime, state.gb, state.g_input)
     bgb = zero(T)
     @inbounds for k in 1:base.m
@@ -1064,13 +1064,15 @@ Base.@noinline function _product_hsd_form_schur_border!(
     has_nonsymmetric = !isempty(state.runtime.exp) ||
                        !isempty(state.runtime.power)
     if has_nonsymmetric
-        fill!(state.ns_zero_rhs, zero(T))
+        zero_owned!(state.ns_zero_rhs)
         ns_result = _product_hsd_add_nonsymmetric_schur!(
             state, state.ns_zero_rhs,
         )
         ns_result.status === NS_SCHUR3_ASSEMBLED || return T(NaN)
         @inbounds for j in 1:nr, i in 1:nr
-            H[i, j] += state.ns_H[i, j]
+            _store_owned_scalar!(
+                H, CartesianIndex(i, j), H[i, j] + state.ns_H[i, j],
+            )
         end
         bgb += ns_result.b_g_b
     end
@@ -1082,8 +1084,8 @@ Base.@noinline function _product_hsd_form_schur_border!(
         end
         has_nonsymmetric && (atgb += state.ns_at_g_b[j])
         cj = base.workspace.cr[j]
-        base.workspace.qr[j] = cj - atgb
-        base.workspace.rvec[j] = base.tau * (cj + atgb)
+        _store_owned_scalar!(base.workspace.qr, j, cj - atgb)
+        _store_owned_scalar!(base.workspace.rvec, j, base.tau * (cj + atgb))
     end
     return base.kappa - base.tau * bgb
 end
@@ -1194,12 +1196,24 @@ Base.@noinline function _product_hsd_assemble_bordered!(
 
     @inbounds for j in 1:nr
         for i in 1:nr
-            workspace.matrix[i, j] = base.workspace.H[i, j]
+            _store_owned_scalar!(
+                workspace.matrix, CartesianIndex(i, j),
+                base.workspace.H[i, j],
+            )
         end
-        workspace.matrix[j, n] = base.workspace.qr[j]
-        workspace.matrix[n, j] = base.workspace.rvec[j]
+        _store_owned_scalar!(
+            workspace.matrix, CartesianIndex(j, n),
+            base.workspace.qr[j],
+        )
+        _store_owned_scalar!(
+            workspace.matrix, CartesianIndex(n, j),
+            base.workspace.rvec[j],
+        )
     end
-    workspace.matrix[n, n] = border_scalar
+    _store_owned_scalar!(
+        workspace.matrix, CartesianIndex(n, n),
+        border_scalar,
+    )
 
     @inbounds for i in 1:n
         row_max = zero(T)
@@ -1245,7 +1259,10 @@ Base.@noinline function _product_hsd_assemble_bordered!(
                 workspace.last_reason = SYMMETRIC_BORDERED_TRANSFORM_FAILED
                 return false
             end
-            workspace.factor_matrix[i, j] = transformed
+            _store_owned_scalar!(
+                workspace.factor_matrix, CartesianIndex(i, j),
+                transformed,
+            )
         end
     end
     _product_bordered_transform_matrix_ok(workspace) || begin
@@ -1722,7 +1739,7 @@ end
 @inline function _product_hsd_rhs!(state::ProductConeHSDState{T}) where {T}
     base = state.base
     @inbounds for k in 1:base.m
-        state.g_input[k] = state.h[k] + base.rP[k]
+        _store_owned_scalar!(state.g_input, k, state.h[k] + base.rP[k])
     end
     _product_hsd_apply_symmetric_G!(
         state.runtime, state.g_output, state.g_input,
@@ -1733,7 +1750,7 @@ end
         for ptr in nzrange(A, j)
             acc += A.nzval[ptr] * state.g_output[A.rowval[ptr]]
         end
-        base.workspace.rhs[j] = -base.workspace.rDr[j] - acc
+        _store_owned_scalar!(base.workspace.rhs, j, -base.workspace.rDr[j] - acc)
     end
     bsum = zero(T)
     @inbounds for k in 1:base.m
@@ -1745,7 +1762,10 @@ end
         )
         ns_result.status === NS_SCHUR3_ASSEMBLED || return T(NaN)
         @inbounds for j in 1:base.workspace.nr
-            base.workspace.rhs[j] -= state.ns_at_g_rhs[j]
+            _store_owned_scalar!(
+                base.workspace.rhs, j,
+                base.workspace.rhs[j] - state.ns_at_g_rhs[j],
+            )
         end
         bsum += ns_result.b_g_rhs
     end
@@ -1764,7 +1784,7 @@ condition-aware backward gate validates the composed `Theta*G` map.
 """
 @inline function _product_hsd_recover!(state::ProductConeHSDState{T}) where {T}
     base = state.base
-    fill!(base.ax, zero(T))
+    zero_owned!(base.ax)
     @inbounds for j in 1:base.n
         dxj = base.dx[j]
         iszero(dxj) && continue
@@ -1773,8 +1793,10 @@ condition-aware backward gate validates the composed `Theta*G` map.
         end
     end
     @inbounds for k in 1:base.m
-        state.g_input[k] = base.ax[k] + state.h[k] + base.rP[k] -
-                           base.b[k] * base.dtau
+        _store_owned_scalar!(
+            state.g_input, k,
+            base.ax[k] + state.h[k] + base.rP[k] - base.b[k] * base.dtau,
+        )
     end
     apply_G!(state.runtime, base.dy, state.g_input)
     apply_Theta!(state.runtime, base.e, base.dy)
@@ -1783,7 +1805,10 @@ condition-aware backward gate validates the composed `Theta*G` map.
         _product_hsd_roundtrip_backward_status(state)
     (roundtrip_certified || psd_budget_inconclusive) || return false
     @inbounds for k in 1:base.m
-        base.ds[k] = -base.ax[k] - base.rP[k] + base.b[k] * base.dtau
+        _store_owned_scalar!(
+            base.ds, k,
+            -base.ax[k] - base.rP[k] + base.b[k] * base.dtau,
+        )
     end
     cd = zero(T)
     bd = zero(T)
@@ -2278,7 +2303,7 @@ end
 end
 
 """Fail-closed check of all five frozen full-Newton equation groups."""
-@inline function _product_hsd_newton_residual_ok(
+Base.@noinline function _product_hsd_newton_residual_ok(
     state::ProductConeHSDState{T}, scalar_rhs::T,
     conditioned_authority::Bool=false,
 ) where {T}
@@ -2656,20 +2681,20 @@ end
             workspace.last_reason = SYMMETRIC_BORDERED_RHS_FAILED
             return false
         end
-        workspace.rhs[i] = value
+        _store_owned_scalar!(workspace.rhs, i, value)
     end
     isfinite(rho) || begin
         workspace.last_reason = SYMMETRIC_BORDERED_RHS_FAILED
         return false
     end
-    workspace.rhs[end] = rho
+    _store_owned_scalar!(workspace.rhs, workspace.dimension, rho)
     @inbounds for i in 1:workspace.dimension
         transformed = workspace.row_scale[i] * workspace.rhs[i]
         isfinite(transformed) || begin
             workspace.last_reason = SYMMETRIC_BORDERED_RHS_FAILED
             return false
         end
-        workspace.factor_rhs[i] = transformed
+        _store_owned_scalar!(workspace.factor_rhs, i, transformed)
     end
     _product_bordered_transform_rhs_ok(workspace) || begin
         workspace.last_reason = SYMMETRIC_BORDERED_RHS_FAILED
@@ -2769,7 +2794,7 @@ end
     return true
 end
 
-@inline function _product_hsd_solve_shift_raw!(
+Base.@noinline function _product_hsd_solve_shift_raw!(
     state::ProductConeHSDState{T,R,RT,NS,CW,SB,EW,SW,SCW},
     scalar_rhs::T,
 ) where {T,R,RT,NS,CW,SB,EW,SW,SCW}
@@ -2789,7 +2814,7 @@ end
         return false
     end
     @inbounds for i in 1:base.workspace.nr
-        base.workspace.dxr[i] = workspace.solution[i]
+        _store_owned_scalar!(base.workspace.dxr, i, workspace.solution[i])
     end
     base.dtau = workspace.solution[end]
     _hsd_scatter_dx!(base)
@@ -2926,7 +2951,7 @@ end
            _product_hsd_psd_cone_newton_residual_ok(state)
 end
 
-@inline function _product_hsd_refine_shift!(
+Base.@noinline function _product_hsd_refine_shift!(
     state::ProductConeHSDState{T},
     scalar_rhs::T,
 ) where {T}
@@ -3102,7 +3127,7 @@ end
     return false
 end
 
-@inline function _product_hsd_solve_shift!(
+Base.@noinline function _product_hsd_solve_shift!(
     state::ProductConeHSDState{T,R,RT,NS,CW,SB,EW,SW,SCW},
     scalar_rhs::T,
 ) where {T,R,RT,NS,CW,SB,EW,SW,SCW}
@@ -3229,7 +3254,7 @@ Execute one native LP/SOC/PSD/Exp/Power product-cone predictor/corrector epoch.
 This is an explicit core API only: it does not assign solver status, recover a
 public result, or fall back to a legacy/lifted route.
 """
-function _product_hsd_bordered_route_direction!(
+Base.@noinline function _product_hsd_bordered_route_direction!(
     state::ProductConeHSDState{T,R,RT,NS,CW,SB,EW,SW,SCW}, has_nonsymmetric::Bool,
 ) where {T,R,RT,NS,CW,SB,EW,SW,SCW}
     base = state.base

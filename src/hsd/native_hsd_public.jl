@@ -1258,12 +1258,13 @@ function _public_native_hsd_core(
             if isfinite(improvement) && improvement < zero(T)
                 ray ./= -improvement
             end
+            s_ray = Vector{T}(-solve_reduced.A * ray)
             ok = hsd_recover_dual_ray_source!(
                 x_full,
                 s_full,
                 reduction,
                 ray,
-                T[];
+                s_ray;
                 tol=tol,
             )
             recovery_seconds = Float64(time_ns() - recovery_started) * 1.0e-9

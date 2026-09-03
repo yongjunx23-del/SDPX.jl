@@ -11,7 +11,7 @@
 @inline function _hsd_scatter_dx!(state::HSDState{T}) where {T}
     V = state.workspace.rank_basis
     if _hsd_is_identity_basis(V)
-        copyto!(state.dx, state.workspace.dxr)
+        copy_owned!(state.dx, state.workspace.dxr)
         return state.dx
     end
     @inbounds for i in 1:state.n
@@ -19,7 +19,7 @@
         for j in 1:state.workspace.nr
             acc += V[i, j] * state.workspace.dxr[j]
         end
-        state.dx[i] = acc
+        _store_owned_scalar!(state.dx, i, acc)
     end
     return state.dx
 end
@@ -37,7 +37,7 @@ end
 @inline function _hsd_trial_residual!(state::HSDState{T}) where {T}
     A = state.A
     m = state.m; n = state.n
-    fill!(state.rPt, zero(T))
+    zero_owned!(state.rPt)
     @inbounds for j in 1:n
         a = state.xt[j]
         iszero(a) && continue
@@ -47,16 +47,19 @@ end
         end
     end
     @inbounds for k in 1:m
-        state.rPt[k] += state.st[k] - state.b[k] * state.tau_t
+        _store_owned_scalar!(
+            state.rPt, k,
+            state.rPt[k] + state.st[k] - state.b[k] * state.tau_t,
+        )
     end
-    fill!(state.rDt, zero(T))
+    zero_owned!(state.rDt)
     @inbounds for j in 1:n
         acc = zero(T)
         for ptr in nzrange(A, j)
             k = A.rowval[ptr]
             acc += A.nzval[ptr] * state.yt[k]
         end
-        state.rDt[j] = acc + state.c[j] * state.tau_t
+        _store_owned_scalar!(state.rDt, j, acc + state.c[j] * state.tau_t)
     end
     return nothing
 end

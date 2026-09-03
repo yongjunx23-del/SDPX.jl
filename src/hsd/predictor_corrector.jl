@@ -532,16 +532,16 @@ function _product_hsd_sparse_direction!(state::ProductConeHSDState{T}) where {T}
 end
 
 """Predictor/corrector directions sharing one pivoted bordered factor."""
-@inline function _product_hsd_direction!(
+Base.@noinline function _product_hsd_direction!(
     state::ProductConeHSDState{T,R,RT,NS,CW,SB,EW,SW,SCW},
 ) where {T,R,RT,NS,CW,SB,EW,SW,SCW}
     base = state.base
     affine_shift!(state.runtime, state.h, base.s, base.y)
     predictor_scalar = -base.tau * base.kappa
     _product_hsd_solve_shift!(state, predictor_scalar) || return false
-    copyto!(base.dx_a, base.dx)
-    copyto!(base.dy_a, base.dy)
-    copyto!(base.ds_a, base.ds)
+    copy_owned!(base.dx_a, base.dx)
+    copy_owned!(base.dy_a, base.dy)
+    copy_owned!(base.ds_a, base.ds)
     base.dtau_a = base.dtau
     base.dkappa_a = base.dkappa
 
