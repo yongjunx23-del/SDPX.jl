@@ -182,17 +182,20 @@ SDPX.jl/
 
 1. **快速零分配验收（日常修改代码后必测，3秒出结果）**：
    ```bash
-   julia --startup-file=no --project=/Users/xuyongjun/Desktop/project/SDPX/CSDR/reproduce_env \
+   julia --startup-file=no --gcthreads=1 --threads=1 \
+       --project=/Users/xuyongjun/Desktop/project/SDPX/CSDR/reproduce_env \
        benchmark/general/performance/hsd_allocation.jl --type=Float64 --check
    ```
 2. **全精度零分配与内存漂移验收（发布前必测，多进程隔离）**：
    ```bash
-   julia --startup-file=no --project=/Users/xuyongjun/Desktop/project/SDPX/CSDR/reproduce_env \
+   julia --startup-file=no --gcthreads=1 --threads=1 \
+       --project=/Users/xuyongjun/Desktop/project/SDPX/CSDR/reproduce_env \
        benchmark/general/performance/hsd_allocation.jl --check
    ```
 3. **运行全套单元测试**：
    ```bash
-   julia --startup-file=no --project=/Users/xuyongjun/Desktop/project/SDPX/CSDR/reproduce_env \
+   JULIA_NUM_THREADS=4 julia --startup-file=no --gcthreads=1 --threads=4 \
+       --project=/Users/xuyongjun/Desktop/project/SDPX/CSDR/reproduce_env \
        test/runtests.jl
    ```
    *(注意：测试集中包含 `test_v2_fresh_process_profile.jl`，该测试通过 git 命令检查工作区是否 clean，因此测试前请先 commit 或 stash)*
@@ -219,7 +222,7 @@ flowchart TD
 | **Phase 3** | 稀疏增广 KKT 路由收敛 | 一般 Float64 稀疏等式通过显式 `:sparse_augmented` 路由进入 CHOLMOD symmetric core；计划/执行/存储/provider 收据一致 | **公共 E2E 已打通；大规模精化继续验证** |
 | **Phase 4** | 非对称锥高阶校正 | Exp/Power 的三阶 contraction 已由 `_runtime_ns_corrector_shift!` 调用 `try_nonsymmetric_higher_correction!` 并接入统一 corrector | **已完成并由现有 EXP/Power/mixed 测试覆盖** |
 | **Phase 5** | 历史冗余代码清理归档 | 活跃规划归并为 `HANDOVER.md`；过时计划从工作树删除、历史仍由 Git 保存 | **已完成** |
-| **Phase 6** | 全量基准验证与发版验收 | schema-v9 代表矩阵已覆盖 LP/病态LP/SOCP/RSOC/SDP/EXP/Power/mixed；N14 与全精度矩阵继续 | **代表矩阵 8/8 通过，N14 待新 sysimage 收据** |
+| **Phase 6** | 全量基准验证与发版验收 | schema-v9 代表矩阵已覆盖 LP/病态LP/SOCP/RSOC/SDP/EXP/Power/mixed；N14 与全精度矩阵继续 | **代表矩阵 8/8、BigFloat256 8/8 通过；N14 仍待证书收据** |
 
 ### 5.2 下一步核心待办（P3~P6）
 
@@ -231,7 +234,8 @@ flowchart TD
    - 后续只保留有独立证书且稳定中位数提升至少 2% 的优化。
 3. **执行 Phase 6 最终验收**：
    - 已完成：Float64 schema-v9 fresh-process 代表矩阵，8 个家族均为一轮排除 warmup + 3 个不同 PID 的测量进程，目标、状态和原坐标证书全通过；见 `docs/evidence/V062_FRESH_PROCESS_20260903.md`。
-   - 待完成：全量多精度矩阵，以及 N14 SOCP/2×2 SDP 的原坐标证书、峰值 RSS和新 sysimage/route 收据。
+   - 已完成：`40b6380` 下 BigFloat256 八族精度矩阵 8/8 通过；EXP 与 mixed 分别在 39/86 次迭代得到原坐标证书。
+   - 待完成：Float64x2/x3/x4 全量矩阵，以及 N14 SOCP/2×2 SDP 的原坐标证书、峰值 RSS 和安全 sysimage/route 收据。
 
 ---
 
@@ -253,6 +257,10 @@ flowchart TD
    `test/runtests.jl` 中包含针对代码基准可重现性的强制检查。若工作区有修改未提交（Git Dirty），测试会抛出 `ArgumentError: source worktree became dirty`。在运行完整测试前，请务必执行 `git commit` 或 `git stash`。
 5. **红线五：零容忍数值降精度与证书篡改**：
    高精度计算是 SDPX 的立身之本。任何出于加速目的将 `Float64x4` 或 `BigFloat` 转换为低精度近似计算的行为都是严令禁止的。所有的收敛判定必须严格通过原始坐标系下的数学证书（`verify_optimal!`）检验。
+6. **红线六：BigFloat 工作区必须拥有独立 MPFR 存储**：
+   初始化使用 `alloc_zeros`；已知独立且初始化的内部工作区使用 `zero_owned!`；任意或可能已别名的数组使用 `zero_distinct!`；跨数组复制使用 `copy_owned!`/`_store_owned_scalar!`。严禁 `zeros(BigFloat, ...)`、`fill!(A, zero(BigFloat))`、浅 `copyto!`，以及会被后续原地内核写入的普通标量引用赋值。
+7. **红线七：sysimage 不序列化高精度 provider 状态**：
+   `scripts/build_performance_sysimage.jl` 只接受 `safe_float64` profile。BigFloat/MultiFloats、动态 `@eval` provider 加载、临时 `setprecision` 与 provider factor payload 必须在消费进程中正常 JIT，不得烘焙进增量 sysimage。
 
 ---
 *文档交接完毕。如有疑问，请查阅 `docs/design/` 下的冻结数学规范与 `test/runtests.jl` 中的测试样例。*
