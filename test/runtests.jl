@@ -421,7 +421,54 @@ end
     end
 end
 
-# Dependent benchmark profiling/selection fixture tests.
+@testset "Chordal Sparsity & Detection" begin
+    # Non-chordal 4-cycle C4
+    c4 = [[2, 4], [1, 3], [2, 4], [1, 3]]
+    order, pos = SDPX.maximum_cardinality_search(c4)
+    @test !SDPX.is_chordal(c4, order, pos)
+
+    # Chordal graph: C4 with diagonal chord (1, 3)
+    chordal_g = [[2, 3, 4], [1, 3], [1, 2, 4], [1, 3]]
+    order2, pos2 = SDPX.maximum_cardinality_search(chordal_g)
+    @test SDPX.is_chordal(chordal_g, order2, pos2)
+    cliques = SDPX.maximal_cliques(chordal_g, order2, pos2)
+    @test length(cliques) == 2
+
+    # CanonicalConicProgram aggregate sparsity & analysis
+    model = SDPX.Model(Float64)
+    x = SDPX.variable!(model, :x, 3; domain=SDPX.Reals())
+    M = Matrix{Any}(undef, 4, 4)
+    for i in 1:4, j in 1:4
+        M[i, j] = 0.0
+    end
+    for i in 1:4
+        M[i, i] = 1.0
+    end
+    M[2, 1] = x[1]; M[1, 2] = x[1]
+    M[3, 2] = x[2]; M[2, 3] = x[2]
+    M[4, 3] = x[3]; M[3, 4] = x[3]
+
+    SDPX.constraint!(model, :psd_cone, M, SDPX.PSDCone())
+    canonical = SDPX.canonicalize(SDPX.compile_product_cone_model(model))
+
+    adj = SDPX.aggregate_sparsity(canonical, 1)
+    @test adj[1] == [2]
+    @test adj[2] == [1, 3]
+    @test adj[3] == [2, 4]
+    @test adj[4] == [3]
+
+    analysis = SDPX.analyze_chordal_structure(canonical, 1)
+    @test analysis.chordal == true
+    @test analysis.dimension == 4
+    @test analysis.largest_clique == 2
+    @test length(analysis.cliques) == 3
+
+    summary = SDPX.chordal_summary(canonical)
+    @test length(summary) == 1
+    @test summary[1].chordal == true
+end
+
+
 include(joinpath(@__DIR__, "..", "benchmark", "optimization", "test_profile_catalog.jl"))
 include(joinpath(@__DIR__, "..", "benchmark", "optimization", "test_compare_contract.jl"))
 include(joinpath(@__DIR__, "..", "benchmark", "optimization", "test_measure_target.jl"))

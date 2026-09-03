@@ -4,7 +4,7 @@
 # factor-coordinate residuals, exact-operator residuals, and the authoritative
 # five Newton equations are intentionally excluded and must run for every RHS.
 
-struct FactorReceipt{T<:AbstractFloat}
+mutable struct FactorReceipt{T<:AbstractFloat}
     matrix_epoch::Int
     factor_epoch::Int
     pattern_signature::UInt64
@@ -25,6 +25,38 @@ struct FactorReceipt{T<:AbstractFloat}
     factor_generation::Int
 end
 
+@inline function update_factor_receipt!(
+    receipt::FactorReceipt{T},
+    matrix_epoch::Int,
+    factor_epoch::Int,
+    pattern_signature::UInt64,
+    route::Symbol,
+    provider::Symbol,
+    regularization::T,
+    regularization_kind::Symbol,
+    factor_status::Symbol,
+    factor_backward_bound::T,
+    proof_valid::Bool,
+    operator_generation::Int=0,
+    factor_generation::Int=0,
+) where {T<:AbstractFloat}
+    receipt.matrix_epoch = matrix_epoch
+    receipt.factor_epoch = factor_epoch
+    receipt.pattern_signature = pattern_signature
+    receipt.route = route
+    receipt.provider = provider
+    receipt.scalar_type = T
+    receipt.precision_bits = factor_receipt_precision(T)
+    receipt.regularization = regularization
+    receipt.regularization_kind = regularization_kind
+    receipt.factor_status = factor_status
+    receipt.factor_backward_bound = factor_backward_bound
+    receipt.proof_valid = proof_valid
+    receipt.operator_generation = operator_generation
+    receipt.factor_generation = factor_generation
+    return receipt
+end
+
 @inline function factor_receipt_precision(::Type{T}) where {T<:AbstractFloat}
     T === BigFloat && return precision(BigFloat)
     value = try
@@ -41,9 +73,14 @@ end
     signature = UInt64(0xcbf29ce484222325)
     signature = (signature ⊻ UInt64(rows)) * UInt64(0x100000001b3)
     signature = (signature ⊻ UInt64(columns)) * UInt64(0x100000001b3)
-    for byte in codeunits(String(route))
-        signature = (signature ⊻ UInt64(byte)) * UInt64(0x100000001b3)
-    end
+    # Keep the signature reproducible without allocating `String(route)`.
+    # Only the three dense factor routes call this helper; explicit tags avoid
+    # depending on Julia's implementation-defined `hash(::Symbol)` seed.
+    route_tag = route === :bordered ? UInt64(0x01) :
+                route === :expanded ? UInt64(0x02) :
+                route === :coupled ? UInt64(0x03) :
+                throw(ArgumentError("unsupported dense factor route $(route)"))
+    signature = (signature ⊻ route_tag) * UInt64(0x100000001b3)
     return signature
 end
 

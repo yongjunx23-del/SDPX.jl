@@ -237,14 +237,17 @@ function _product_cone_hsd_state(
     ),
     allow_expanded_bordered_fallback::Bool=true,
 ) where {T<:AbstractFloat,R<:AbstractFactorCache{T}}
-    kkt_route in (:bordered, :expanded, :sparse_schur) || throw(ArgumentError(
-        "product HSD kkt_route must be :bordered, :expanded, or :sparse_schur",
+    if kkt_route === :sparse_augmented
+        prepare_symmetric_core = true
+    end
+    kkt_route in (:bordered, :expanded, :sparse_schur, :sparse_augmented) || throw(ArgumentError(
+        "product HSD kkt_route must be :bordered, :expanded, :sparse_schur, or :sparse_augmented",
     ))
     schur_threads >= 1 || throw(ArgumentError("schur_threads must be positive"))
-    if prepare_symmetric_core && kkt_route !== :bordered
+    if prepare_symmetric_core && kkt_route !== :bordered && kkt_route !== :sparse_augmented
         throw(ArgumentError(
-            "prepare_symmetric_core requires kkt_route === :bordered " *
-            "(prepared core is the authoritative bordered executor); " *
+            "prepare_symmetric_core requires kkt_route in (:bordered, :sparse_augmented) " *
+            "(prepared core is the authoritative bordered/augmented executor); " *
             "got $(kkt_route)",
         ))
     end
@@ -408,6 +411,9 @@ function ProductConeHSDState(
     ),
     allow_expanded_bordered_fallback::Bool=true,
 ) where {T<:AbstractFloat}
+    prepare_symmetric_core = prepare_symmetric_core || (kkt_route === :sparse_augmented)
+    rss = symmetric_core_current_rss === nothing ? Int(Sys.maxrss()) : symmetric_core_current_rss
+    mem_limit = symmetric_core_memory_limit === nothing ? Int(Sys.total_memory()) : symmetric_core_memory_limit
     reduction = _hsd_rowspace_reduction(canonical)
     cache = DenseSchurCholeskyCache{T}(reduction.rank)
     driver = HotRouteCache(cache; n=reduction.rank)
@@ -416,8 +422,8 @@ function ProductConeHSDState(
         base;
         kkt_route=kkt_route,
         prepare_symmetric_core=prepare_symmetric_core,
-        symmetric_core_memory_limit=symmetric_core_memory_limit,
-        symmetric_core_current_rss=symmetric_core_current_rss,
+        symmetric_core_memory_limit=mem_limit,
+        symmetric_core_current_rss=rss,
         symmetric_core_precision_bits=symmetric_core_precision_bits,
         symmetric_core_regularization=symmetric_core_regularization,
         schur_threads=schur_threads,
@@ -1022,8 +1028,8 @@ thread scratch for pure orthant/SOC products; mixed and PSD products retain
 the serial path because their block kernels own mutable local workspaces.
 """
 Base.@noinline function _product_hsd_form_schur_border!(
-    state::ProductConeHSDState{T},
-) where {T}
+    state::ProductConeHSDState{T,R,RT,NS,CW,SB,EW,SW,SCW},
+) where {T,R,RT,NS,CW,SB,EW,SW,SCW}
     base = state.base
     A = base.workspace.Ar
     H = base.workspace.H
@@ -1156,9 +1162,9 @@ end
     return true
 end
 
-@inline function _product_hsd_assemble_bordered!(
-    state::ProductConeHSDState{T}, border_scalar::T,
-) where {T}
+Base.@noinline function _product_hsd_assemble_bordered!(
+    state::ProductConeHSDState{T,R,RT,NS,CW,SB,EW,SW,SCW}, border_scalar::T,
+) where {T,R,RT,NS,CW,SB,EW,SW,SCW}
     base = state.base
     workspace = state.symmetric_bordered
     n = workspace.dimension
@@ -1167,8 +1173,9 @@ end
     workspace.original_solution_certified = false
     workspace.last_reason = SYMMETRIC_BORDERED_READY
     workspace.assembly_epoch = 0
-    workspace.factor_epoch = 0
-    workspace.factor_receipt = nothing
+    if workspace.factor_receipt !== nothing
+        workspace.factor_receipt.proof_valid = false
+    end
     workspace.accumulated_candidate = false
     workspace.candidate_epoch = 0
     workspace.accumulations = 0
@@ -1298,13 +1305,12 @@ end
     return true
 end
 
-@inline function _product_hsd_factor_bordered!(
-    state::ProductConeHSDState,
-)
+Base.@noinline function _product_hsd_factor_bordered!(
+    state::ProductConeHSDState{T,R,RT,NS,CW,SB,EW,SW,SCW},
+) where {T,R,RT,NS,CW,SB,EW,SW,SCW}
     base = state.base
     workspace = state.symmetric_bordered
     workspace.factor_certified = false
-    workspace.factor_receipt = nothing
     # Count every bordered numeric-factor attempt before any early exit so
     # failed/uncertified attempts are separately observable and never counted
     # as successfully certified factors.
@@ -1341,29 +1347,55 @@ end
     end
     workspace.factor_epoch = base.epoch
     workspace.factor_certified = true
-    proof_scale = max(
-        maximum(abs, workspace.factor_matrix),
-        one(eltype(workspace.factor_matrix)),
-    )
-    proof_bound = maximum(abs, workspace.factor_error) / proof_scale
+    proof_scale = one(T)
+    @inbounds for v in workspace.factor_matrix
+        av = abs(v)
+        av > proof_scale && (proof_scale = av)
+    end
+    max_err = zero(T)
+    @inbounds for v in workspace.factor_error
+        av = abs(v)
+        av > max_err && (max_err = av)
+    end
+    proof_bound = max_err / proof_scale
     receipt_factor_epoch = factor_epoch(workspace.driver.route)
-    workspace.factor_receipt = FactorReceipt(
-        workspace.assembly_epoch,
-        receipt_factor_epoch,
-        dense_factor_pattern_signature(
-            workspace.dimension, workspace.dimension, :bordered,
-        ),
-        :bordered,
-        _product_bordered_provider(workspace),
-        eltype(workspace.factor_matrix),
-        factor_receipt_precision(eltype(workspace.factor_matrix)),
-        zero(eltype(workspace.factor_matrix)),
-        :none,
-        :factored,
-        proof_bound,
-        true,
-        0, 0,
+    pat_sig = dense_factor_pattern_signature(
+        workspace.dimension, workspace.dimension, :bordered,
     )
+    prov = _product_bordered_provider(workspace)
+    T_mat = eltype(workspace.factor_matrix)
+    if workspace.factor_receipt === nothing
+        workspace.factor_receipt = FactorReceipt(
+            workspace.assembly_epoch,
+            receipt_factor_epoch,
+            pat_sig,
+            :bordered,
+            prov,
+            T_mat,
+            factor_receipt_precision(T_mat),
+            zero(T_mat),
+            :none,
+            :factored,
+            proof_bound,
+            true,
+            0, 0,
+        )
+    else
+        update_factor_receipt!(
+            workspace.factor_receipt,
+            workspace.assembly_epoch,
+            receipt_factor_epoch,
+            pat_sig,
+            :bordered,
+            prov,
+            zero(T_mat),
+            :none,
+            :factored,
+            proof_bound,
+            true,
+            0, 0,
+        )
+    end
     workspace.receipt_build_count += 1
     return true
 end
@@ -1375,24 +1407,24 @@ end
     return la_backend_provider(route.backend)
 end
 
-
 @inline function _product_bordered_factor_receipt_current(
     workspace::SymmetricBorderedWorkspace{T},
 ) where {T}
     workspace.factor_certified || return false
     workspace.factor_epoch == workspace.assembly_epoch || return false
-    return factor_receipt_owned(
-        workspace.factor_receipt;
-        matrix_epoch=workspace.assembly_epoch,
-        factor_epoch=factor_epoch(workspace.driver.route),
-        pattern_signature=dense_factor_pattern_signature(
-            workspace.dimension, workspace.dimension, :bordered,
-        ),
-        route=:bordered,
-        provider=_product_bordered_provider(workspace),
-        regularization=zero(T),
-        require_proof=true,
-    )
+    receipt = workspace.factor_receipt
+    receipt === nothing && return false
+    receipt.matrix_epoch == workspace.assembly_epoch || return false
+    receipt.factor_epoch == factor_epoch(workspace.driver.route) || return false
+    receipt.pattern_signature == dense_factor_pattern_signature(
+        workspace.dimension, workspace.dimension, :bordered,
+    ) || return false
+    receipt.route === :bordered || return false
+    receipt.provider === _product_bordered_provider(workspace) || return false
+    receipt.scalar_type === T || return false
+    receipt.regularization == zero(T) || return false
+    receipt.proof_valid || return false
+    return true
 end
 
 @inline function _product_bordered_physical_snapshot_ok(
@@ -2736,9 +2768,9 @@ end
 end
 
 @inline function _product_hsd_solve_shift_raw!(
-    state::ProductConeHSDState{T},
+    state::ProductConeHSDState{T,R,RT,NS,CW,SB,EW,SW,SCW},
     scalar_rhs::T,
-) where {T}
+) where {T,R,RT,NS,CW,SB,EW,SW,SCW}
     base = state.base
     workspace = state.symmetric_bordered
     _product_hsd_prepare_bordered_rhs!(state, scalar_rhs) || return false
@@ -3069,9 +3101,9 @@ end
 end
 
 @inline function _product_hsd_solve_shift!(
-    state::ProductConeHSDState{T},
+    state::ProductConeHSDState{T,R,RT,NS,CW,SB,EW,SW,SCW},
     scalar_rhs::T,
-) where {T}
+) where {T,R,RT,NS,CW,SB,EW,SW,SCW}
     _product_hsd_solve_shift_raw!(
         state, scalar_rhs,
     ) || return false
@@ -3195,9 +3227,9 @@ Execute one native LP/SOC/PSD/Exp/Power product-cone predictor/corrector epoch.
 This is an explicit core API only: it does not assign solver status, recover a
 public result, or fall back to a legacy/lifted route.
 """
-@inline function _product_hsd_bordered_route_direction!(
-    state::ProductConeHSDState{T}, has_nonsymmetric::Bool,
-) where {T}
+function _product_hsd_bordered_route_direction!(
+    state::ProductConeHSDState{T,R,RT,NS,CW,SB,EW,SW,SCW}, has_nonsymmetric::Bool,
+) where {T,R,RT,NS,CW,SB,EW,SW,SCW}
     base = state.base
     # C7.2a: when the state owns a prepared symmetric-core workspace, the
     # bordered route executes ONLY the symmetric augmented core.  A core
@@ -3237,34 +3269,27 @@ public result, or fall back to a legacy/lifted route.
         return direction_ok ? HSDStepOK : HSDStepDirectionFailed
     end
 
-    border_scalar = try
-        _product_hsd_form_schur_border!(state)
-    catch
-        return HSDStepDirectionFailed
-    end
+    border_scalar = _product_hsd_form_schur_border!(state)
     (_hsd_matrix_finite(base.workspace.H) && isfinite(border_scalar) &&
      _product_hsd_vector_finite(base.workspace.qr) &&
      _product_hsd_vector_finite(base.workspace.rvec)) || return HSDStepDirectionFailed
-    assembled = try
-        _product_hsd_assemble_bordered!(state, border_scalar)
-    catch
+    assembled = _product_hsd_assemble_bordered!(state, border_scalar)
+    assembled || begin
         state.symmetric_bordered.last_reason =
             SYMMETRIC_BORDERED_ASSEMBLY_NONFINITE
-        false
+        return HSDStepDirectionFailed
     end
-    assembled || return HSDStepDirectionFailed
     factor_ok = _product_hsd_factor_bordered!(state)
     factor_ok || return state.symmetric_bordered.last_reason ===
                         SYMMETRIC_BORDERED_FACTOR_FAILED ?
                         HSDStepSingularKKT : HSDStepDirectionFailed
-    direction_ok = try
-        _product_hsd_direction!(state)
-    catch
+    direction_ok = _product_hsd_direction!(state)
+    direction_ok || begin
         state.symmetric_bordered.last_reason =
             SYMMETRIC_BORDERED_FIVE_EQUATION_FAILED
-        false
+        return HSDStepDirectionFailed
     end
-    return direction_ok ? HSDStepOK : HSDStepDirectionFailed
+    return HSDStepOK
 end
 
 @inline function _product_hsd_expanded_fallback_allowed(state::ProductConeHSDState)
@@ -3354,7 +3379,7 @@ function _product_hsd_trial_residual!(state::ProductConeHSDState{T}) where {T}
     return _hsd_trial_residual!(state.base)
 end
 
-function product_hsd_step!(state::ProductConeHSDState{T}) where {T}
+function product_hsd_step!(state::ProductConeHSDState{T,R,RT,NS,CW,SB,EW,SW,SCW}) where {T,R,RT,NS,CW,SB,EW,SW,SCW}
     base = state.base
     base.workspace.rank_ambiguous && return HSDStepDirectionFailed
     base.workspace.rank_incompatible && return HSDStepDirectionFailed

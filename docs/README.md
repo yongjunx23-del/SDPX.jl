@@ -15,10 +15,9 @@ julia --project=docs -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'
 julia --project=docs docs/make.jl
 ```
 
-## Active implementation plan
+## Active implementation & handover plan
 
-`docs/PLAN.md` is the current roadmap. It is concise by design and does not
-retain completed wave transcripts.
+`HANDOVER.md` is the consolidated roadmap and engineering handover document. It unifies all prior implementation plans and details the architecture, zero-allocation breakthrough, and next steps.
 
 ## Frozen design contracts
 

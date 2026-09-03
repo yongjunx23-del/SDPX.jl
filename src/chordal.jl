@@ -75,6 +75,60 @@ function aggregate_sparsity(prob::SDPProblem{T}, block::Integer) where {T}
 end
 
 """
+    aggregate_sparsity(canonical::CanonicalConicProgram, block::Integer) -> Vector{Vector{Int}}
+
+Adjacency list of the aggregate sparsity graph for the `block`-th PSD cone
+in a [`CanonicalConicProgram`](@ref).
+"""
+function aggregate_sparsity(canonical::CanonicalConicProgram{T}, block_idx::Integer) where {T}
+    psd_blocks = [b for b in canonical.cone_layout.blocks if b.cone === :psd]
+    1 <= block_idx <= length(psd_blocks) ||
+        throw(BoundsError(psd_blocks, block_idx))
+    block = psd_blocks[block_idx]
+    dimension = block.dimension
+    neighbours = [Set{Int}() for _ in 1:dimension]
+
+    function record!(row, column)
+        row == column && return
+        push!(neighbours[row], column)
+        push!(neighbours[column], row)
+        return
+    end
+
+    pairs = psd_packed_pairs(dimension)
+    offset = block.offset
+    len = block.length
+
+    # Check RHS b
+    b = canonical.b
+    @inbounds for i in 1:len
+        r_idx = offset + i - 1
+        if !iszero(b[r_idx])
+            r, c = pairs[i]
+            record!(r, c)
+        end
+    end
+
+    # Check constraint matrix A (SparseMatrixCSC)
+    A = canonical.A
+    row_val = rowvals(A)
+    nz_val = nonzeros(A)
+    for col in 1:size(A, 2)
+        for idx in nzrange(A, col)
+            r_idx = row_val[idx]
+            if offset <= r_idx < offset + len
+                iszero(nz_val[idx]) && continue
+                i = r_idx - offset + 1
+                r, c = pairs[i]
+                record!(r, c)
+            end
+        end
+    end
+
+    return [sort!(collect(set)) for set in neighbours]
+end
+
+"""
     maximum_cardinality_search(neighbours) -> (order, position)
 
 Maximum cardinality search. Returns an elimination `order` (the reverse of the
@@ -207,8 +261,7 @@ cubic in the block dimension, so the ratio of those sums is a direct estimate of
 the arithmetic saved. A ratio near one means the cliques are nearly as large as
 the block and nothing is gained.
 """
-function analyze_chordal_structure(prob::SDPProblem{T}, block::Integer) where {T}
-    neighbours = aggregate_sparsity(prob, block)
+function analyze_chordal_structure(neighbours::Vector{Vector{Int}})
     dimension = length(neighbours)
     if dimension == 0
         return ChordalAnalysis(0, true, Vector{Int}[], 0, 0.0, 1.0, false)
@@ -234,30 +287,21 @@ function analyze_chordal_structure(prob::SDPProblem{T}, block::Integer) where {T
         ratio, beneficial)
 end
 
+analyze_chordal_structure(prob::SDPProblem, block::Integer) =
+    analyze_chordal_structure(aggregate_sparsity(prob, block))
+
+analyze_chordal_structure(canonical::CanonicalConicProgram, block::Integer) =
+    analyze_chordal_structure(aggregate_sparsity(canonical, block))
+
 """
     chordal_summary(prob) -> Vector{ChordalAnalysis}
+    chordal_summary(canonical) -> Vector{ChordalAnalysis}
 
 Analysis for every PSD block, for diagnostics and for deciding whether the
 decomposition is worth implementing on a given model family.
-
-That decision has been made for the benchmark family this solver targets, and
-the answer was no. On the `m = 6119` lattice bootstrap problem every one of the
-32 blocks is chordal, and not one of them would benefit:
-
-```text
-  block   dim   cliques   largest   cost ratio
-      1    52         1        52        1.000
-      2    23         2        22        1.750
-      4    40         2        39        1.488
-      5    70         2        69        1.687
-```
-
-The largest clique is nearly the whole block throughout, so splitting would
-replace one `k³` factorization with cliques almost as large *and* add coupling
-constraints between them — the `beneficial` field is false for all 32. This is
-why detection is implemented and the transformation is not: the transformation
-is a large piece of machinery whose own gate says it would never fire here.
-Re-run this on a new model family before concluding the same holds there.
 """
 chordal_summary(prob::SDPProblem) =
     [analyze_chordal_structure(prob, block) for block in 1:prob.dims.L]
+
+chordal_summary(canonical::CanonicalConicProgram) =
+    [analyze_chordal_structure(canonical, block) for block in 1:count(b -> b.cone === :psd, canonical.cone_layout.blocks)]

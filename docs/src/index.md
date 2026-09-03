@@ -89,8 +89,8 @@ certificate data fail closed.
 - [Development](development.md)
 - [Qualified internals](internals.md)
 
-The active implementation plan is
-[`docs/PLAN.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/PLAN.md).
+The active implementation and handover plan is
+[`HANDOVER.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/HANDOVER.md).
 Frozen mathematical contracts are under
 [`docs/design/`](https://github.com/yongjunx23-del/SDPX.jl/tree/main/docs/design).
 Historical plans and reviews are retained in Git history rather than presented

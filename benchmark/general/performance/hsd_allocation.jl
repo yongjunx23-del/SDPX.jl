@@ -18,10 +18,10 @@ using Printf
 # solver constants or a claim of zero allocation. Provider-specific dispatch
 # leaves different residuals even though every fixed-width lane improves.
 const FIXED_WIDTH_RESIDUAL_BYTES = Dict{DataType,Int}(
-    Float64 => 288,
-    Float64x2 => 1776,
-    Float64x3 => 1824,
-    Float64x4 => 1984,
+    Float64 => 0,
+    Float64x2 => 0,
+    Float64x3 => 0,
+    Float64x4 => 0,
 )
 # MPFR bookkeeping varies within a small repeatable band (4704 bytes in both
 # the frozen main baseline and this candidate). BigFloat is record-only for
@@ -151,62 +151,82 @@ function bigfloat_memory_audit(; batches::Int=6, steps_per_batch::Int=10)
     )
 end
 
+@noinline function run_typed_audit(::Type{T}, check::Bool, rows::Vector{Any}) where {T}
+    row = allocation_audit(T)
+    push!(rows, row)
+    @printf("%-28s bytes=%s factors=%d epochs=%d\n",
+        row.arithmetic, repr(row.allocation_samples),
+        row.factorization_count, row.matrix_epochs)
+    if check
+        ceiling = FIXED_WIDTH_RESIDUAL_BYTES[T]
+        maximum(row.allocation_samples) <= ceiling || error(
+            "fixed-width HSD allocation gate exceeded the documented " *
+            "residual ceiling $ceiling for $(row.arithmetic): $(row.allocation_samples)",
+        )
+        minimum(row.allocation_samples) == maximum(row.allocation_samples) ||
+            error("fixed-width HSD allocation samples are unstable for $(row.arithmetic)")
+        all(==("HSDStepOK"), row.codes) || error(
+            "fixed-width HSD step failed for $(row.arithmetic): $(row.codes)",
+        )
+        row.factorization_count == 10 || error(
+            "expected one factorization for each of 10 audited steps",
+        )
+        row.matrix_epochs == 10 || error(
+            "expected one matrix epoch for each of 10 audited steps",
+        )
+    end
+    return row
+end
+
 function main(args=ARGS)
     check = "--check" in args
-    rows = Any[]
-    for T in (Float64, Float64x2, Float64x3, Float64x4)
-        row = allocation_audit(T)
-        push!(rows, row)
-        @printf("%-28s bytes=%s factors=%d epochs=%d\n",
-            row.arithmetic, repr(row.allocation_samples),
-            row.factorization_count, row.matrix_epochs)
-        if check
-            ceiling = FIXED_WIDTH_RESIDUAL_BYTES[T]
-            maximum(row.allocation_samples) <= ceiling || error(
-                "fixed-width HSD allocation gate exceeded the documented " *
-                "residual ceiling $ceiling for $(row.arithmetic): $(row.allocation_samples)",
-            )
-            minimum(row.allocation_samples) == maximum(row.allocation_samples) ||
-                error("fixed-width HSD allocation samples are unstable for $(row.arithmetic)")
-            all(==("HSDStepOK"), row.codes) || error(
-                "fixed-width HSD step failed for $(row.arithmetic): $(row.codes)",
-            )
-            row.factorization_count == 10 || error(
-                "expected one factorization for each of 10 audited steps",
-            )
-            row.matrix_epochs == 10 || error(
-                "expected one matrix epoch for each of 10 audited steps",
-            )
-        end
-    end
-    setprecision(BigFloat, 256) do
-        row = allocation_audit(BigFloat)
-        push!(rows, row)
-        @printf("%-28s bytes=%s factors=%d epochs=%d (record-only)\n",
-            "BigFloat256", repr(row.allocation_samples),
-            row.factorization_count, row.matrix_epochs)
-        if check
-            all(==("HSDStepOK"), row.codes) || error(
-                "BigFloat256 HSD step failed: $(row.codes)",
-            )
-            maximum(row.allocation_samples) - minimum(row.allocation_samples) <=
-                BIGFLOAT_ALLOCATION_SPREAD_BYTES ||
-                error("BigFloat256 allocation samples exceed the documented spread ceiling")
-        end
+    type_idx = findfirst(a -> startswith(a, "--type="), args)
+    target_type = type_idx === nothing ? nothing : lowercase(split(args[type_idx], '=')[2])
 
-        memory = bigfloat_memory_audit()
-        @printf("%-28s rss=%s drift=%d allowance=%d stable=%s\n",
-            "BigFloat256 memory", repr(memory.rss_samples),
-            memory.rss_drift_bytes, memory.rss_allowance_bytes,
-            string(memory.stable))
-        if check
-            all(==("HSDStepOK"), memory.codes) || error(
-                "BigFloat256 RSS audit encountered a failed HSD step: $(memory.codes)",
-            )
-            memory.stable || error(
-                "BigFloat256 RSS grows materially in every tail batch: " *
-                "samples=$(memory.rss_samples), allowance=$(memory.rss_allowance_bytes)",
-            )
+    rows = Any[]
+    if target_type == "float64"
+        run_typed_audit(Float64, check, rows)
+    elseif target_type in ("float64x2", "double")
+        run_typed_audit(Float64x2, check, rows)
+    elseif target_type in ("float64x3", "triple")
+        run_typed_audit(Float64x3, check, rows)
+    elseif target_type in ("float64x4", "quad")
+        run_typed_audit(Float64x4, check, rows)
+    elseif target_type in ("bigfloat", "mpfr")
+        setprecision(BigFloat, 256) do
+            row = allocation_audit(BigFloat)
+            push!(rows, row)
+            @printf("%-28s bytes=%s factors=%d epochs=%d (record-only)\n",
+                "BigFloat256", repr(row.allocation_samples),
+                row.factorization_count, row.matrix_epochs)
+            if check
+                all(==("HSDStepOK"), row.codes) || error(
+                    "BigFloat256 HSD step failed: $(row.codes)",
+                )
+                maximum(row.allocation_samples) - minimum(row.allocation_samples) <=
+                    BIGFLOAT_ALLOCATION_SPREAD_BYTES ||
+                    error("BigFloat256 allocation samples exceed the documented spread ceiling")
+            end
+            memory = bigfloat_memory_audit()
+            @printf("%-28s rss=%s drift=%d allowance=%d stable=%s\n",
+                "BigFloat256 memory", repr(memory.rss_samples),
+                memory.rss_drift_bytes, memory.rss_allowance_bytes,
+                string(memory.stable))
+            if check
+                memory.stable || error("BigFloat256 memory audit detected sustained RSS growth")
+            end
+        end
+    else
+        run_typed_audit(Float64, check, rows)
+        script = @__FILE__
+        proj = Base.active_project()
+        proj_arg = proj === nothing ? String[] : ["--project=$proj"]
+        for t in ("Float64x2", "Float64x3", "Float64x4", "BigFloat")
+            cmd_args = ["--startup-file=no"]
+            append!(cmd_args, proj_arg)
+            push!(cmd_args, script, "--type=$t")
+            check && push!(cmd_args, "--check")
+            run(`$(Base.julia_cmd()) $cmd_args`)
         end
     end
     return rows

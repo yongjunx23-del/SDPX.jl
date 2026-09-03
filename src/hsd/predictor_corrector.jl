@@ -533,8 +533,8 @@ end
 
 """Predictor/corrector directions sharing one pivoted bordered factor."""
 @inline function _product_hsd_direction!(
-    state::ProductConeHSDState{T},
-) where {T}
+    state::ProductConeHSDState{T,R,RT,NS,CW,SB,EW,SW,SCW},
+) where {T,R,RT,NS,CW,SB,EW,SW,SCW}
     base = state.base
     affine_shift!(state.runtime, state.h, base.s, base.y)
     predictor_scalar = -base.tau * base.kappa
@@ -854,8 +854,8 @@ direction must pass the original five-equation residual gate; no legacy
 bordered fallback is attempted when the core is present.
 """
 function _product_hsd_symmetric_core_direction!(
-    state::ProductConeHSDState{T},
-) where {T}
+    state::ProductConeHSDState{T,R,RT,NS,CW,SB,EW,SW,SCW},
+) where {T,R,RT,NS,CW,SB,EW,SW,SCW}
     core = state.symmetric_core
     core === nothing && return false
     base = state.base

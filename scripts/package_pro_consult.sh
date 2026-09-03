@@ -16,7 +16,7 @@ OUT="$1"
 mkdir -p "$OUT"
 git archive "$SHA" --prefix=source/ | gzip > "$OUT/context-$SHA.tar.gz"
 shasum -a 256 "$OUT/context-$SHA.tar.gz" > "$OUT/context-$SHA.sha256"
-cp docs/PLAN.md "$OUT/PLAN.md"
+cp HANDOVER.md "$OUT/HANDOVER.md"
 cp docs/design/CANONICAL_FORM.md "$OUT/"
 cp docs/design/HSD_FORMULATION.md "$OUT/"
 cp docs/design/NEWTON_SYSTEM.md "$OUT/"
@@ -28,7 +28,7 @@ cat > "$OUT/REVIEW_CONTEXT.md" <<EOF
 - Packaged UTC: \`$(date -u +%Y-%m-%dT%H:%M:%SZ)\`
 - Tracked tree: clean
 
-Current plan: \`PLAN.md\`.
+Current plan and handover: \`HANDOVER.md\`.
 Frozen contracts: \`CANONICAL_FORM.md\`, \`HSD_FORMULATION.md\`, and
 \`NEWTON_SYSTEM.md\`. Review claims against the archived source, not against
 historical conversation context.

@@ -229,7 +229,7 @@ struct Settings{T<:AbstractFloat}
             (:auto, :variable_space_schur, :dense_augmented_kkt, :psd_lift),
             "formulation",
         )
-        _validate_symbol(kkt_route, (:bordered, :expanded, :sparse_schur), "kkt_route")
+        _validate_symbol(kkt_route, (:bordered, :expanded, :sparse_schur, :sparse_augmented), "kkt_route")
         _validate_symbol(provider, (:auto, :standard, :bfla, :multifloat, :legacy), "provider")
         _validate_algorithm(algorithm)
         _validate_symbol(presolve, (:auto, :on, :off), "presolve")
