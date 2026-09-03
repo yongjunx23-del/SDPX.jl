@@ -10,6 +10,7 @@ using SDPX
 using Test
 using LinearAlgebra
 using Random
+using SparseArrays
 using MultiFloats
 using MultiFloatLinearAlgebra
 
@@ -276,6 +277,32 @@ end
         bad_lower = copy(source)
         bad_lower[2, 1] = T(NaN)
         @test_throws ArgumentError SDPX.la_cholesky_factor!(backend, bad_lower)
+    end
+
+    @testset "terminal tall/wide refinement uses provider factors" begin
+        T = Float64x4
+        Random.seed!(19)
+        m, n = 80, 5
+        dense_A = T.(randn(m, n))
+        A = sparse(dense_A)
+        b = T.(randn(m))
+        backend = SDPX._product_hsd_terminal_la_backend(T)
+
+        x = zeros(T, n)
+        primal_residual = dense_A * T.(randn(n))
+        @test SDPX._product_hsd_apply_primal_refinement!(
+            x, A, copy(dense_A), primal_residual, backend,
+        )
+        @test norm(dense_A * x + primal_residual, Inf) <= T(1e-40)
+
+        y = zeros(T, m)
+        dual_residual = T.(randn(n))
+        gap = T(3) / T(17)
+        @test SDPX._product_hsd_apply_dual_refinement!(
+            y, A, copy(dense_A), b, dual_residual, gap, backend,
+        )
+        @test norm(transpose(dense_A) * y + dual_residual, Inf) <= T(1e-40)
+        @test abs(dot(b, y) + gap) <= T(1e-40)
     end
 
     @testset "legacy default trajectory stays unchanged" begin

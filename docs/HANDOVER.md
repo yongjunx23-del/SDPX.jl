@@ -119,6 +119,18 @@ SDPX.jl 是一个面向高精度理论物理（如共形自举 Conformal Bootstr
   $$K = \begin{pmatrix} 0 & A_r^T \\ A_r & -\Theta \end{pmatrix}$$
 - 在 `Float64` 下利用 SuiteSparse CHOLMOD 稀疏 $LDL^T$（带有符号正则化与惯性保障）进行求解，避免显式计算超大密集的 Schur 补矩阵 $A \Theta^{-1} A^T$。
 
+### 2.5 N14 终端证书最小二乘加速（Phase 6）
+
+N14 massless-EFT（`A` 为 `27900×65`、1,190,700 个非零元）的 IPM 候选恢复曾调用 Julia generic `affine_dual \\ rhs`，即对 `66×27900` MultiFloat 矩阵执行 wide QR。PBS `209763` 在该终端证书步骤停留超过 3.8 小时，`perf` 显示约 99% 样本位于 `_wide_qr_ldiv!`；这不是 HSD 迭代速度。
+
+现已将冷终端恢复改为数学等价的 provider 路径：
+
+- 原始变量修正：MFLA/BFLA 目标算术 pivoted QR，解语义 `R'R` 系统；
+- 对偶最小范数修正：对 `D=[A';b']` 使用 `dy=D'*(D*D')^{-1}rhs`，仅因子化 `(n+1)×(n+1)` Gram；
+- 最终接受条件仍为原坐标 residual、cone、gap、complementarity 与五方程门禁，未改变 tolerance。
+
+Mac Float64x4 N14 同一矩阵实测：primal terminal refinement **4.79 s**，dual terminal refinement **1.15 s**，残差分别约 `3.3e-60` 与 `1.3e-50`；峰值 RSS 约 **1.74 GB**。MFLA provider 集成测试增至 **168/168**。正式 N14 SOCP/2×2 SDP 收据仍须在该提交的新 sysimage 上重跑后才能宣布完成。
+
 ---
 
 ## 3. 核心模块与关键代码地图

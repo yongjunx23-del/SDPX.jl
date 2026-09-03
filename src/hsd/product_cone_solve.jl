@@ -82,6 +82,115 @@ free in both affine equations; this removes a second-order cone residual
 without altering stationarity or the gap. No cone-membership check or
 tolerance is relaxed.
 """
+function _product_hsd_terminal_la_backend(::Type{T}) where {T<:AbstractFloat}
+    T === Float64 && return nothing
+    config = plan_la_backend(
+        T; requested=:auto, route=:dense_cholesky,
+        threads=max(Threads.nthreads(), 1), equality_solver=:qr,
+    )
+    return instantiate_la_backend(config, T, max(Threads.nthreads(), 1))
+end
+
+function _product_hsd_apply_primal_refinement!(
+    x::Vector{T}, A::AbstractMatrix{T}, dense_A::AbstractMatrix{T},
+    primal_residual::Vector{T}, backend,
+) where {T<:AbstractFloat}
+    if T === Float64
+        x .+= dense_A \ (-primal_residual)
+        return true
+    end
+    relative_tolerance = T(max(size(A)...)) * eps(T)
+    factor = la_qr_factor!(
+        backend, dense_A; pivoted=true,
+        relative_tolerance=relative_tolerance,
+    )
+    factor === nothing && return false
+    factor.rank == size(A, 2) || return false
+    rhs = alloc_zeros(T, size(A, 2))
+    @inbounds for column in axes(A, 2)
+        value = zero(T)
+        for pointer in nzrange(A, column)
+            value -= A.nzval[pointer] * primal_residual[A.rowval[pointer]]
+        end
+        rhs[column] = value
+    end
+    permuted = alloc_zeros(T, length(rhs))
+    la_factor_solve!(factor, rhs, permuted)
+    all(isfinite, rhs) || return false
+    @inbounds for index in eachindex(x)
+        x[index] += rhs[index]
+    end
+    return all(isfinite, x)
+end
+
+function _product_hsd_apply_dual_refinement!(
+    y::Vector{T}, A::AbstractMatrix{T}, dense_A::AbstractMatrix{T},
+    b::Vector{T}, dual_residual::Vector{T}, gap::T, backend,
+) where {T<:AbstractFloat}
+    n = size(A, 2)
+    m = size(A, 1)
+    if T === Float64
+        affine_dual = Matrix{T}(undef, n + 1, m)
+        @inbounds for column in 1:m
+            for row in 1:n
+                affine_dual[row, column] = A[column, row]
+            end
+            affine_dual[end, column] = b[column]
+        end
+        rhs = Vector{T}(undef, n + 1)
+        @inbounds for row in 1:n
+            rhs[row] = -dual_residual[row]
+        end
+        rhs[end] = -gap
+        y .+= affine_dual \ rhs
+        return true
+    end
+
+    # Minimum-norm correction for D*dy = rhs, D=[A'; b']:
+    # dy = D' * (D*D')^-1 * rhs.  This is mathematically identical to the
+    # previous wide least-squares solve, but factors only an (n+1)x(n+1)
+    # target-arithmetic Gram matrix instead of generic QR on (n+1)xm.
+    gram = alloc_zeros(T, n + 1, n + 1)
+    top = @view gram[1:n, 1:n]
+    la_syrk!(backend, top, dense_A, one(T), zero(T))
+    atb = alloc_zeros(T, n)
+    @inbounds for column in 1:n
+        value = zero(T)
+        for pointer in nzrange(A, column)
+            row = A.rowval[pointer]
+            value += A.nzval[pointer] * b[row]
+        end
+        atb[column] = value
+        gram[n + 1, column] = value
+        gram[column, n + 1] = value
+    end
+    gram[n + 1, n + 1] = dot(b, b)
+    all(isfinite, gram) || return false
+    factor = la_cholesky_factor!(backend, gram)
+    factor === nothing && return false
+    rhs = alloc_zeros(T, n + 1)
+    @inbounds for row in 1:n
+        rhs[row] = -dual_residual[row]
+    end
+    rhs[end] = -gap
+    la_factor_solve!(factor, rhs)
+    all(isfinite, rhs) || return false
+    correction = alloc_zeros(T, m)
+    @inbounds for row in 1:m
+        correction[row] = b[row] * rhs[end]
+    end
+    @inbounds for column in 1:n
+        coefficient = rhs[column]
+        for pointer in nzrange(A, column)
+            correction[A.rowval[pointer]] += A.nzval[pointer] * coefficient
+        end
+    end
+    @inbounds for row in 1:m
+        y[row] += correction[row]
+    end
+    return all(isfinite, y)
+end
+
 function _product_hsd_refined_optimal_result!(
     state::ProductConeHSDState{T},
     x_original::Vector{T},
@@ -113,6 +222,8 @@ function _product_hsd_refined_optimal_result!(
     else
         A
     end
+    backend = _product_hsd_terminal_la_backend(T)
+    T !== Float64 && backend === nothing && return nothing
     x = base.x ./ base.tau
     s = base.s ./ base.tau
     y = base.y ./ base.tau
@@ -122,7 +233,9 @@ function _product_hsd_refined_optimal_result!(
         if base.n == 0
             _product_hsd_refinement_maxabs(primal_residual) <= tol || return nothing
         else
-            x .+= refinement_A \ (-primal_residual)
+            _product_hsd_apply_primal_refinement!(
+                x, A, refinement_A, primal_residual, backend,
+            ) || return nothing
         end
 
         # Near the x=0 exposed face of K_exp, the exact boundary relation is
@@ -151,12 +264,18 @@ function _product_hsd_refined_optimal_result!(
                 _product_hsd_refinement_maxabs(primal_residual) <= tol ||
                     return nothing
             else
-                x .+= refinement_A \ (-primal_residual)
+                _product_hsd_apply_primal_refinement!(
+                    x, A, Matrix{T}(A), primal_residual, backend,
+                ) || return nothing
             end
         end
 
         dual_residual = transpose(A) * y + canonical.c
         gap = dot(canonical.c, x) + dot(canonical.b, y)
+        dual_dense_A = T === Float64 ? refinement_A : Matrix{T}(A)
+        _product_hsd_apply_dual_refinement!(
+            y, A, dual_dense_A, canonical.b, dual_residual, gap, backend,
+        ) || return nothing
         affine_dual = Matrix{T}(undef, base.n + 1, base.m)
         @inbounds for column in 1:base.m
             for row in 1:base.n
@@ -164,12 +283,6 @@ function _product_hsd_refined_optimal_result!(
             end
             affine_dual[end, column] = canonical.b[column]
         end
-        rhs = Vector{T}(undef, base.n + 1)
-        @inbounds for row in 1:base.n
-            rhs[row] = -dual_residual[row]
-        end
-        rhs[end] = -gap
-        y .+= affine_dual \ rhs
 
         # For K_exp^*, L_E(u,v,w)=(u-v,-u,w). When the u coordinate is
         # structurally absent from A' and b', replacing u by v preserves both
