@@ -219,7 +219,7 @@ flowchart TD
 | **Phase 3** | 稀疏增广 KKT 路由收敛 | 一般 Float64 稀疏等式通过显式 `:sparse_augmented` 路由进入 CHOLMOD symmetric core；计划/执行/存储/provider 收据一致 | **公共 E2E 已打通；大规模精化继续验证** |
 | **Phase 4** | 非对称锥高阶校正 | Exp/Power 的三阶 contraction 已由 `_runtime_ns_corrector_shift!` 调用 `try_nonsymmetric_higher_correction!` 并接入统一 corrector | **已完成并由现有 EXP/Power/mixed 测试覆盖** |
 | **Phase 5** | 历史冗余代码清理归档 | 活跃规划归并为 `HANDOVER.md`；过时计划从工作树删除、历史仍由 Git 保存 | **已完成** |
-| **Phase 6** | 全量基准验证与发版验收 | 运行 10/10 物理/通用综合基准，输出正式发布报告 | **待推进** |
+| **Phase 6** | 全量基准验证与发版验收 | schema-v9 代表矩阵已覆盖 LP/病态LP/SOCP/RSOC/SDP/EXP/Power/mixed；N14 与全精度矩阵继续 | **代表矩阵 8/8 通过，N14 待新 sysimage 收据** |
 
 ### 5.2 下一步核心待办（P3~P6）
 
@@ -230,8 +230,8 @@ flowchart TD
    - `_product_hsd_corrector_shift!` 对含 Exp/Power 的产品调用 runtime `corrector_shift!`；`_runtime_ns_corrector_shift!` 已调用 `try_nonsymmetric_higher_correction!`。
    - 后续只保留有独立证书且稳定中位数提升至少 2% 的优化。
 3. **执行 Phase 6 最终验收**：
-   - 运行全量多精度基准矩阵和 fresh-process 三样本性能活动。
-   - 收集 N14 SOCP/2×2 SDP 的原坐标证书、峰值 RSS 和 sysimage/route 收据。
+   - 已完成：Float64 schema-v9 fresh-process 代表矩阵，8 个家族均为一轮排除 warmup + 3 个不同 PID 的测量进程，目标、状态和原坐标证书全通过；见 `docs/evidence/V062_FRESH_PROCESS_20260903.md`。
+   - 待完成：全量多精度矩阵，以及 N14 SOCP/2×2 SDP 的原坐标证书、峰值 RSS和新 sysimage/route 收据。
 
 ---
 
