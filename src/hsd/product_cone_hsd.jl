@@ -3596,7 +3596,7 @@ Base.@noinline function product_hsd_step!(state::ProductConeHSDState{T,R,RT,NS,C
     # P7 minimal hook: record that one candidate direction passed the route
     # acceptance gate.  Diagnostic metadata only; the fused workspace is
     # optional and nothing here promotes a status or changes a tolerance.
-    product_hsd_record_route_acceptance!(state.residual_hook)
+    state.residual_hook.metadata.route_acceptance_count += 1
     t0 = time_ns()
     _product_hsd_residual!(state)
     timings.residual_seconds += Float64(time_ns() - t0) * 1.0e-9
