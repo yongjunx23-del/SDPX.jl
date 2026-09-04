@@ -527,6 +527,53 @@ end
     end
 end
 
+@testset "Iteration-limit diagnostics retain no uncertified point" begin
+    model = SDPX.Model(Float64)
+    x = SDPX.variable!(model, :x, 2; domain=SDPX.Reals())
+    SDPX.constraint!(
+        model, :unit, Any[1.0, x[1] - 1.0, x[2]], SDPX.LorentzCone(),
+    )
+    SDPX.objective!(model, SDPX.Maximize(), x[1] + 0.5)
+    settings = SDPX.Settings(
+        Float64;
+        verbosity=0,
+        limits=SDPX.Limits(iterations=1, time=60.0, threads=1),
+    )
+    outputs = SDPX.Outputs(
+        :all, :all, :all;
+        objectives=true,
+        certificate=:summary,
+        diagnostics=:full,
+        history=false,
+        trace=false,
+    )
+    result = SDPX.optimize!(model; settings, outputs)
+    @test SDPX.status(result) === :iteration_limit
+    @test result.iterations == 1
+    terminal = SDPX.diagnostics(result).termination
+    @test terminal.reason === :iteration_limit
+    @test terminal.stage === :native_hsd
+    @test terminal.product_status === :ProductHSDMaxIterations
+    @test terminal.last_step === :HSDStepOK
+    @test terminal.terminal_alpha == 0
+    @test terminal.backtracking >= 0
+    @test all(isfinite, (
+        terminal.tau,
+        terminal.kappa,
+        terminal.mu,
+        terminal.p_residual,
+        terminal.d_residual,
+        terminal.gap_residual,
+        terminal.normalized_residual,
+        terminal.step_size,
+    ))
+    @test !SDPX.certificate(result).available
+    @test !SDPX.certificate(result).valid
+    @test SDPX.certificate(result).reason === :iteration_limit
+    @test all(iszero, SDPX.value(result))
+    @test all(iszero, SDPX.dual(result))
+end
+
 @testset "Sparse augmented public route" begin
     model = SDPX.Model(Float64)
     x = SDPX.variable!(model, :x, 2; domain=SDPX.Reals())

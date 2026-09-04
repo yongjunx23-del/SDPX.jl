@@ -701,6 +701,7 @@ function _native_hsd_diagnostics(
     executed_kkt_route::Union{Nothing,Symbol}=nothing,
     executed_kkt_attempts::Tuple{Vararg{Symbol}}=(),
     state::Union{Nothing,ProductConeHSDState}=nothing,
+    product::Union{Nothing,ProductHSDSolveResult{T}}=nothing,
     core_estimate_bytes::Integer=0,
     core_dimension::Integer=0,
 ) where {T<:AbstractFloat}
@@ -821,11 +822,46 @@ function _native_hsd_diagnostics(
     termination_stage = reduction.status !== HSDEqualityReady ? :equality_reduction :
                         status in (Optimal, PrimalInfeasible, DualInfeasible) ?
                         :original_coordinate_certification : :native_hsd
+    terminal_base = state === nothing ? nothing : state.base
+    terminal_tau = terminal_base === nothing ?
+        (product === nothing ? T(NaN) : product.tau) : terminal_base.tau
+    terminal_kappa = terminal_base === nothing ?
+        (product === nothing ? T(NaN) : product.kappa) : terminal_base.kappa
+    terminal_mu = terminal_base === nothing ?
+        (product === nothing ? T(NaN) : product.mu) : terminal_base.mu
+    p_residual = terminal_base === nothing ? T(Inf) :
+                 _hsd_maxinf(terminal_base.rP)
+    d_residual = terminal_base === nothing ? T(Inf) :
+                 _hsd_maxinf(terminal_base.rD)
+    gap_residual = terminal_base === nothing ? T(Inf) :
+                   abs(terminal_base.rG)
+    normalized_residual = product === nothing ? T(Inf) :
+                          product.normalized_residual
+    product_status = product === nothing ? :none :
+                     Symbol(string(product.status))
+    last_step = product === nothing ? :none : Symbol(string(product.last_step))
+    terminal_alpha = product === nothing ? T(NaN) : product.terminal_alpha
+    step_size = terminal_base === nothing ? T(NaN) :
+                terminal_base.record.step_size
+    backtracking = terminal_base === nothing ? -1 :
+                   terminal_base.record.backtracking
     termination = (
         reason=reason,
         stage=termination_stage,
         iterations=iterations,
         factorizations=factorizations,
+        product_status,
+        tau=terminal_tau,
+        kappa=terminal_kappa,
+        mu=terminal_mu,
+        p_residual,
+        d_residual,
+        gap_residual,
+        normalized_residual,
+        last_step,
+        terminal_alpha,
+        step_size,
+        backtracking,
     )
     selected = (
         solver=:native_hsd,
@@ -958,6 +994,7 @@ function _native_hsd_core_result(
     executed_kkt_route::Union{Nothing,Symbol}=nothing,
     executed_kkt_attempts::Tuple{Vararg{Symbol}}=(),
     state::Union{Nothing,ProductConeHSDState}=nothing,
+    product::Union{Nothing,ProductHSDSolveResult{T}}=nothing,
     core_estimate_bytes::Integer=0,
     core_dimension::Integer=0,
 ) where {T<:AbstractFloat}
@@ -974,6 +1011,7 @@ function _native_hsd_core_result(
         executed_kkt_route,
         executed_kkt_attempts,
         state,
+        product,
         core_estimate_bytes,
         core_dimension,
     )
@@ -1488,6 +1526,7 @@ function _public_native_hsd_core(
         executed_kkt_route=state.kkt_route,
         executed_kkt_attempts=Tuple(state.kkt_route_attempts),
         state=settings.kkt_route === :bordered ? state : nothing,
+        product=product,
         core_estimate_bytes=core_estimate_bytes,
         core_dimension=core_dimension,
     )
