@@ -636,9 +636,10 @@ Base.@noinline function product_hsd_record_route_acceptance!(
 ) where {T}
     metadata = hook.metadata
     metadata.route_acceptance_count += 1
-    if hook.workspace !== nothing && metadata.evaluation_count > 0
-        metadata.last_fused_max_residual =
-            fused_max_newton_residual(hook.workspace)
-    end
+    # `evaluate_direction!` already stores `last_fused_max_residual` when an
+    # expanded or sparse route evaluates a candidate. Recomputing it here is
+    # redundant, and forced the compact bordered route to JIT the entire fused
+    # residual reduction on its first accepted N14 step even though that route
+    # never evaluates the workspace.
     return metadata
 end
