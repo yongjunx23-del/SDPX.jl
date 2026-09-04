@@ -572,6 +572,22 @@ end
     @test SDPX.certificate(result).reason === :iteration_limit
     @test all(iszero, SDPX.value(result))
     @test all(iszero, SDPX.dual(result))
+
+    equilibrated = SDPX.optimize!(
+        model;
+        settings=SDPX.Settings(
+            Float64; verbosity=0, equilibration=:ruiz,
+            limits=SDPX.Limits(iterations=100, time=60.0, threads=1),
+        ),
+        outputs,
+    )
+    @test SDPX.status(equilibrated) === :optimal
+    @test SDPX.certificate(equilibrated).valid
+    @test SDPX.certificate(equilibrated).method === :original_coordinates
+    selected = SDPX.diagnostics(equilibrated).selected_algorithms
+    @test selected.equilibration === :ruiz
+    @test selected.planned_scaling === :ruiz
+    @test selected.executed_scaling === :ruiz
 end
 
 @testset "Sparse augmented public route" begin

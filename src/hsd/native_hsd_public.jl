@@ -702,6 +702,7 @@ function _native_hsd_diagnostics(
     executed_kkt_attempts::Tuple{Vararg{Symbol}}=(),
     state::Union{Nothing,ProductConeHSDState}=nothing,
     product::Union{Nothing,ProductHSDSolveResult{T}}=nothing,
+    equilibration::Symbol=:off,
     core_estimate_bytes::Integer=0,
     core_dimension::Integer=0,
 ) where {T<:AbstractFloat}
@@ -893,8 +894,9 @@ function _native_hsd_diagnostics(
         formulation=planned_formulation,
         route=did_execute ? executed_kkt.route : planned_kkt.route,
         execution_path,
-        planned_scaling=:none,
-        executed_scaling=:none,
+        equilibration,
+        planned_scaling=equilibration,
+        executed_scaling=did_execute ? equilibration : :none,
         planned_backend,
         executed_backend,
         backend=did_execute ? executed_backend : planned_backend,
@@ -995,6 +997,7 @@ function _native_hsd_core_result(
     executed_kkt_attempts::Tuple{Vararg{Symbol}}=(),
     state::Union{Nothing,ProductConeHSDState}=nothing,
     product::Union{Nothing,ProductHSDSolveResult{T}}=nothing,
+    equilibration::Symbol=:off,
     core_estimate_bytes::Integer=0,
     core_dimension::Integer=0,
 ) where {T<:AbstractFloat}
@@ -1012,6 +1015,7 @@ function _native_hsd_core_result(
         executed_kkt_attempts,
         state,
         product,
+        equilibration,
         core_estimate_bytes,
         core_dimension,
     )
@@ -1527,6 +1531,7 @@ function _public_native_hsd_core(
         executed_kkt_attempts=Tuple(state.kkt_route_attempts),
         state=settings.kkt_route === :bordered ? state : nothing,
         product=product,
+        equilibration=equilibration_map === nothing ? :off : :ruiz,
         core_estimate_bytes=core_estimate_bytes,
         core_dimension=core_dimension,
     )
