@@ -325,10 +325,10 @@ function _runtime_make_orthant(::Type{T}, block) where {T}
     dim = block.dimension
     cone = SymmetricCones.NonnegativeCone(dim)
     state = SymmetricCones.OrthantNTScaling{T}(dim)
-    z = alloc_zeros(T, dim)
     return OrthantRuntimeBlock{T}(
         block.offset, dim, cone, state,
-        copy(z), copy(z), copy(z), copy(z), copy(z), Ref{T}(zero(T)),
+        alloc_zeros(T, dim), alloc_zeros(T, dim), alloc_zeros(T, dim),
+        alloc_zeros(T, dim), alloc_zeros(T, dim), Ref{T}(zero(T)),
     )
 end
 
@@ -337,10 +337,10 @@ function _runtime_make_soc(::Type{T}, block) where {T}
     dim >= 2 || throw(ArgumentError("SOC block dimension must be at least 2"))
     cone = SymmetricCones.SOCone(dim)
     state = SymmetricCones.SOCNTScaling{T}(dim)
-    z = alloc_zeros(T, dim)
     return SOCRuntimeBlock{T}(
         block.offset, dim, cone, state,
-        copy(z), copy(z), copy(z), copy(z), copy(z), Ref{T}(zero(T)),
+        alloc_zeros(T, dim), alloc_zeros(T, dim), alloc_zeros(T, dim),
+        alloc_zeros(T, dim), alloc_zeros(T, dim), Ref{T}(zero(T)),
     )
 end
 
@@ -352,10 +352,11 @@ function _runtime_make_psd(::Type{T}, block) where {T}
     ))
     cone = SymmetricCones.PSDTriangleCone{T}(n)
     state = SymmetricCones.PSDNTScaling{T}(n)
-    z = alloc_zeros(T, len)
     return PSDRuntimeBlock{T}(
         block.offset, n, len, cone, state,
-        copy(z), copy(z), copy(z), copy(z), copy(z), copy(z), copy(z), Ref{T}(zero(T)),
+        alloc_zeros(T, len), alloc_zeros(T, len), alloc_zeros(T, len),
+        alloc_zeros(T, len), alloc_zeros(T, len), alloc_zeros(T, len),
+        alloc_zeros(T, len), Ref{T}(zero(T)),
     )
 end
 
