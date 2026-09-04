@@ -3465,7 +3465,7 @@ function _product_hsd_trial_residual!(state::ProductConeHSDState{T}) where {T}
     return _hsd_trial_residual!(state.base)
 end
 
-function product_hsd_step!(state::ProductConeHSDState{T,R,RT,NS,CW,SB,EW,SW,SCW}) where {T,R,RT,NS,CW,SB,EW,SW,SCW}
+Base.@noinline function product_hsd_step!(state::ProductConeHSDState{T,R,RT,NS,CW,SB,EW,SW,SCW}) where {T,R,RT,NS,CW,SB,EW,SW,SCW}
     base = state.base
     base.workspace.rank_ambiguous && return HSDStepDirectionFailed
     base.workspace.rank_incompatible && return HSDStepDirectionFailed

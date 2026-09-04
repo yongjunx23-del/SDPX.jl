@@ -631,7 +631,7 @@ candidate direction passed the route acceptance gate and snapshots the fused
 residual norm.  Purely diagnostic; it never influences a numeric gate, a
 route decision, or a certificate.
 """
-function product_hsd_record_route_acceptance!(
+Base.@noinline function product_hsd_record_route_acceptance!(
     hook::ProductHSDResidualHook{T},
 ) where {T}
     metadata = hook.metadata
