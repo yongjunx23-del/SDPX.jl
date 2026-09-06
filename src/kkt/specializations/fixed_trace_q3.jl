@@ -831,8 +831,8 @@ end
 # with the ordinary symmetric core.
 # ---------------------------------------------------------------------------
 
-mutable struct FixedTraceQ3CoreWorkspace{T,S,C,E}
-    plan
+mutable struct FixedTraceQ3CoreWorkspace{T,S,C,E,P}
+    plan::P
     equality::E
     system::S
     cache::C
@@ -957,7 +957,7 @@ function prepare_fixed_trace_q3_core_state(
     )
     blocks = size(plan.reduction.active_ids, 2)
     return FixedTraceQ3CoreWorkspace{
-        T,typeof(system),typeof(cache),typeof(equality)
+        T,typeof(system),typeof(cache),typeof(equality),typeof(plan)
     }(
         plan, equality, system, cache, alloc_zeros(T, 3, 3, blocks),
         alloc_zeros(T, 3, blocks), alloc_zeros(T, 3, blocks),

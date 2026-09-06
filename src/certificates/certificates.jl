@@ -329,10 +329,16 @@ function in_canonical_cone(canonical::CanonicalConicProgram, v;
     tol = convert(T, tol)
     _valid_certificate_tolerance(tol) || return false
     _all_finite(v) || return false
+    return _in_canonical_blocks(layout_blocks(canonical.cone_layout), v, tol, dual)
+end
+
+# CanonicalConicProgram deliberately erases the layout storage type. Dispatch
+# once on that storage, rather than dynamically boxing each block and view.
+Base.@noinline function _in_canonical_blocks(blocks, v, tol, dual::Bool)
     # Certificate checks stay serial: they short-circuit on the first invalid
     # block, allocate no task/atomic state, and avoid compiling a second
     # threaded copy of every cone-membership kernel for each arithmetic type.
-    for block in layout_blocks(canonical.cone_layout)
+    for block in blocks
         off = block_offset(block); len = block_length(block)
         _block_in_cone(block, view(v, off:(off + len - 1)), tol, dual) || return false
     end
