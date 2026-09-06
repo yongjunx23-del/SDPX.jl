@@ -65,13 +65,15 @@ end
 # sr = −A v (m-vector)
 function _at_negmul(A::SparseMatrixCSC{T}, v::AbstractVector) where {T}
     m = size(A, 1)
-    out = zeros(T, m)
+    out = alloc_zeros(T, m)
     _at_negmul!(out, A, v)
     return out
 end
 
 function _at_negmul!(out::AbstractVector{T}, A::SparseMatrixCSC{T}, v::AbstractVector) where {T}
-    fill!(out, zero(T))
+    # `out` has independently owned, initialized entries. A failed ray check
+    # returns this scratch to Newton, which writes its coordinates in place.
+    zero_owned!(out)
     n = size(A, 2)
     vals = nonzeros(A)
     rows = rowvals(A)
