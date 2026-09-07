@@ -116,7 +116,59 @@ end
     return maximum(row_sums; init=zero(T))
 end
 
-function _cert_residual!(state::HSDState{T}) where {T}
+# Certificate-only normalized point. Problem data are borrowed read-only;
+# all iterate and verifier scratch vectors are independently owned. No factor,
+# Newton direction, runtime cone state or route workspace is copied.
+mutable struct _OptimalityCandidate{T<:AbstractFloat}
+    A::SparseMatrixCSC{T,Int}
+    b::Vector{T}
+    c::Vector{T}
+    n::Int
+    m::Int
+    nu::Int
+    x::Vector{T}
+    y::Vector{T}
+    s::Vector{T}
+    tau::T
+    kappa::T
+    rP::Vector{T}
+    rD::Vector{T}
+    rG::T
+    complementarity::T
+    mu::T
+    xt::Vector{T}
+    yt::Vector{T}
+    st::Vector{T}
+end
+
+_owned_certificate_vector(v::AbstractVector{T}) where {T} =
+    copy_owned!(alloc_zeros(T,length(v)),v)
+
+function _normalized_optimality_candidate(base::HSDState{T}) where {T<:AbstractFloat}
+    isfinite(base.tau) && base.tau > zero(T) &&
+        isfinite(base.kappa) && base.kappa >= zero(T) || return nothing
+    n,m=base.n,base.m
+    size(base.A)==(m,n) && length(base.b)==m && length(base.c)==n &&
+        length(base.x)==n && length(base.s)==m && length(base.y)==m || return nothing
+    _all_finite(base.x) && _all_finite(base.s) && _all_finite(base.y) || return nothing
+    scale=inv(base.tau)
+    multiply=isfinite(scale)
+    x=alloc_zeros(T,n); s=alloc_zeros(T,m); y=alloc_zeros(T,m)
+    for (out,input) in ((x,base.x),(s,base.s),(y,base.y))
+        for i in eachindex(out)
+            value=multiply ? input[i]*scale : input[i]/base.tau
+            isfinite(value) || return nothing
+            _store_owned_scalar!(out,i,value)
+        end
+    end
+    kappa=multiply ? base.kappa*scale : base.kappa/base.tau
+    isfinite(kappa) || return nothing
+    return _OptimalityCandidate{T}(base.A,base.b,base.c,n,m,base.nu,
+        x,y,s,one(T),kappa,alloc_zeros(T,m),alloc_zeros(T,n),
+        zero(T),zero(T),zero(T),alloc_zeros(T,n),alloc_zeros(T,m),alloc_zeros(T,m))
+end
+
+function _cert_residual!(state::Union{HSDState{T},_OptimalityCandidate{T}}) where {T}
     A, x, y, svec = state.A, state.x, state.y, state.s
     b, c, tau, kappa = state.b, state.c, state.tau, state.kappa
     m, n = state.m, state.n
@@ -142,7 +194,7 @@ function _cert_residual!(state::HSDState{T}) where {T}
     return nothing
 end
 
-function _cert_normalized_residual(state::HSDState{T}) where {T}
+function _cert_normalized_residual(state::Union{HSDState{T},_OptimalityCandidate{T}}) where {T}
     p = zero(T)
     @inbounds for k in 1:state.m
         v = state.rP[k]
@@ -361,7 +413,7 @@ On success, writes the original-coordinate recoveries `x_orig = x/τ`,
 and returns `true`.
 """
 function verify_optimal!(
-    canonical::CanonicalConicProgram, state::HSDState,
+    canonical::CanonicalConicProgram, state::Union{HSDState,_OptimalityCandidate},
     x_orig, s_orig, y_orig; tol=nothing,
 )
     T = eltype(state.x)
