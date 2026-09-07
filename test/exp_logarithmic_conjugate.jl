@@ -44,3 +44,23 @@ isdefined(@__MODULE__,:StandardConicMath) || include(joinpath(@__DIR__,"..","val
         end
     end
 end
+
+@testset "Fenchel replay work is homogeneous and finite" begin
+    setprecision(BigFloat, 256) do
+        p = BigFloat[-1, 1, 1]
+        d = .-collect(SDPX.exp_barrier_gradient(p...))
+        scale = BigFloat("1e40")
+        out = Vector{BigFloat}(undef, 3)
+        result = SDPX.exp_logarithmic_conjugate!(out, d / scale)
+        @test norm(out - scale .* p, Inf) <=
+              BigFloat(20000) * eps(BigFloat) * norm(scale .* p, Inf)
+        @test result.root ==
+              SDPX.exp_logarithmic_conjugate!(Vector{BigFloat}(undef, 3), d).root
+
+        untouched = fill(BigFloat(-1), 3)
+        @test_throws DomainError SDPX.exp_logarithmic_conjugate!(
+            untouched, Float64[-1e308, 0, 1e308],
+        )
+        @test untouched == fill(BigFloat(-1), 3)
+    end
+end

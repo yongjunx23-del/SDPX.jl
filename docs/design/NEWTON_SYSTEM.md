@@ -1,5 +1,10 @@
 # Semantic HSD Newton System
 
+> Historical legacy Newton convention. Its gap-row signs are superseded in
+> the experimental standard-v1 engine by
+> [STANDARD_CONIC_MATH_V1.md](STANDARD_CONIC_MATH_V1.md). Old receipts remain
+> tied to their original source commits.
+
 This document freezes the sign and ownership contract implemented at source SHA
 `50dff5681f1e89cb7ac52f84288cb50d986a5396`. Numerical routes may eliminate
 variables or regularize a factorization, but an accepted direction is a solution

@@ -1,10 +1,19 @@
 # Standard conic mathematics — version1
 
 This is a mathematical contract, not a handoff or a production qualification.
-The old public HSD/Exp algorithms have **not** been silently switched. Their
-historical receipts and CSDR fingerprint remain versioned legacy evidence.
-The new exponential primitives are internal migration targets; the bounded
-symmetric reference is only a validation oracle.
+The logarithmic Exp primitives and their native conjugate/scaling/corrector
+consumers are integrated; the end-to-end HSD and production qualification gates
+remain pending. Historical HSD receipts and the CSDR fingerprint remain
+versioned legacy evidence. The bounded symmetric reference is only a validation
+oracle.
+
+In this experimental development branch, the native engine now executes the
+standard-v1 equations and reports `hsd_formulation_version=:standard_hsd_v1`
+in execution diagnostics. There is no runtime fallback to the legacy signs.
+`:auto` still selects the native engine; the algorithm change is versioned by
+this explicit formulation tag and the source commit. This is not release
+promotion. Legacy source and the101-iteration CSDR receipt remain pinned at
+`7e96a88842cb376d0ecb07b02c8551896d0306bd` (PBS211101 passed).
 
 ## Standard embedding and residual homotopy
 
@@ -148,15 +157,16 @@ finite-difference dual gradient/Hessian/third derivatives at BigFloat256/512,
 Float64x4 compatibility, invalid domains and failure-atomic output.
 This is a mathematical-kernel qualification, not an all-dynamic-range result.
 
-**Still required before switching the public Exp path:** integrate the derived
-conjugate with initialization, scaling, corrector and status propagation.
-A cone isomorphism alone must not replace this Fenchel derivation.
+**Still required before declaring the public Exp path production-qualified:**
+complete bounded end-to-end HSD qualification, including initialization, scaling,
+corrector, status propagation, and original-coordinate certificates. A cone
+isomorphism alone must not replace this Fenchel derivation.
 
 ## Remaining integration gates
 
-- Migrate every production HSD residual/closure/Newton/line-search/certificate
-  consumer together, including nonsymmetric and specialized routes. A one-line
-  scalar sign change is not sufficient.
+- Validate the migrated HSD residual/closure/Newton/line-search/certificate
+  consumers together, including nonsymmetric and specialized routes. The
+  production patch changes their coupled equations, not only a residual sign.
 - Keep original-coordinate primal/dual/objective and ray checks authoritative.
 - Preserve and diagnose the reference PSD NT rejections; do not increase
   arithmetic tolerances to make them disappear.

@@ -1347,7 +1347,8 @@ function _try_update_nonsymmetric_scaling!(
     barrier_ok = try
         _ns_scaling_primal_gradient_hessian!(workspace, tag)
     catch exception
-        exception isa ArgumentError || rethrow(exception)
+        (exception isa ArgumentError || exception isa DomainError) ||
+            rethrow(exception)
         false
     end
     if !(barrier_ok && _ns_scaling_finite_vector(workspace.dual_shadow) &&
