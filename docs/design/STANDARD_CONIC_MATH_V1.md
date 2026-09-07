@@ -164,6 +164,10 @@ isomorphism alone must not replace this Fenchel derivation.
 
 ## Remaining integration gates
 
+The complete implementation and high-precision ecosystem roadmap is maintained
+in [SCIENTIFIC_CORE_ROADMAP.md](SCIENTIFIC_CORE_ROADMAP.md). Its performance work
+does not supersede the mathematical and certification gates below.
+
 - Validate the migrated HSD residual/closure/Newton/line-search/certificate
   consumers together, including nonsymmetric and specialized routes. The
   production patch changes their coupled equations, not only a residual sign.
