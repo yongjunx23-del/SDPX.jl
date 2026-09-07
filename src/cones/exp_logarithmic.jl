@@ -84,6 +84,92 @@ function exp_logarithmic_third!(out,s,h,v)
     return out
 end
 
+# Bound all reconstruction effects after converting them to gradient units.
+# Coordinate and margin errors are used only as intermediate primal work terms;
+# every returned allowance has degree -1.  The half-margin guards make the
+# first-order perturbation bounds finite instead of accepting an unresolved
+# reciprocal/logarithm.
+@inline function _exp_logarithmic_replay_allowances(
+    u::T, v::T, w::T, rho::T, y::T, z::T, l::T, x::T, psi::T,
+    g, root_residual::T,
+) where {T}
+    e = eps(one(T))
+    n = T(64) * e
+    n < one(T) || throw(DomainError((u,v,w),
+        "nonfinite Fenchel replay allowance factor"))
+    gamma = n / (one(T) - n)
+
+    l0, l0_arithmetic, l0_kernel =
+        _nonsymmetric_positive_log_ratio_terms(w, -u)
+    vu = v / u
+    centered = one(T) - vu
+    D = centered + l0
+    log_rho = _nonsymmetric_stable_log1p(rho)
+    root_arithmetic = abs(vu) + one(T) + abs(centered) +
+                      abs(rho) + abs(D) + abs(log_rho)
+    root_kernel = l0_kernel + abs(rho) + abs(log_rho)
+    root_work = l0_arithmetic + root_arithmetic + root_kernel
+    derivative = one(T) + inv(one(T) + rho)
+    root_roundoff = gamma * root_work
+    root_error = (abs(root_residual) + root_roundoff) / derivative
+
+    iy = inv(y)
+    iz = inv(z)
+    irho = inv(rho)
+    one_plus_rho = one(T) + rho
+    y_error = gamma * abs(y) + abs(y) * irho * root_error
+    z_error = gamma * abs(z) + abs(z) *
+              (inv(one_plus_rho) + irho) * root_error
+    all(isfinite, (l0, D, root_work, derivative, root_error,
+                   iy, iz, irho, one_plus_rho, y_error, z_error)) ||
+        throw(DomainError((u,v,w), "nonfinite Fenchel reconstruction bound"))
+    y_error <= abs(y) / (one(T) + one(T)) &&
+        z_error <= abs(z) / (one(T) + one(T)) ||
+        throw(DomainError((u,v,w), "unresolved Fenchel coordinate error"))
+
+    # The common log-ratio replay sees both constructed coordinates.  The
+    # factors two are the standard finite log perturbation bounds under the
+    # half-coordinate guards above.
+    l_arithmetic, l_kernel =
+        _nonsymmetric_positive_log_ratio_terms(z, y)[2:3]
+    l_error = gamma * (l_arithmetic + l_kernel) +
+              (y_error * iy + z_error * iz) *
+              (one(T) + one(T))
+    x_error = gamma * (abs(y * l) + abs(inv(u)) + abs(x)) +
+              abs(l) * y_error + abs(y) * l_error
+    psi_work = abs(y * l) + abs(x) + abs(psi)
+    psi_error = gamma * psi_work + abs(l) * y_error +
+                abs(y) * l_error + x_error
+    all(isfinite, (l_arithmetic, l_kernel, l_error, x_error,
+                   psi_work, psi_error)) ||
+        throw(DomainError((u,v,w), "nonfinite Fenchel margin bound"))
+    abs(psi) > zero(T) && psi_error <= abs(psi) / (one(T) + one(T)) ||
+        throw(DomainError((u,v,w), "unresolved Fenchel margin error"))
+
+    ip = inv(psi)
+    p2 = ip * ip
+    direct = (
+        abs(g[1]) + abs(u),
+        abs((l-one(T)) * ip) + iy + abs(v),
+        abs((y/z) * ip) + iz + abs(w),
+    )
+    margin_gradient = (one(T) + one(T)) * psi_error * p2
+    ratio_error = iz * y_error + abs(y) * iz * iz * z_error
+    coordinate_gradient = (
+        margin_gradient,
+        abs(ip) * l_error + abs(l-one(T)) * margin_gradient +
+            (one(T) + one(T)) * iy * iy * y_error,
+        abs(y/z) * margin_gradient +
+            (one(T) + one(T)) * abs(ip) * ratio_error +
+            (one(T) + one(T)) * iz * iz * z_error,
+    )
+    allowances = ntuple(i -> gamma * direct[i] + coordinate_gradient[i], 3)
+    all(isfinite, (ip, p2, direct..., margin_gradient,
+                   coordinate_gradient..., allowances...)) ||
+        throw(DomainError((u,v,w), "nonfinite Fenchel gradient bound"))
+    return allowances
+end
+
 # The actual Fenchel inverse, not a dual-cone isomorphism:
 # for d=(u,v,w)=-∇F(s), rho + log1p(rho) = 1-v/u+log(w/(-u)).
 # The derivative lies in (1,2), and the unique positive root lies in [D/2,D].
@@ -122,21 +208,16 @@ function exp_logarithmic_conjugate!(out,d;max_iterations::Int=64)
     yy,zz,ll,p=_exp_logarithmic_terms(values)
     g=_exp_logarithmic_gradient_values(values)
     # Replay errors are measured in gradient units.  The primal margin
-    # components (x, y*log(z/y), psi) have different homogeneity and must not
-    # be added to these allowances.  Each work term below has the same
-    # degree -1 scaling as its corresponding gradient component.
-    work=(abs(g[1])+abs(u),
-          abs((ll-one(T))/p)+inv(yy)+abs(v),
-          abs((yy/zz)/p)+inv(zz)+abs(w))
-    replay_factor=T(64)*eps(one(T))
-    isfinite(replay_factor) || throw(DomainError(d,
-        "nonfinite Fenchel replay allowance factor"))
+    # components (x, y*log(z/y), psi) have different homogeneity and are
+    # propagated through their derivatives before entering the allowances;
+    # they are never added directly.  The helper returns only degree -1 terms.
+    allowances = _exp_logarithmic_replay_allowances(
+        u, v, w, rho, yy, zz, ll, values[1], p, g, residual,
+    )
     for i in 1:3
-        isfinite(work[i]) && work[i] >= zero(T) || throw(DomainError(d,
-            "nonfinite Fenchel inverse gradient work"))
-        allowance=replay_factor*work[i]
-        isfinite(allowance) || throw(DomainError(d,
-            "nonfinite Fenchel inverse gradient allowance"))
+        allowance=allowances[i]
+        isfinite(allowance) && allowance >= zero(T) ||
+            throw(DomainError(d,"nonfinite Fenchel inverse gradient allowance"))
         abs(g[i]+d[i])<=allowance ||
             throw(DomainError(d,"Fenchel inverse gradient replay failed"))
     end

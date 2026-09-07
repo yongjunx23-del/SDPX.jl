@@ -64,3 +64,49 @@ end
         @test untouched == fill(BigFloat(-1), 3)
     end
 end
+
+@testset "Fenchel replay allowances are gradient-homogeneous and bounded" begin
+    setprecision(BigFloat, 256) do
+        T = BigFloat
+        primal = T[-1, 1, 1]
+        gradient = SDPX._exp_logarithmic_gradient_values(primal)
+        dual = .-collect(gradient)
+        shadow = Vector{T}(undef, 3)
+        result = SDPX.exp_logarithmic_conjugate!(shadow, dual)
+        y, z, l, psi = SDPX._exp_logarithmic_terms(shadow)
+
+        replay_allowances = (root_residual; rho_value=result.root) ->
+            SDPX._exp_logarithmic_replay_allowances(
+                dual[1], dual[2], dual[3], rho_value, y, z, l,
+                shadow[1], psi, gradient, root_residual,
+            )
+        base = replay_allowances(result.root_residual)
+        @test all(isfinite, base)
+        @test all(value -> value >= zero(T), base)
+
+        # The helper returns gradient-unit bounds, so every component must
+        # scale as lambda^-1 when primal and dual coordinates are scaled
+        # inversely.  Call the helper directly rather than testing only the
+        # public inverse, which could mask a defect in one allowance term.
+        for lambda in (T("1e-20"), T("1e-8"), T("1e8"), T("1e20"))
+            scaled = SDPX._exp_logarithmic_replay_allowances(
+                dual[1] / lambda, dual[2] / lambda, dual[3] / lambda,
+                result.root, y * lambda, z * lambda, l,
+                shadow[1] * lambda, psi * lambda,
+                ntuple(i -> gradient[i] / lambda, 3),
+                result.root_residual,
+            )
+            @test all(isfinite, scaled)
+            @test all(i -> isapprox(scaled[i] * lambda, base[i];
+                                    rtol=T("1e-35"), atol=T("1e-100")), 1:3)
+        end
+
+        # A finite but excessive root error is unresolved by the half-coordinate
+        # guard; a nonfinite root error must be rejected before any bound is
+        # accepted as a usable allowance.
+        @test_throws DomainError replay_allowances(T(10))
+        @test_throws DomainError replay_allowances(T(Inf))
+        @test_throws DomainError replay_allowances(result.root_residual;
+                                                   rho_value=T(Inf))
+    end
+end

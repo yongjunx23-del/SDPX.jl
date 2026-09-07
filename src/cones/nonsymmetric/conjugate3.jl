@@ -134,22 +134,25 @@ end
 @inline function _ns_structural_hessian_factor!(
     factor, ::ExpConjugateTag, s1, s2, s3,
 )
-    values = _exp_logarithmic_hessian_values((s1, s2, s3))
-    h11,h12,h13,h22,h23,h33 =
-        values[1],values[2],values[3],values[5],values[6],values[9]
-    h11 > zero(h11) || return false
-    l11 = sqrt(h11)
-    l21 = h12 / l11
-    l31 = h13 / l11
-    p2 = h22 - l21*l21
-    p2 > zero(p2) || return false
-    l22 = sqrt(p2)
-    l32 = (h23 - l31*l21) / l22
-    p3 = h33 - l31*l31 - l32*l32
-    p3 > zero(p3) || return false
-    l33 = sqrt(p3)
-    z = zero(s1)
-    entries = (l11,l21,l31,z,l22,l32,z,z,l33)
+    # This is the analytic Cholesky factor of the logarithmic Exp Hessian.
+    # Writing H=L*L' symbolically and substituting q=y/psi gives
+    #   L11=1/psi, L21=-(l-1)/psi, L31=-q/z,
+    #   L22=sqrt(1+q)/y, L32=-q/(z*sqrt(1+q)),
+    #   L33=sqrt(1+q/(1+q))/z.
+    # It avoids the nearly equal Schur-complement subtractions in a dense
+    # Cholesky, which are precisely the unstable operations at small psi.
+    y, z, l, psi = _exp_logarithmic_terms((s1, s2, s3))
+    q = y / psi
+    one_plus_q = one(q) + q
+    sqrt_one_plus_q = sqrt(one_plus_q)
+    l11 = inv(psi)
+    l21 = -(l - one(l)) * l11
+    l31 = -q / z
+    l22 = sqrt_one_plus_q / y
+    l32 = -q / (z * sqrt_one_plus_q)
+    l33 = sqrt(one(q) + q / one_plus_q) / z
+    entries = (l11, l21, l31, zero(s1), l22, l32, zero(s1), zero(s1), l33)
+    all(isfinite, entries) || return false
     for i in 1:9
         _store_owned_scalar!(factor, i, entries[i])
     end

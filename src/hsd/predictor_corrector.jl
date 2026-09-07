@@ -85,6 +85,49 @@ does not materialise a product-cone matrix or allocate a block view.
     return state.h
 end
 
+@inline function _product_hsd_restore_affine_predictor!(
+    state::ProductConeHSDState{T}, predictor_scalar::T,
+) where {T}
+    _runtime_ns_affine_fallback_reported(state.runtime) || return false
+    base = state.base
+    copy_owned!(base.dx, base.dx_a)
+    copy_owned!(base.dy, base.dy_a)
+    copy_owned!(base.ds, base.ds_a)
+    base.dtau = base.dtau_a
+    base.dkappa = base.dkappa_a
+    fallback_result = state.runtime.last_nonsymmetric
+    affine_shift!(state.runtime, state.h, base.s, base.y)
+    _runtime_ns_restore_affine_fallback_report!(
+        state.runtime, fallback_result,
+    )
+    core = state.symmetric_core
+    if core isa FixedTraceQ3CoreWorkspace{T}
+        _product_hsd_fixed_trace_hkm_linearization!(
+            state, zero(T), false, false,
+        ) || return false
+    elseif core !== nothing
+        cone = core.system.cone
+        cone isa BlockProductConeLinearization{T} || return false
+        copy_owned!(cone.corrector_rhs, state.h)
+    else
+        zero_owned!(base.ax)
+        @inbounds for j in 1:base.n
+            value = base.dx[j]
+            iszero(value) && continue
+            for pointer in nzrange(base.A, j)
+                base.ax[base.A.rowval[pointer]] +=
+                    base.A.nzval[pointer] * value
+            end
+        end
+        apply_Theta!(state.runtime, base.e, base.dy)
+    end
+    restored = _product_hsd_newton_residual_ok(state, predictor_scalar)
+    state.diagnostic = restored ?
+        :corrector_fallback_to_affine_predictor :
+        :corrector_affine_fallback_residual_failed
+    return restored
+end
+
 @inline function _product_hsd_nonsymmetric_scaling(runtime, offset::Int)
     @inbounds for block in runtime.exp
         block.offset == offset && return block.scaling
@@ -414,6 +457,9 @@ function _product_hsd_expanded_direction!(
     sigma = _product_hsd_sigma(state, ratio)
     sigma_mu = sigma * base.mu
     _product_hsd_corrector_shift!(state, sigma_mu)
+    if _runtime_ns_affine_fallback_reported(state.runtime)
+        return _product_hsd_restore_affine_predictor!(state, predictor_scalar)
+    end
     corrector_scalar = sigma_mu - base.tau * base.kappa -
                        base.dtau_a * base.dkappa_a
     # The corrector RHS is constructed only after the predictor direction has
@@ -524,6 +570,9 @@ function _product_hsd_sparse_direction!(state::ProductConeHSDState{T}) where {T}
     sigma = _product_hsd_sigma(state, ratio)
     sigma_mu = sigma * base.mu
     _product_hsd_corrector_shift!(state, sigma_mu)
+    if _runtime_ns_affine_fallback_reported(state.runtime)
+        return _product_hsd_restore_affine_predictor!(state, predictor_scalar)
+    end
     corrector_scalar = sigma_mu - base.tau * base.kappa -
                        base.dtau_a * base.dkappa_a
     # The corrected shift is copied into the session-owned cone buffer; the
@@ -561,6 +610,9 @@ Base.@noinline function _product_hsd_direction!(
     sigma_mu = sigma * base.mu
 
     _product_hsd_corrector_shift!(state, sigma_mu)
+    if _runtime_ns_affine_fallback_reported(state.runtime)
+        return _product_hsd_restore_affine_predictor!(state, predictor_scalar)
+    end
     corrector_scalar = sigma_mu - base.tau * base.kappa -
                        base.dtau_a * base.dkappa_a
     return _product_hsd_solve_shift!(state, corrector_scalar)
@@ -603,8 +655,9 @@ function _product_hsd_core_scatter!(state::ProductConeHSDState{T}) where {T}
     base = state.base
     core = state.symmetric_core
     if core isa FixedTraceQ3CoreWorkspace{T}
-        # The fixed-trace core already computed A*dx into `core.ax`;
-        # reuse it instead of a second full sparse scan.
+        # The fixed-trace core already computed A*dx into `core.ax` for the
+        # current ordinary candidate; the rescue path refreshes it explicitly
+        # before entering this scatter.
         copy_owned!(base.ax, core.ax)
         @inbounds for row in 1:base.m
             _store_owned_scalar!(
@@ -644,6 +697,19 @@ function _product_hsd_core_scatter!(state::ProductConeHSDState{T}) where {T}
     apply_Theta!(state.runtime, state.gb, state.g_output)
     _, psd_inconclusive = _product_hsd_roundtrip_backward_status(state)
     return psd_inconclusive
+end
+
+# Rebuild the fixed-trace Ax cache only for the affine-predictor rescue.  The
+# ordinary predictor/corrector scatter keeps the core-produced cache and avoids
+# a second structured A scan.
+@inline function _product_hsd_fixed_trace_rescue_scatter!(
+    state::ProductConeHSDState{T},
+) where {T}
+    core = state.symmetric_core
+    core isa FixedTraceQ3CoreWorkspace{T} || return false
+    _fixed_trace_mul_A!(core.ax, core, state.base.dx)
+    _product_hsd_core_scatter!(state)
+    return true
 end
 
 # Fallback hook: the MultiFloat extension implements the 4-lane SIMD path.
@@ -979,6 +1045,15 @@ function _product_hsd_symmetric_core_direction!(
             :symmetric_core_corrector_linearization_failed
         return false
     end
+    if _runtime_ns_affine_fallback_reported(state.runtime)
+        restored = _product_hsd_restore_affine_predictor!(
+            state, predictor_scalar,
+        )
+        state.diagnostic = restored ?
+            :corrector_fallback_to_affine_predictor :
+            :corrector_affine_fallback_residual_failed
+        return restored
+    end
     corrector_system = _product_hsd_symmetric_core_system(
         state, corrector_scalar,
     )
@@ -1009,9 +1084,35 @@ function _product_hsd_symmetric_core_direction!(
         copy_owned!(base.ds, base.ds_a)
         base.dtau = base.dtau_a
         base.dkappa = base.dkappa_a
-        _product_hsd_core_scatter!(state)
-        state.diagnostic = :corrector_fallback_to_predictor
-        return true
+        restored = if fixed_trace
+            _product_hsd_fixed_trace_hkm_linearization!(
+                state, zero(T), false, false,
+            )
+        else
+            affine_shift!(state.runtime, state.h, base.s, base.y)
+            cone = core.system.cone
+            cone isa BlockProductConeLinearization{T} || false
+            if cone isa BlockProductConeLinearization{T}
+                copy_owned!(cone.corrector_rhs, state.h)
+                true
+            else
+                false
+            end
+        end
+        if restored
+            # The fixed-trace core's Ax cache still belongs to the rejected
+            # corrector until it is rebuilt from the restored predictor.
+            if fixed_trace
+                _product_hsd_fixed_trace_rescue_scatter!(state) || return false
+            else
+                _product_hsd_core_scatter!(state)
+            end
+            restored = _product_hsd_newton_residual_ok(state, predictor_scalar)
+        end
+        state.diagnostic = restored ?
+            :corrector_fallback_to_affine_predictor :
+            :corrector_affine_fallback_residual_failed
+        return restored
     end
     timings.corrector_linear_solve_seconds +=
         Float64(time_ns() - t0) * 1.0e-9 -

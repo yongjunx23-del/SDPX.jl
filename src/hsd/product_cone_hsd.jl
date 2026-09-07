@@ -3295,6 +3295,9 @@ end
     sigma > one(T) && (sigma = one(T))
     sigma_mu = sigma * base.mu
     _product_hsd_corrector_shift!(state, sigma_mu)
+    if _runtime_ns_affine_fallback_reported(state.runtime)
+        return _product_hsd_restore_affine_predictor!(state, predictor_scalar)
+    end
     corrector_scalar = sigma_mu - base.tau * base.kappa -
                        base.dtau_a * base.dkappa_a
     return _product_hsd_coupled_solve_shift!(state, corrector_scalar)
