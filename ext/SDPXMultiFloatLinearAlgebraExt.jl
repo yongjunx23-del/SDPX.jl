@@ -1653,11 +1653,17 @@ function SDPX._trial_point_vec4!(
     n, m = base.n, base.m
     V = _mfv4(T)
     a4 = V(alpha, alpha, alpha, alpha)
-    @inbounds for j in 1:4:n
+    j = 1
+    @inbounds while j + 3 <= n
         v = V(base.x[j], base.x[j + 1], base.x[j + 2], base.x[j + 3]) +
             a4 * V(base.dx[j], base.dx[j + 1], base.dx[j + 2], base.dx[j + 3])
         base.xt[j] = v[1]; base.xt[j + 1] = v[2]
         base.xt[j + 2] = v[3]; base.xt[j + 3] = v[4]
+        j += 4
+    end
+    @inbounds while j <= n
+        base.xt[j] = base.x[j] + alpha * base.dx[j]
+        j += 1
     end
     k = 1
     @inbounds while k + 3 <= m

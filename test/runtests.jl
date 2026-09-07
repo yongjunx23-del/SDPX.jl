@@ -623,6 +623,7 @@ end
 include(joinpath(@__DIR__, "gap_normalization.jl"))
 include(joinpath(@__DIR__, "certificate_layout_storage.jl"))
 include(joinpath(@__DIR__, "certificate_scratch_ownership.jl"))
+include(joinpath(@__DIR__, "multifloat_trial_tail.jl"))
 include(joinpath(@__DIR__, "..", "benchmark", "optimization", "test_profile_catalog.jl"))
 include(joinpath(@__DIR__, "..", "benchmark", "optimization", "test_compare_contract.jl"))
 include(joinpath(@__DIR__, "..", "benchmark", "optimization", "test_measure_target.jl"))
