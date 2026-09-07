@@ -2004,6 +2004,12 @@ function _native_hsd_restarted_core(
     )
 end
 
+@inline function _native_hsd_should_restart_bordered(route::Symbol,status,reason::Symbol,iterations::Integer)
+    return route === :bordered && status === NumericalBreakdown &&
+        reason in (:symmetric_core_predictor_residual_failed,
+                   :disjoint_fixed_head_q3_predictor_residual_failed) && iterations <= 1
+end
+
 """Public direct-native orchestration.  No family lowerer is reachable."""
 function _public_optimize_native_hsd(
     model::Model{T},
@@ -2022,12 +2028,9 @@ function _public_optimize_native_hsd(
         warm_start,
     )
     canonical, _, core = _public_native_hsd_core(model, program, route, settings)
-    if settings.kkt_route === :bordered &&
-       core.status === NumericalBreakdown &&
-       core.reason in (
-           :symmetric_core_predictor_residual_failed,
-           :disjoint_fixed_head_q3_predictor_residual_failed,
-       ) && core.iterations <= 1
+    if _native_hsd_should_restart_bordered(
+        settings.kkt_route,core.status,core.reason,core.iterations,
+    )
         fallback_settings = _native_hsd_route_settings(settings, :expanded)
         fallback_route = NativeConeRoute(:expanded)
         _public_validate_native_hsd_policy(
