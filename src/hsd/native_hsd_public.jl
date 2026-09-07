@@ -91,6 +91,138 @@ function _native_hsd_kkt_descriptor(
     throw(ArgumentError("unknown native HSD KKT route $route"))
 end
 
+"""Read-only native-HSD core-structure facts.
+
+All values are recorded from already-available planner state; constructing
+this record never re-runs canonicalization, rank analysis, or operator
+assembly and never allocates a KKT operator. `full_core_dimension` and
+`compact_dimension` are the two bordered-core candidates considered by the
+planner; `use_compact_schur` is the recorded planner decision (never
+re-derived here). `compact_selection_reason` names the predicate outcome:
+- `:route_not_bordered` — compact selection is only evaluated for `kkt_route === :bordered`.
+- `:fixed_trace_present` — a disjoint fixed-head Q3 plan applies, so the
+  `full > 4*compact` comparison is not evaluated (compact requires no fixed trace).
+- `:full_gt_4compact` / `:full_le_4compact` — the actual comparison outcome.
+- `:affine_space_no_core` — the reduced program has no product-cone rows.
+- `:not_computed` — the solve exited before the bordered planner ran
+  (early equality/rank failure), so no selection was made.
+`psd_hypothetical_triangular_scalars` is a HYPOTHETICAL lower-triangular
+scalar requirement computed as `sum(q*(q+1)/2)` over PSD blocks with packed
+length `q`. It is derived from the frozen layout alone, independent of
+allocation or execution: it stays positive on early exits where no
+core/operator was ever allocated, and it is never total actual storage
+(core preparation additionally allocates dense per-block matrices,
+snapshots, and factor fill). It is a scalar count, never a byte estimate,
+and `q^2` is never reported as the triangular number. Zero when no PSD
+block is present. `psd_storage_status` is `:ok`, or
+`:triangular_count_overflow` when the exact count is unrepresentable in
+`Int64` (the block count stays accurate and no diagnostic throws).
+"""
+struct NativeHSDStructureFacts
+    fixed_trace_applicable::Bool
+    full_core_dimension::Int
+    compact_dimension::Int
+    use_compact_schur::Bool
+    compact_selection_reason::Symbol
+    psd_block_count::Int
+    psd_hypothetical_triangular_scalars::Int
+    psd_storage_status::Symbol
+end
+
+@inline function _native_hsd_empty_structure(
+    fixed_trace_applicable::Bool,
+    kkt_route::Symbol,
+    reduction_ready::Bool,
+    active_rows::Int,
+    psd_block_count::Int,
+    psd_hypothetical_triangular_scalars::Int,
+    psd_storage_status::Symbol,
+)
+    reason = kkt_route === :bordered ?
+        (fixed_trace_applicable ? :fixed_trace_present :
+         reduction_ready && active_rows == 0 ? :affine_space_no_core : :not_computed) :
+        :route_not_bordered
+    return NativeHSDStructureFacts(
+        fixed_trace_applicable,
+        0,
+        0,
+        false,
+        reason,
+        psd_block_count,
+        psd_hypothetical_triangular_scalars,
+        psd_storage_status,
+    )
+end
+
+"""Exact lower-triangular scalar count `q*(q+1)/2` without overflow.
+
+Halves the even factor BEFORE multiplying, so every count that fits `Int64`
+is computed exactly with no intermediate overflow; a count that genuinely
+does not fit throws `OverflowError` for the caller to label explicitly. Cold
+path only: pure integer arithmetic, no allocation."""
+function _native_hsd_lower_triangular_scalars(q::Int)
+    q >= 0 || throw(ArgumentError("native HSD PSD packed length must be nonnegative"))
+    # q even implies q < typemax (typemax is odd), so q + 1 is exact;
+    # q odd implies q ÷ 2 + 1 == (q + 1) ÷ 2 exactly with no overflow.
+    return iseven(q) ? Base.checked_mul(q ÷ 2, q + 1) :
+                         Base.checked_mul(q, q ÷ 2 + 1)
+end
+
+"""Count PSD blocks and the hypothetical lower-triangular scalar requirement.
+
+Reads only `block.cone`/`block.length` from the already-frozen layout
+(`length == q` is the packed side for `:packed_lower` PSD blocks); no
+operator is formed and no canonicalization or rank step re-runs. Returns
+`(count, scalars, status)`: `status` is `:ok`, or
+`:triangular_count_overflow` when the exact total does not fit `Int64`
+(scalars is then 0 while the block count stays accurate). Overflow never
+throws, so early-failure diagnostics are never disrupted."""
+function _native_hsd_psd_storage_facts(blocks)
+    count_blocks = 0
+    scalars = 0
+    status = :ok
+    for block in blocks
+        block.cone === :psd || continue
+        q = Int(block.length)
+        q >= 0 || throw(ArgumentError("native HSD PSD block length must be nonnegative"))
+        count_blocks += 1
+        status === :ok || continue
+        try
+            scalars = Base.checked_add(
+                scalars, _native_hsd_lower_triangular_scalars(q),
+            )
+        catch exception
+            exception isa OverflowError || rethrow()
+            status = :triangular_count_overflow
+            scalars = 0
+        end
+    end
+    return count_blocks, scalars, status
+end
+
+@inline function _native_hsd_compact_selection_reason(
+    kkt_route::Symbol,
+    fixed_trace_applicable::Bool,
+    active_rows::Int,
+    full_core_dimension::Int,
+    compact_dimension::Int,
+    use_compact_schur::Bool,
+)
+    kkt_route === :bordered || return :route_not_bordered
+    fixed_trace_applicable && return :fixed_trace_present
+    active_rows == 0 && return :affine_space_no_core
+    (full_core_dimension <= 0 || compact_dimension <= 0) && return :not_computed
+    # The recorded decision must match the planner predicate
+    # (`full > 4*compact` with no fixed trace); a mismatch means the caller
+    # passed inconsistent dimensions rather than a new selection.
+    expected = full_core_dimension > 4 * compact_dimension
+    expected === use_compact_schur || throw(ArgumentError(
+        "native HSD compact selection $use_compact_schur disagrees with " *
+        "full=$full_core_dimension compact=$compact_dimension predicate",
+    ))
+    return expected ? :full_gt_4compact : :full_le_4compact
+end
+
 """Authoritative family payload for one direct native-HSD execution."""
 struct NativeHSDPlan <: AbstractExecutionPlanPayload
     formulation::Union{DenseHomogeneousBordered,DenseHybridCoupled,SymmetricAugmentedHSD}
@@ -116,6 +248,7 @@ struct NativeHSDPlan <: AbstractExecutionPlanPayload
     product_rank_incompatible::Bool
     kkt_route::Symbol
     kkt_execution::NativeHSDKKTDescriptor
+    structure::NativeHSDStructureFacts
 end
 
 """Typed diagnostics for the direct native-HSD public route."""
@@ -458,6 +591,10 @@ function _native_hsd_plan(
     current_rss_bytes::Union{Nothing,Integer}=nothing,
     core_dimension::Integer=0,
     core_estimate_bytes::Integer=0,
+    fixed_trace_applicable::Bool=false,
+    full_core_dimension::Integer=0,
+    compact_dimension::Integer=0,
+    use_compact_schur::Bool=false,
 ) where {T<:AbstractFloat}
     reduced = reduction.reduced
     reduced_variables = reduced === nothing ? 0 : canonical_num_variables(reduced)
@@ -465,6 +602,41 @@ function _native_hsd_plan(
     active_blocks = reduced === nothing ? 0 : length(reduced.cone_layout.blocks)
     zero_blocks = count(block -> block.cone === :zero, canonical.cone_layout.blocks)
     cones = reduced === nothing ? () : Tuple(block.cone for block in reduced.cone_layout.blocks)
+    classification_layout = reduced === nothing ? canonical : reduced
+    psd_block_count, psd_hypothetical_triangular_scalars, psd_storage_status =
+        _native_hsd_psd_storage_facts(
+            classification_layout.cone_layout.blocks,
+        )
+    dims_computed = Int(full_core_dimension) > 0 && Int(compact_dimension) > 0
+    structure = if dims_computed
+        NativeHSDStructureFacts(
+            fixed_trace_applicable,
+            Int(full_core_dimension),
+            Int(compact_dimension),
+            use_compact_schur,
+            _native_hsd_compact_selection_reason(
+                settings.kkt_route,
+                fixed_trace_applicable,
+                active_rows,
+                Int(full_core_dimension),
+                Int(compact_dimension),
+                use_compact_schur,
+            ),
+            psd_block_count,
+            psd_hypothetical_triangular_scalars,
+            psd_storage_status,
+        )
+    else
+        _native_hsd_empty_structure(
+            settings.kkt_route === :bordered && fixed_trace_applicable,
+            settings.kkt_route,
+            reduction.status === HSDEqualityReady,
+            active_rows,
+            psd_block_count,
+            psd_hypothetical_triangular_scalars,
+            psd_storage_status,
+        )
+    end
     descriptor = _native_hsd_formulation_descriptor(
         canonical,
         reduction,
@@ -516,9 +688,9 @@ function _native_hsd_plan(
         product_rank_incompatible,
         settings.kkt_route,
         kkt_execution,
+        structure,
     )
 
-    classification_layout = reduced === nothing ? canonical : reduced
     entries = nnz(classification_layout.A)
     dimension = canonical_num_variables(classification_layout)
     rows = canonical_num_slack(classification_layout)
@@ -610,6 +782,15 @@ function _native_hsd_plan(
         symmetric_core_storage=kkt_execution.storage,
         core_estimate_bytes=Int(core_estimate_bytes),
         current_rss_bytes=Int(current_rss_bytes === nothing ? 0 : current_rss_bytes),
+        requested_precision_bits=canonical.precision_bits,
+        fixed_trace_applicable=structure.fixed_trace_applicable,
+        full_core_dimension=structure.full_core_dimension,
+        compact_dimension=structure.compact_dimension,
+        use_compact_schur=structure.use_compact_schur,
+        compact_selection_reason=structure.compact_selection_reason,
+        psd_block_count=structure.psd_block_count,
+        psd_hypothetical_triangular_scalars=structure.psd_hypothetical_triangular_scalars,
+        psd_storage_status=structure.psd_storage_status,
     )
     return ExecutionPlan(
         classification,
@@ -675,6 +856,130 @@ end
     return :unknown
 end
 
+"""Prepared/executed dimensions from the actual factor-owning workspace.
+
+Cold-only, read-only, no solve math: mirrors the step-function dispatch on
+the TERMINAL active route (`state.kkt_route`, mutated by same-iterate
+fallbacks), never mere workspace existence. Allocated fallback workspaces
+are reported in `prepared_unused`, never as the owner. Returns
+`(prepared, executed, owner, current, prepared_unused)`:
+- `:sparse_schur` → the sparse session (`dimension`, solve-gate currency).
+- `:expanded` → the expanded session (`dimension`, receipt currency).
+- `:bordered`/`:sparse_augmented` → symmetric core, then coupled with
+  nonsymmetric rows (`coupled.dimension` is rank + nonsymmetric_dimension
+  + 2, never the planner rank + 1 candidate), then `symmetric_bordered`
+  (pure compact symmetric solves own this workspace: `dimension`,
+  `_product_bordered_factor_receipt_current`).
+`prepared` is the owning workspace's own dimension; `executed` additionally
+requires factorization evidence plus a CURRENT receipt, so historical
+factorizations with a stale/revoked factor report 0 while
+`termination.factorizations` retains the historical count. `current` is the
+receipt verdict alone (whether the factor could serve another solve now).
+`owner` is `:none` (with empty `prepared_unused`) when no factor-capable
+workspace exists for the active route."""
+function _native_hsd_factor_owner_dims(
+    state::ProductConeHSDState{T}, any_factorizations::Bool,
+) where {T<:AbstractFloat}
+    active = state.kkt_route
+    if active === :sparse_schur
+        session = state.sparse_schur
+        unused = _native_hsd_present_buffers(state, :sparse_schur_session)
+        session === nothing && return 0, 0, :none, false, unused
+        prepared = session.dimension
+        current = _native_hsd_sparse_receipt_current(session)
+        return prepared, (any_factorizations && current) ? prepared : 0,
+            :sparse_schur_session, current, unused
+    elseif active === :expanded
+        session = state.expanded
+        unused = _native_hsd_present_buffers(state, :expanded_session)
+        session === nothing && return 0, 0, :none, false, unused
+        prepared = session.dimension
+        current = session.factor_receipt !== nothing &&
+            _expanded_factor_receipt_current(session)
+        return prepared, (any_factorizations && current) ? prepared : 0,
+            :expanded_session, current, unused
+    end
+    core = product_hsd_symmetric_core(state)
+    if core !== nothing
+        prepared = core.dimension
+        receipt = core.factor_receipt
+        current = receipt !== nothing &&
+            receipt.factor_status === :factored &&
+            receipt.factor_epoch == core.factor_epoch &&
+            receipt.matrix_epoch == core.matrix_epoch &&
+            SDPX.factor_status(core.cache) === Fresh
+        return prepared, (any_factorizations && current) ? prepared : 0,
+            :symmetric_core, current,
+            _native_hsd_present_buffers(state, :symmetric_core)
+    end
+    coupled = state.coupled
+    if coupled !== nothing && coupled.nonsymmetric_dimension > 0
+        prepared = coupled.dimension
+        current = _product_coupled_factor_receipt_current(coupled)
+        return prepared, (any_factorizations && current) ? prepared : 0,
+            :coupled, current,
+            _native_hsd_present_buffers(state, :coupled)
+    end
+    bordered = state.symmetric_bordered
+    if bordered !== nothing
+        prepared = bordered.dimension
+        current = _product_bordered_factor_receipt_current(bordered)
+        return prepared, (any_factorizations && current) ? prepared : 0,
+            :symmetric_bordered, current,
+            _native_hsd_present_buffers(state, :symmetric_bordered)
+    end
+    return 0, 0, :none, false,
+        _native_hsd_present_buffers(state, :none)
+end
+
+"""Factor-capable workspaces present but not owned by the active route.
+
+Cold-only inventory for the `prepared_unused` diagnostic: every allocated
+workspace the terminal dispatch does NOT execute (e.g. an unused coupled
+fallback buffer on an expanded solve). Pure reads, small_tuple output."""
+function _native_hsd_present_buffers(
+    state::ProductConeHSDState{T}, owner::Symbol,
+) where {T<:AbstractFloat}
+    buffers = Symbol[]
+    state.symmetric_core !== nothing && owner !== :symmetric_core &&
+        push!(buffers, :symmetric_core)
+    coupled = state.coupled
+    coupled !== nothing && coupled.nonsymmetric_dimension > 0 &&
+        owner !== :coupled && push!(buffers, :coupled)
+    state.symmetric_bordered !== nothing && owner !== :symmetric_bordered &&
+        push!(buffers, :symmetric_bordered)
+    state.expanded !== nothing && owner !== :expanded_session &&
+        push!(buffers, :expanded_session)
+    state.sparse_schur !== nothing && owner !== :sparse_schur_session &&
+        push!(buffers, :sparse_schur_session)
+    return Tuple(buffers)
+end
+
+"""Sparse-session factor currency, replicating the solve's own gate.
+
+Same predicates as `solve_sparse_schur!` (status, numeric epochs, pattern,
+receipt), plus an explicit `nothing`-receipt guard: the shared receipt
+validator cannot bind its arithmetic from a `nothing` receipt, so calling
+it unguarded would throw instead of reporting stale. Cold-only."""
+function _native_hsd_sparse_receipt_current(session)
+    session.status === SPARSE_SCHUR_FACTORED || return false
+    session.factor === nothing && return false
+    session.factor_numeric_epoch == session.numeric_assembly_count ||
+        return false
+    session.factor_pattern_signature == session.pattern_signature ||
+        return false
+    session.factor_receipt === nothing && return false
+    return factor_receipt_owned(
+        session.factor_receipt;
+        matrix_epoch=session.factor_numeric_epoch,
+        factor_epoch=session.numeric_factor_count,
+        pattern_signature=session.pattern_signature,
+        route=:sparse_schur,
+        provider=:sparsearrays_umfpack,
+        regularization=session.regularization,
+    )
+end
+
 @inline function _native_hsd_fallback_reason(
     requested::Symbol, executed::Symbol,
 )
@@ -705,6 +1010,11 @@ function _native_hsd_diagnostics(
     equilibration::Symbol=:off,
     core_estimate_bytes::Integer=0,
     core_dimension::Integer=0,
+    owner_prepared_dimension::Integer=0,
+    owner_executed_dimension::Integer=0,
+    factor_owner::Symbol=:none,
+    owner_current::Bool=false,
+    owner_unused::Tuple=(),
 ) where {T<:AbstractFloat}
     payload = plan.payload::NativeHSDPlan
     descriptor = payload.formulation
@@ -909,6 +1219,31 @@ function _native_hsd_diagnostics(
         executed_fallback_chain=route_attempts,
         planned_threads=1,
         executed_threads=1,
+        requested_threads=plan.parameters.requested_threads,
+        requested_precision_bits=plan.parameters.requested_precision_bits,
+        structure=(
+            fixed_trace_applicable=payload.structure.fixed_trace_applicable,
+            full_core_dimension=payload.structure.full_core_dimension,
+            compact_dimension=payload.structure.compact_dimension,
+            use_compact_schur=payload.structure.use_compact_schur,
+            compact_selection_reason=payload.structure.compact_selection_reason,
+            psd_block_count=payload.structure.psd_block_count,
+            psd_hypothetical_triangular_scalars=payload.structure.psd_hypothetical_triangular_scalars,
+            psd_storage_status=payload.structure.psd_storage_status,
+            planned_core_dimension=plan.parameters.symmetric_core_dimension,
+            # `prepared`/`executed` come from the actual factor-owning
+            # workspace for the terminal active route (see
+            # _native_hsd_factor_owner_dims): a prepared but never-stepped
+            # workspace reports executed 0 exactly when the executed route
+            # is :not_executed. No plan-derived substitution: when no
+            # workspace owns the active route both stay 0 with :none.
+            prepared_core_dimension=Int(owner_prepared_dimension),
+            executed_core_dimension=did_execute ?
+                Int(owner_executed_dimension) : 0,
+            factor_owner=factor_owner,
+            factor_current=owner_current,
+            prepared_unused=owner_unused,
+        ),
         retained_ray_coordinates=(
             primal_infeasible=(:constraint_dual, :dual_slack),
             dual_infeasible=(:primal,),
@@ -1001,6 +1336,11 @@ function _native_hsd_core_result(
     equilibration::Symbol=:off,
     core_estimate_bytes::Integer=0,
     core_dimension::Integer=0,
+    owner_prepared_dimension::Integer=0,
+    owner_executed_dimension::Integer=0,
+    factor_owner::Symbol=:none,
+    owner_current::Bool=false,
+    owner_unused::Tuple=(),
 ) where {T<:AbstractFloat}
     diagnostics = _native_hsd_diagnostics(
         plan,
@@ -1019,6 +1359,11 @@ function _native_hsd_core_result(
         equilibration,
         core_estimate_bytes,
         core_dimension,
+        owner_prepared_dimension,
+        owner_executed_dimension,
+        factor_owner,
+        owner_current,
+        owner_unused,
     )
     message = "native HSD terminated with $(status) ($(reason))"
     return NativeHSDCoreResult{T}(
@@ -1059,7 +1404,10 @@ function _public_native_hsd_core(
 
     if reduction.status === HSDEqualityInconsistent
         copy_owned!(y_full, reduction.primal_infeasibility_ray)
-        plan = _native_hsd_plan(program, canonical, reduction, route, settings)
+        plan = _native_hsd_plan(
+            program, canonical, reduction, route, settings;
+            fixed_trace_applicable=fixed_trace_plan !== nothing,
+        )
         return canonical, reduction, _native_hsd_core_result(
             T,
             PrimalInfeasible,
@@ -1078,7 +1426,10 @@ function _public_native_hsd_core(
             0.0,
         )
     elseif reduction.status === HSDEqualityRankAmbiguous
-        plan = _native_hsd_plan(program, canonical, reduction, route, settings)
+        plan = _native_hsd_plan(
+            program, canonical, reduction, route, settings;
+            fixed_trace_applicable=fixed_trace_plan !== nothing,
+        )
         return canonical, reduction, _native_hsd_core_result(
             T,
             InsufficientPrecision,
@@ -1097,7 +1448,10 @@ function _public_native_hsd_core(
             0.0,
         )
     elseif reduction.status !== HSDEqualityReady
-        plan = _native_hsd_plan(program, canonical, reduction, route, settings)
+        plan = _native_hsd_plan(
+            program, canonical, reduction, route, settings;
+            fixed_trace_applicable=fixed_trace_plan !== nothing,
+        )
         return canonical, reduction, _native_hsd_core_result(
             T,
             NumericalFailure,
@@ -1158,6 +1512,7 @@ function _public_native_hsd_core(
             product_rank=row_reduction.rank,
             product_rank_ambiguous=row_reduction.ambiguous,
             product_rank_incompatible=row_reduction.incompatible,
+            fixed_trace_applicable=fixed_trace_plan !== nothing,
         )
         if row_reduction.ambiguous
             return canonical, reduction, _native_hsd_core_result(
@@ -1248,6 +1603,7 @@ function _public_native_hsd_core(
                 product_rank_ambiguous=row_reduction.ambiguous,
                 product_rank_incompatible=false,
                 product_rank_reason=reason,
+                fixed_trace_applicable=fixed_trace_plan !== nothing,
             )
             return canonical, reduction, _native_hsd_core_result(
                 T, InsufficientPrecision, reason, plan, reduction,
@@ -1265,6 +1621,7 @@ function _public_native_hsd_core(
                 product_rank=row_reduction.rank,
                 product_rank_ambiguous=true,
                 product_rank_incompatible=row_reduction.incompatible,
+                fixed_trace_applicable=fixed_trace_plan !== nothing,
             )
             return canonical, reduction, _native_hsd_core_result(
                 T,
@@ -1294,6 +1651,7 @@ function _public_native_hsd_core(
                 product_rank=row_reduction.rank,
                 product_rank_ambiguous=false,
                 product_rank_incompatible=true,
+                fixed_trace_applicable=fixed_trace_plan !== nothing,
             )
             recovery_started = time_ns()
             ray = copy(row_reduction.ray)
@@ -1419,6 +1777,10 @@ function _public_native_hsd_core(
             current_rss_bytes=peak_rss,
             core_dimension=core_dimension,
             core_estimate_bytes=core_estimate_bytes,
+            fixed_trace_applicable=fixed_trace_plan !== nothing,
+            full_core_dimension=full_core_dimension,
+            compact_dimension=compact_dimension,
+            use_compact_schur=use_compact_schur,
         )
         state = _product_cone_hsd_state(
             base;
@@ -1448,6 +1810,7 @@ function _public_native_hsd_core(
             product_rank=size(base.workspace.rank_basis, 2),
             product_rank_ambiguous=base.workspace.rank_ambiguous,
             product_rank_incompatible=base.workspace.rank_incompatible,
+            fixed_trace_applicable=fixed_trace_plan !== nothing,
         )
     end
     core_started = time_ns()
@@ -1512,6 +1875,12 @@ function _public_native_hsd_core(
     core_estimate_bytes = settings.kkt_route === :bordered ? (
         Int(get(plan.parameters, :core_estimate_bytes, 0))
     ) : 0
+    # Factor-owner evidence is read from the actual workspaces for every
+    # route (bordered, sparse_augmented, and the compact/coupled paths);
+    # only the `state` object plumbing above stays bordered-only so existing
+    # executed provider/kernel/timing/terminal values are untouched.
+    owner_prepared, owner_executed, owner_symbol, owner_current, owner_unused =
+        _native_hsd_factor_owner_dims(state, product.factorizations > 0)
     return canonical, reduction, _native_hsd_core_result(
         T,
         status,
@@ -1535,6 +1904,11 @@ function _public_native_hsd_core(
         equilibration=equilibration_map === nothing ? :off : :ruiz,
         core_estimate_bytes=core_estimate_bytes,
         core_dimension=core_dimension,
+        owner_prepared_dimension=owner_prepared,
+        owner_executed_dimension=owner_executed,
+        factor_owner=owner_symbol,
+        owner_current=owner_current,
+        owner_unused=owner_unused,
     )
 end
 

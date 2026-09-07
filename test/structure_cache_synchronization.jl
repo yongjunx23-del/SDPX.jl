@@ -1,7 +1,6 @@
-# Structure-cache synchronization tests (standalone).
+# Structure-cache synchronization tests (suite-included and standalone).
 #
-# This file is intentionally NOT wired into `test/runtests.jl` (the shared
-# suite is parent-owned).  Run it directly against the isolated env copy:
+# Included by `test/runtests.jl`; it can also run against an isolated env copy:
 #
 #   JULIA_NUM_THREADS=2 JULIA_GC_THREADS=1 OPENBLAS_NUM_THREADS=1 \
 #     julia --heap-size-hint=2G --project=<isolated-env> \
