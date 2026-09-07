@@ -206,11 +206,95 @@ function SymmetricCorePattern{T}(
     # shares ONLY the frozen structural arrays; the numeric buffer is a
     # FRESH zero alloczation so no value can survive a reuse.
     key = (T, signature)
-    cached = lock(_SYMMETRIC_CORE_STRUCTURE_LOCK) do
-        get(_SYMMETRIC_CORE_STRUCTURE_CACHE.patterns, key, nothing)
+    # Structure-cache protocol (see `_structure_cache_lookup_build_publish!`):
+    # atomic lookup with hit/miss accounting under the global cache lock;
+    # the expensive CSC construction runs in `build_pattern_structure`
+    # outside the lock on a miss or disabled lookup (never on a hit); the
+    # cache entry is assembled in `build_pattern_payload` only for an
+    # eligible lookup and published first-wins on the captured generation
+    # token.  No fast unlocked `.enabled` read remains on this path.
+    function build_pattern_structure()
+        # ---- Frozen lower-triangle CSC structure ---------------------
+        colptr = Vector{Int}(undef, dimension + 1)
+        rowval = Int[]
+        sizehint!(rowval,structural_nnz)
+        colptr[1] = 1
+        @inbounds for j in 1:nr
+            push!(rowval, j)  # structural zero x diagonal
+            for pointer in nzrange(Ar, j)
+                push!(rowval, nr + Ar.rowval[pointer])
+            end
+            colptr[j + 1] = length(rowval) + 1
+        end
+        for (index, rows) in enumerate(block_ranges)
+            last_row = last(rows)
+            for column in first(rows):last_row
+                for row in column:last_row
+                    push!(rowval, nr + row)
+                end
+                colptr[nr + column + 1] = length(rowval) + 1
+            end
+        end
+        length(colptr) == dimension + 1 || throw(ArgumentError(
+            "symmetric core CSC colptr length disagrees with its dimension",
+        ))
+        colptr[end] - 1 == length(rowval) || throw(ArgumentError(
+            "symmetric core CSC structure is inconsistent",
+        ))
+
+        # ---- Slot maps -------------------------------------------------
+        ar_slots = Int[]
+        sizehint!(ar_slots,ar_nnz)
+        x_diag_slots = Vector{Int}(undef, nr)
+        theta_slots = Int[]
+        sizehint!(theta_slots,theta_nnz)
+        slot = 0
+        @inbounds for j in 1:nr
+            slot += 1
+            x_diag_slots[j] = slot
+            for _ in nzrange(Ar, j)
+                slot += 1
+                push!(ar_slots, slot)
+            end
+        end
+        for (index, rows) in enumerate(block_ranges)
+            last_row = last(rows)
+            for column in first(rows):last_row
+                for row in column:last_row
+                    slot += 1
+                    push!(theta_slots, slot)
+                end
+            end
+        end
+        slot == length(rowval) || throw(ArgumentError(
+            "symmetric core slot maps do not cover the frozen CSC buffer",
+        ))
+        return (
+            colptr=colptr, rowval=rowval,
+            ar_slots=ar_slots, theta_slots=theta_slots,
+            x_diag_slots=x_diag_slots, nnz=slot,
+        )
     end
-    if cached isa NamedTuple && haskey(cached, :colptr)
-        _structure_cache_record_hit!()
+    function build_pattern_payload(built)
+        # Store the frozen structural content (no values).  The arrays are
+        # immutable by contract: colptr/rowval are never rewritten after
+        # construction, so sharing them across patterns is ownership-safe.
+        # Runs only for an eligible lookup (see the protocol helper).
+        return (
+            a_colptr=Vector{Int}(Ar.colptr),
+            a_rowval=Vector{Int}(Ar.rowval),
+            block_ranges=UnitRange{Int}[rows for rows in block_ranges],
+            block_shapes=Symbol[shape for shape in block_shapes],
+            colptr=built.colptr, rowval=built.rowval,
+            ar_slots=built.ar_slots, theta_slots=built.theta_slots,
+            x_diag_slots=built.x_diag_slots,
+        )
+    end
+    lookup = _structure_cache_lookup_build_publish!(
+        key, build_pattern_structure, build_pattern_payload,
+    )
+    if lookup.enabled && lookup.hit isa NamedTuple && haskey(lookup.hit, :colptr)
+        cached = lookup.hit
         nzval = alloc_zeros(T, structural_nnz)
         return SymmetricCorePattern{T}(
             nr, m, dimension, cached.a_colptr, cached.a_rowval,
@@ -218,83 +302,17 @@ function SymmetricCorePattern{T}(
             cached.colptr, cached.rowval, cached.ar_slots,
             cached.theta_slots, cached.x_diag_slots, nzval, signature,
         )
-    elseif _SYMMETRIC_CORE_STRUCTURE_CACHE.enabled
-        _structure_cache_record_miss!()
     end
-
-    # ---- Frozen lower-triangle CSC structure ---------------------
-    colptr = Vector{Int}(undef, dimension + 1)
-    rowval = Int[]
-    sizehint!(rowval,structural_nnz)
-    colptr[1] = 1
-    @inbounds for j in 1:nr
-        push!(rowval, j)  # structural zero x diagonal
-        for pointer in nzrange(Ar, j)
-            push!(rowval, nr + Ar.rowval[pointer])
-        end
-        colptr[j + 1] = length(rowval) + 1
-    end
-    for (index, rows) in enumerate(block_ranges)
-        last_row = last(rows)
-        for column in first(rows):last_row
-            for row in column:last_row
-                push!(rowval, nr + row)
-            end
-            colptr[nr + column + 1] = length(rowval) + 1
-        end
-    end
-    length(colptr) == dimension + 1 || throw(ArgumentError(
-        "symmetric core CSC colptr length disagrees with its dimension",
-    ))
-    colptr[end] - 1 == length(rowval) || throw(ArgumentError(
-        "symmetric core CSC structure is inconsistent",
-    ))
-
-    # ---- Slot maps -------------------------------------------------
-    ar_slots = Int[]
-    sizehint!(ar_slots,ar_nnz)
-    x_diag_slots = Vector{Int}(undef, nr)
-    theta_slots = Int[]
-    sizehint!(theta_slots,theta_nnz)
-    slot = 0
-    @inbounds for j in 1:nr
-        slot += 1
-        x_diag_slots[j] = slot
-        for _ in nzrange(Ar, j)
-            slot += 1
-            push!(ar_slots, slot)
-        end
-    end
-    for (index, rows) in enumerate(block_ranges)
-        last_row = last(rows)
-        for column in first(rows):last_row
-            for row in column:last_row
-                slot += 1
-                push!(theta_slots, slot)
-            end
-        end
-    end
-    slot == length(rowval) || throw(ArgumentError(
-        "symmetric core slot maps do not cover the frozen CSC buffer",
-    ))
-
-    if _SYMMETRIC_CORE_STRUCTURE_CACHE.enabled
-        # Store the frozen structural content (no values).  The arrays are
-        # immutable by contract: colptr/rowval are never rewritten after
-        # construction, so sharing them across patterns is ownership-safe.
-        lock(_SYMMETRIC_CORE_STRUCTURE_LOCK) do
-            _SYMMETRIC_CORE_STRUCTURE_CACHE.patterns[key] = (
-                a_colptr=Vector{Int}(Ar.colptr),
-                a_rowval=Vector{Int}(Ar.rowval),
-                block_ranges=UnitRange{Int}[rows for rows in block_ranges],
-                block_shapes=Symbol[shape for shape in block_shapes],
-                colptr=colptr, rowval=rowval,
-                ar_slots=ar_slots, theta_slots=theta_slots,
-                x_diag_slots=x_diag_slots,
-            )
-        end
-    end
-    nzval = alloc_zeros(T, slot)
+    # Miss or disabled lookup: `lookup.built` owns every structural array
+    # (a losing publisher's arrays are structurally identical by the key
+    # contract, so correctness never depends on winning the insert).
+    built = lookup.built
+    colptr = built.colptr
+    rowval = built.rowval
+    ar_slots = built.ar_slots
+    theta_slots = built.theta_slots
+    x_diag_slots = built.x_diag_slots
+    nzval = alloc_zeros(T, built.nnz)
     return SymmetricCorePattern{T}(
         nr, m, dimension, Vector{Int}(Ar.colptr), Vector{Int}(Ar.rowval),
         UnitRange{Int}[rows for rows in block_ranges],
