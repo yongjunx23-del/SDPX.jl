@@ -530,7 +530,7 @@ fixed binary tree.  Deterministic at any thread count; no atomics, no
 materialized `NewtonResidual` remains the parity reference.
 """
 function fused_max_newton_residual(ws::DirectionEvaluationWorkspace{T}) where {T}
-    gap = ws.gap_base - ws.c_dx - ws.b_dy
+    gap = ws.gap_base + ws.c_dx + ws.b_dy
     maximum_residual = max(abs(gap), abs(ws.tau_kappa), ws.dual_max)
     maximum_residual = max(
         maximum_residual,

@@ -270,7 +270,7 @@ The right-hand sides of the five authoritative HSD Newton equations:
 
     A*dx + ds - b*dτ       = primal_affine
     A'*dy + c*dτ           = dual_affine
-   -c'*dx - b'*dy + dκ     = homogeneous_gap
+    c'*dx + b'*dy + dκ     = homogeneous_gap
     ds + H*dy              = cone_corrector
     κ*dτ + τ*dκ            = tau_kappa
 """
@@ -419,10 +419,10 @@ function newton_residual!(
 
     gap = direction.dkappa - system.rhs.homogeneous_gap
     @inbounds for j in 1:n
-        gap -= system.c[j] * direction.dx[j]
+        gap += system.c[j] * direction.dx[j]
     end
     @inbounds for i in 1:m
-        gap -= system.b[i] * direction.dy[i]
+        gap += system.b[i] * direction.dy[i]
     end
     residual.homogeneous_gap = gap
 
@@ -457,7 +457,7 @@ authoritative [`newton_residual!`](@ref); only the matrix-vector products and
 the cone action are supplied precomputed so the five-equation gate, the
 refinement acceptance, the route acceptance, and the terminal certificate
 inputs share one evaluation per candidate.  The scalar gap is assembled as
-`dκ - rG - (c'*dx) - (b'*dy)` with both sums formed in the fixed index order
+`dκ - rG + (c'*dx) + (b'*dy)` with both sums formed in the fixed index order
 of the authoritative equations; this is a deterministic, explainable
 reproduction of the formula (the authoritative interleaved subtraction is
 retained in [`newton_residual!`](@ref) for parity).
@@ -499,7 +499,7 @@ function newton_residual_from_terms!(
     end
 
     residual.homogeneous_gap =
-        direction.dkappa - system.rhs.homogeneous_gap - scalar_gap
+        direction.dkappa - system.rhs.homogeneous_gap + scalar_gap
 
     @inbounds for i in 1:m
         residual.cone_complementarity[i] = direction.ds[i] +

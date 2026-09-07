@@ -1648,7 +1648,7 @@ function solve_core_homogeneous!(
     return workspace
 end
 
-"""Scalar denominator `κ + τ*(cr'ux + b'uy)` for the current epoch."""
+"""Standard-HSD denominator `κ - τ*(cr'ux + b'uy)` for the current epoch."""
 function _core_denominator(
     workspace::SymmetricCoreWorkspace{T}, system::NewtonSystem{T},
 ) where {T}
@@ -1664,7 +1664,7 @@ function _core_denominator(
         eta += term
         eta_work += abs(term)
     end
-    denominator = system.kappa + system.tau * eta
+    denominator = system.kappa - system.tau * eta
     work = abs(system.kappa) + abs(system.tau) * eta_work
     return denominator, work
 end
@@ -1734,7 +1734,7 @@ function _core_solve_raw!(
     end
     denominator, denominator_work = _core_denominator(workspace, system)
     numerator = system.rhs.tau_kappa - system.tau *
-                (system.rhs.homogeneous_gap + eta_w)
+                (system.rhs.homogeneous_gap - eta_w)
     numerator_work = abs(system.rhs.tau_kappa) +
         abs(system.tau) * (abs(system.rhs.homogeneous_gap) + eta_w_work)
     classification = classify_scalar_closure(
@@ -1795,13 +1795,13 @@ function _core_solve_raw!(
             system.b[i] * dtau,
         )
     end
-    # dkappa = g + c'*dx + b'*dy.
+    # Standard scalar row: dkappa = g - c'*dx - b'*dy.
     dk = system.rhs.homogeneous_gap
     @inbounds for j in 1:workspace.n
-        dk += system.c[j] * workspace.dx[j]
+        dk -= system.c[j] * workspace.dx[j]
     end
     @inbounds for i in 1:workspace.m
-        dk += system.b[i] * workspace.dy[i]
+        dk -= system.b[i] * workspace.dy[i]
     end
     workspace.dkappa = _core_owned_value(dk)
     workspace.last_dtau = dtau

@@ -97,6 +97,10 @@ end
 # complementarity, `mu`, and the data-normalized residual from the raw
 # iterate fields with file-local loops only.  The mathematics mirror the
 # frozen HSD equations; no function defined outside this file participates.
+# Shared by canonical candidate verification and the public original-coordinate audit.
+@inline _certificate_objective_scale(p::T,d::T) where {T} =
+    max(one(T),(abs(p)+abs(d))/T(2))
+
 @inline function _cert_maxabs(v::AbstractVector{T}) where {T}
     a = zero(T)
     @inbounds for i in eachindex(v)
@@ -188,7 +192,7 @@ function _cert_residual!(state::Union{HSDState{T},_OptimalityCandidate{T}}) wher
         end
         state.rD[j] = acc
     end
-    state.rG = dot(c, x) * -one(T) - dot(b, y) + kappa
+    state.rG = dot(c, x) + dot(b, y) + kappa
     state.complementarity = dot(svec, y) + tau * kappa
     state.mu = state.complementarity / T(state.nu + 1)
     return nothing
@@ -406,7 +410,7 @@ end
     verify_optimal!(canonical, state, x_orig, s_orig, y_orig; tol) -> Bool
 
 Verify an optimality certificate in original coordinates: the normalized
-HSD residual (`A x + s − b τ`, `A'y + c τ`, `−c'x − b'y + κ`) is small,
+HSD residual (`A x + s − b τ`, `A'y + c τ`, `c'x + b'y + κ`) is small,
 `s/τ ∈ K` and `y/τ ∈ K*` blockwise, and the complementarity `μ` is small.
 On success, writes the original-coordinate recoveries `x_orig = x/τ`,
 `s_orig = s/τ`, `y_orig = y/τ` (pushed through the reconstruction chain)
@@ -450,6 +454,18 @@ function verify_optimal!(
     end
     _all_finite(state.xt) && _all_finite(state.st) && _all_finite(state.yt) ||
         return false
+    # The combined embedding scale also contains ||A|| and can hide a failed
+    # recovered affine equation. Require data-scaled canonical equations
+    # independently; reconstruction and the public audit remain authoritative.
+    primal_scale=max(one(T),_cert_maxabs(state.xt),_cert_maxabs(state.st),_cert_maxabs(canonical.b))
+    dual_scale=max(one(T),_cert_maxabs(state.yt),_cert_maxabs(canonical.c))
+    recovered_primal_residual=_cert_maxabs(state.rP)*inv_tau
+    recovered_dual_residual=_cert_maxabs(state.rD)*inv_tau
+    primal_limit=tol*primal_scale;dual_limit=tol*dual_scale
+    all(isfinite,(primal_scale,dual_scale,recovered_primal_residual,
+                  recovered_dual_residual,primal_limit,dual_limit)) || return false
+    recovered_primal_residual <= primal_limit || return false
+    recovered_dual_residual <= dual_limit || return false
     in_canonical_cone(canonical, state.st; dual=false, tol=tol) || return false
     in_canonical_cone(canonical, state.yt; dual=true, tol=tol) || return false
     # Check the recovered primal-dual gap explicitly.  The old absolute-mu
@@ -458,7 +474,10 @@ function verify_optimal!(
     primal_objective = dot(canonical_objective(canonical), state.xt)
     dual_pairing = dot(canonical_rhs(canonical), state.yt)
     isfinite(primal_objective) && isfinite(dual_pairing) || return false
-    gap_scale = one(T) + abs(primal_objective) + abs(dual_pairing)
+    chain=canonical.reconstruction_chain
+    original_primal=chain.objective_sign*primal_objective+chain.objective_constant
+    original_dual=-chain.objective_sign*dual_pairing+chain.objective_constant
+    gap_scale = _certificate_objective_scale(original_primal,original_dual)
     isfinite(gap_scale) || return false
     gap_residual = abs(primal_objective + dual_pairing)
     gap_limit = tol * gap_scale

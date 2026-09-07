@@ -1437,7 +1437,7 @@ function _core_solve_raw!(
     )
     eta_w = dot(workspace.cr, workspace.wx) + dot(system.b, workspace.wy)
     eta_u = dot(workspace.cr, workspace.ux) + dot(system.b, workspace.uy)
-    denominator = system.kappa + system.tau * eta_u
+    denominator = system.kappa - system.tau * eta_u
     eta_w_work = zero(T)
     @inbounds for r in eachindex(workspace.cr, workspace.wx)
         term = workspace.cr[r] * workspace.wx[r]
@@ -1458,7 +1458,7 @@ function _core_solve_raw!(
     end
     denominator_work = abs(system.kappa) + abs(system.tau) * eta_u_work
     numerator = system.rhs.tau_kappa - system.tau *
-                (system.rhs.homogeneous_gap + eta_w)
+                (system.rhs.homogeneous_gap - eta_w)
     numerator_work = abs(system.rhs.tau_kappa) +
         abs(system.tau) * (abs(system.rhs.homogeneous_gap) + eta_w_work)
     classification = classify_scalar_closure(
@@ -1492,8 +1492,8 @@ function _core_solve_raw!(
         workspace.ds[index] = system.rhs.primal_affine[index] -
                               workspace.ax[index] + system.b[index] * dtau
     end
-    workspace.dkappa = system.rhs.homogeneous_gap +
-        dot(system.c, workspace.dx) + dot(system.b, workspace.dy)
+    workspace.dkappa = system.rhs.homogeneous_gap -
+        dot(system.c, workspace.dx) - dot(system.b, workspace.dy)
     workspace.last_dtau = dtau
     workspace.denominator = denominator
     candidate = NewtonDirection(

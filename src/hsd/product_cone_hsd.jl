@@ -1105,9 +1105,9 @@ Base.@noinline function _product_hsd_form_schur_border!(
         has_nonsymmetric && (atgb += state.ns_at_g_b[j])
         cj = base.workspace.cr[j]
         _store_owned_scalar!(base.workspace.qr, j, cj - atgb)
-        _store_owned_scalar!(base.workspace.rvec, j, base.tau * (cj + atgb))
+        _store_owned_scalar!(base.workspace.rvec, j, -base.tau * (cj + atgb))
     end
-    return base.kappa - base.tau * bgb
+    return base.kappa + base.tau * bgb
 end
 
 @inline function _product_bordered_gamma(
@@ -1548,7 +1548,7 @@ inverse.
             K, CartesianIndex(local_row, dtau_column), base.b[row],
         )
         _store_owned_scalar!(
-            K, CartesianIndex(gap_row, dy_col0 + local_row), -base.b[row],
+            K, CartesianIndex(gap_row, dy_col0 + local_row), base.b[row],
         )
     end
 
@@ -1618,10 +1618,10 @@ inverse.
             base.workspace.cr[j] - dj,
         )
         _store_owned_scalar!(
-            K, CartesianIndex(gap_row, j), -(base.workspace.cr[j] + dj),
+            K, CartesianIndex(gap_row, j), base.workspace.cr[j] + dj,
         )
     end
-    _store_owned_scalar!(K, CartesianIndex(gap_row, dtau_column), beta)
+    _store_owned_scalar!(K, CartesianIndex(gap_row, dtau_column), -beta)
     _store_owned_scalar!(K, CartesianIndex(gap_row, dkappa_column), one(T))
     _store_owned_scalar!(K, CartesianIndex(scalar_row, dtau_column), base.kappa)
     _store_owned_scalar!(K, CartesianIndex(scalar_row, dkappa_column), base.tau)
@@ -1700,7 +1700,7 @@ end
     @inbounds for row in 1:base.m
         zeta += base.b[row] * state.g_output[row]
     end
-    rhs[gap_row] = -base.rG + zeta
+    rhs[gap_row] = -base.rG - zeta
     rhs[scalar_row] = scalar_rhs
     if !_product_hsd_vector_finite(rhs)
         workspace.last_reason = COUPLED_ASSEMBLY_NONFINITE
@@ -1864,7 +1864,7 @@ condition-aware backward gate validates the composed `Theta*G` map.
     @inbounds for k in 1:base.m
         bd += base.b[k] * base.dy[k]
     end
-    base.dkappa = -base.rG + cd + bd
+    base.dkappa = -base.rG - cd - bd
     isfinite(base.dkappa) || return false
     # A highly conditioned PSD scaling may make the conservative a-priori
     # round-trip condition cap inconclusive even when the actual map is
@@ -2375,17 +2375,17 @@ Base.@noinline function _product_hsd_newton_residual_ok(
         _product_hsd_symmetric_dual_residual_ok(state) || return false
     end
 
-    # -c'*dx - b'*dy + dκ = -rG.
+    # Standard-HSD: c'*dx + b'*dy + dκ = -rG.
     gap_residual = base.rG + base.dkappa
     gap_work = abs(base.rG) + abs(base.dkappa)
     @inbounds for j in 1:base.n
         term = base.c[j] * base.dx[j]
-        gap_residual = muladd(-base.c[j], base.dx[j], gap_residual)
+        gap_residual = muladd(base.c[j], base.dx[j], gap_residual)
         gap_work += abs(term)
     end
     @inbounds for k in 1:base.m
         term = base.b[k] * base.dy[k]
-        gap_residual = muladd(-base.b[k], base.dy[k], gap_residual)
+        gap_residual = muladd(base.b[k], base.dy[k], gap_residual)
         gap_work += abs(term)
     end
     _product_hsd_newton_close(gap_residual, gap_work) || return false
@@ -2722,7 +2722,7 @@ end
         return false
     end
     bsum = _product_hsd_rhs!(state)
-    rho = scalar_rhs + base.tau * base.rG - base.tau * bsum
+    rho = scalar_rhs + base.tau * base.rG + base.tau * bsum
     @inbounds for i in 1:base.workspace.nr
         value = base.workspace.rhs[i]
         isfinite(value) || begin
@@ -2783,7 +2783,7 @@ end
     @inbounds for k in 1:base.m
         cd_bd += base.b[k] * base.dy[k]
     end
-    gap_residual = base.rG + candidate - cd_bd
+    gap_residual = base.rG + candidate + cd_bd
     gap_work = abs(base.rG) + abs(candidate) + abs(cd_bd)
     scalar_residual = muladd(
         base.tau, candidate,
@@ -2812,7 +2812,7 @@ end
     @inbounds for k in 1:base.m
         cd_bd += base.b[k] * base.dy[k]
     end
-    gap_candidate = -base.rG + cd_bd
+    gap_candidate = -base.rG - cd_bd
     isfinite(gap_candidate) || return false
     gap_error = _product_hsd_dkappa_equation_error(
         base, scalar_rhs, gap_candidate,
@@ -2901,12 +2901,12 @@ end
     work = abs(base.rG) + abs(base.dkappa)
     @inbounds for j in 1:base.n
         term = base.c[j] * base.dx[j]
-        residual = muladd(-base.c[j], base.dx[j], residual)
+        residual = muladd(base.c[j], base.dx[j], residual)
         work += abs(term)
     end
     @inbounds for k in 1:base.m
         term = base.b[k] * base.dy[k]
-        residual = muladd(-base.b[k], base.dy[k], residual)
+        residual = muladd(base.b[k], base.dy[k], residual)
         work += abs(term)
     end
     worst = max(worst, _product_hsd_normalized_error(residual, work))
@@ -2997,7 +2997,7 @@ end
     @inbounds for k in 1:base.m
         bd += base.b[k] * base.dy[k]
     end
-    base.dkappa = -base.rG + cd + bd
+    base.dkappa = -base.rG - cd - bd
     _hsd_direction_finite(base) || return false
     return roundtrip_certified ||
            _product_hsd_psd_cone_newton_residual_ok(state)
@@ -3082,10 +3082,10 @@ Base.@noinline function _product_hsd_refine_shift!(
         end
         gap_residual = original_rG + base.dkappa
         @inbounds for j in 1:base.n
-            gap_residual = muladd(-base.c[j], base.dx[j], gap_residual)
+            gap_residual = muladd(base.c[j], base.dx[j], gap_residual)
         end
         @inbounds for k in 1:base.m
-            gap_residual = muladd(-base.b[k], base.dy[k], gap_residual)
+            gap_residual = muladd(base.b[k], base.dy[k], gap_residual)
         end
         base.rG = gap_residual
         scalar_residual = muladd(

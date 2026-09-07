@@ -178,7 +178,7 @@ Base.@noinline function _product_hsd_line_search!(
             _product_hsd_trial_residual!(state)
             p2 = _hsd_maxinf(base.rPt)
             d2 = _hsd_maxinf(base.rDt)
-            gap2 = -dot(base.c, base.xt) - dot(base.b, base.yt) + base.kappa_t
+            gap2 = dot(base.c, base.xt) + dot(base.b, base.yt) + base.kappa_t
             trial_merit = max(p2, d2, abs(gap2))
             tol = T(256) * sqrt(eps(T)) * scale
             homotopy_ok = _hsd_residual_homotopy_ok(

@@ -470,7 +470,7 @@ end
     _product_hsd_trial_residual!(state)
     p2 = _hsd_maxinf(base.rPt)
     d2 = _hsd_maxinf(base.rDt)
-    gap2 = -dot(base.c, base.xt) - dot(base.b, base.yt) + base.kappa_t
+    gap2 = dot(base.c, base.xt) + dot(base.b, base.yt) + base.kappa_t
     (isfinite(p2) && isfinite(d2) && isfinite(gap2)) || return false
     _hsd_residual_homotopy_ok(base, alpha, p2, d2, gap2) || return false
     scale = max(

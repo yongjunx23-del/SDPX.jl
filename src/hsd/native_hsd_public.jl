@@ -867,6 +867,7 @@ function _native_hsd_diagnostics(
     selected = (
         solver=:native_hsd,
         engine=:native_hsd,
+        hsd_formulation_version=HSD_FORMULATION_VERSION,
         planned_algorithm=:native_hsd,
         executed_algorithm=:native_hsd,
         requested_kkt_formulation=:auto,
