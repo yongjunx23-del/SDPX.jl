@@ -620,6 +620,8 @@ end
     )
 end
 
+include(joinpath(@__DIR__, "exp_logarithmic.jl"))
+include(joinpath(@__DIR__, "..", "validation", "scientific_core", "test_mathematics.jl"))
 include(joinpath(@__DIR__, "gap_normalization.jl"))
 include(joinpath(@__DIR__, "certificate_layout_storage.jl"))
 include(joinpath(@__DIR__, "certificate_scratch_ownership.jl"))

@@ -7,6 +7,7 @@ include("cone_algebra.jl")
 include("cones/symmetric/SymmetricCones.jl")
 include("cones/nonsymmetric/dense3.jl")
 include("cones/exponential.jl")
+include("cones/exp_logarithmic.jl")
 include("cones/power.jl")
 # Internal Phase-3 nonsymmetric references. The line search is
 # production-shaped and allocation-free for fixed-width arithmetic; the full
