@@ -118,9 +118,39 @@ finite differences, logarithmic homogeneity, the trace proof identities, mutable
 ownership and representative dynamic-range cases. The old exp-gap barrier's
 self-concordance counterexample remains a negative control during migration.
 
-**Still required before switching the public Exp path:** derive its actual
-Fenchel conjugate and domain, dual inversion, initialization, scaling and
-corrector consistently. A cone isomorphism is not a Fenchel-conjugacy proof.
+## Its actual Fenchel conjugate
+
+Use `F*(d)=sup_s(-d's-F(s))`. For `d=(u,v,w)` in the strict dual interior,
+`u<0,w>0` and `D=1-v/u+log(w/(-u))>0`. The equation `d=-∇F(s)` gives
+
+```
+ψ=-1/u,     ρ=ψ/y,
+ρ+log(1+ρ)=D,
+y=1/((-u)ρ),    z=(1+ρ)/(ρw),
+l=log((-u)/w)+log(1+ρ),    x=y(l-ρ).
+```
+
+The scalar function has derivative `1+1/(1+ρ)∈(1,2)` and maps `(0,∞)`
+onto `(0,∞)`. Its unique positive root is bracketed by `[D/2,D]`.
+The recovered point is strictly primal interior and satisfies the stationarity
+condition; strict convexity makes it the unique conjugate maximizer. Therefore
+
+```
+F*(d)=-3-F(s),     ∇F*(d)=-s,
+H*(d)=H(s)⁻¹,
+D³F*(d)[h,v,:]=H⁻¹ D³F(s)[H⁻¹h,H⁻¹v,:].
+```
+
+`exp_logarithmic_conjugate!` uses safeguarded Newton in that bracket, retains
+an explicit iteration cap, and requires componentwise gradient replay before
+writing its owned output. The tests cover inverse and Fenchel identities,
+finite-difference dual gradient/Hessian/third derivatives at BigFloat256/512,
+Float64x4 compatibility, invalid domains and failure-atomic output.
+This is a mathematical-kernel qualification, not an all-dynamic-range result.
+
+**Still required before switching the public Exp path:** integrate the derived
+conjugate with initialization, scaling, corrector and status propagation.
+A cone isomorphism alone must not replace this Fenchel derivation.
 
 ## Remaining integration gates
 

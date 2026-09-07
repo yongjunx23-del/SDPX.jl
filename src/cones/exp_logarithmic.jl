@@ -22,12 +22,17 @@ function exp_logarithmic_barrier(s)
     return value
 end
 
-function exp_logarithmic_gradient!(g,s)
-    length(g)==3 || throw(DimensionMismatch("gradient length"))
+@inline function _exp_logarithmic_gradient_values(s)
     y,z,l,p=_exp_logarithmic_terms(s)
     ip=inv(p)
     values=(ip,-(l-one(l))*ip-inv(y),-(y/z)*ip-inv(z))
     all(isfinite,values) || throw(DomainError(s,"nonfinite gradient"))
+    return values
+end
+
+function exp_logarithmic_gradient!(g,s)
+    length(g)==3 || throw(DimensionMismatch("gradient length"))
+    values=_exp_logarithmic_gradient_values(s)
     for i in 1:3;_store_owned_scalar!(g,i,values[i]);end
     return g
 end
@@ -69,4 +74,47 @@ function exp_logarithmic_third!(out,s,h,v)
     all(isfinite,values) || throw(DomainError(s,"nonfinite third contraction"))
     for i in 1:3;_store_owned_scalar!(out,i,values[i]);end
     return out
+end
+
+# The actual Fenchel inverse, not a dual-cone isomorphism:
+# for d=(u,v,w)=-∇F(s), rho + log1p(rho) = 1-v/u+log(w/(-u)).
+# The derivative lies in (1,2), and the unique positive root lies in [D/2,D].
+# The output remains untouched unless domain, root and gradient replay pass.
+function exp_logarithmic_conjugate!(out,d;max_iterations::Int=64)
+    length(out)==length(d)==3 || throw(DimensionMismatch("Fenchel inverse length"))
+    max_iterations>0 || throw(ArgumentError("positive iteration budget required"))
+    u,v,w=d;T=eltype(d)
+    all(isfinite,d) && u<zero(u) && w>zero(w) ||
+        throw(DomainError(d,"strict exponential dual requires finite u<0,w>0"))
+    l0=_nonsymmetric_positive_log_ratio(w,-u)
+    D=(one(T)-v/u)+l0
+    isfinite(D) && D>zero(D) || throw(DomainError(d,"positive dual logarithmic margin required"))
+    lo=D/2;hi=D;rho=lo;rtol=T(16)*eps(T)
+    residual=rho+_nonsymmetric_stable_log1p(rho)-D;steps=0;converged=false
+    for it in 1:max_iterations
+        steps=it
+        residual=(rho-D)+_nonsymmetric_stable_log1p(rho)
+        if abs(residual)<=rtol*D
+            converged=true;break
+        end
+        if residual<zero(T);lo=rho;else;hi=rho;end
+        trial=rho-residual/(one(T)+inv(one(T)+rho))
+        rho=(isfinite(trial) && lo<trial<hi) ? trial : lo+(hi-lo)/2
+    end
+    converged || throw(DomainError(d,"Fenchel root did not converge within its iteration budget"))
+    iy=-u*rho
+    y=inv(iy);z=(one(T)+rho)/(rho*w)
+    l=-l0+_nonsymmetric_stable_log1p(rho)
+    values=(y*(l-rho),y,z)
+    yy,zz,ll,p=_exp_logarithmic_terms(values)
+    g=_exp_logarithmic_gradient_values(values)
+    work=(abs(u),abs((ll-one(T))/p)+inv(yy)+abs(v),abs(w))
+    for i in 1:3
+        abs(g[i]+d[i])<=T(64)*eps(T)*work[i] ||
+            throw(DomainError(d,"Fenchel inverse gradient replay failed"))
+    end
+    fstar=-T(3)-exp_logarithmic_barrier(values)
+    isfinite(fstar) || throw(DomainError(d,"nonfinite Fenchel barrier"))
+    for i in 1:3;_store_owned_scalar!(out,i,values[i]);end
+    return (value=fstar,iterations=steps,root_residual=residual,dual_margin=D)
 end
