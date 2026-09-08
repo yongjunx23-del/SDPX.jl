@@ -64,7 +64,7 @@ try
         out["factor_formula_pass"]=all(x->x["factor_formula_frobenius_squared"]<=Q(FactorPreservingAffine.RG.KAPPA)^2,item.reference.metrics)
         out["true_hessian_formula_pass"]=all(x->x["true_hessian_formula_frobenius_squared"]<=Q(FactorPreservingAffine.RG.KAPPA)^2,item.reference.metrics)
         out["native_runtime_bounds"]="unavailable; reference-verified research only"
-        out["stored_epoch"]=Dict(string(k)=>rawbits(getfield(epoch,k)) for k in
+        out["stored_epoch"]=Dict{String,Any}(string(k)=>rawbits(getfield(epoch,k)) for k in
             (:b,:c,:x,:s,:y,:tau,:kappa,:mu,:Ahat,:bhat,:core))
         out["stored_epoch"]["A"]=Dict("shape"=>collect(size(epoch.A)),"colptr"=>copy(epoch.A.colptr),
             "rowval"=>copy(epoch.A.rowval),"nzval"=>rawbits(epoch.A.nzval))
