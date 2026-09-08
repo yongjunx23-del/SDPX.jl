@@ -98,6 +98,16 @@ stored-coordinate derivatives, scalar elimination and stored-factor transforms
 supply geometry diagnostics; final sqrt displays use512-bit BigFloat only after
 candidate formation. No reference result feeds native reconstruction.
 
+For the retained cases, exact rational controls additionally separate good L
+and true decrement from inaccurate materialized H/B. An entrywise maximum is
+a LOWER bound on spectral norm. With E=L^-1 H* L^-T-I, use e=3max|Eij| as a
+rational upper bound on ||E||2. For F=L'BL-I and e<1, the true inverse-metric
+error is at least (1-e)max|Fij|-e: rearrange
+F=K^-1/2(M+I)K^-1/2-I, K=I+E, and bound ||K^-1|| and ||K^-1-I||.
+The symmetric M is orthogonally similar to H*^(1/2) B H*^(1/2)-I. These exact
+lower bounds can prove actual metric-budget failure, unlike a wide interval
+upper bound. They still do not prove every Float64 representation is impossible.
+
 Root qualification, native formula gates, and geometry qualification are distinct
 outcomes. Root-qualified/geometry-unsupported is meaningful progress, not a solver
 success. This slice grants no production routing, general-alpha, public Power,

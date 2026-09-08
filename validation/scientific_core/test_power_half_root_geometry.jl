@@ -52,14 +52,29 @@ function diagnostic_truth(s,H,L,dual;B=nothing)
     Id=Matrix{Q}(I,3,3);K=W*Hstar*W';errH=W*(h-Hstar)*W'
     residual=-g-Q.(dual);decrement2=sum(residual.*rational_solve(Hstar,residual))
     @assert decrement2>=0
+    ceiling=Q(RG.KAPPA);factor_error=K-Id
+    # These retained cases have a good actual stored L and true-point Newton
+    # decrement, but materialized H loses the required metric accuracy.
+    @test sum(abs2,factor_error)<=ceiling^2
+    @test decrement2<=ceiling^2
+    @test maximum(abs,errH)>ceiling # entrywise max is a spectral-norm LOWER bound
     normstr(A)=setprecision(BigFloat,512) do;sqrt(BigFloat(sum(abs2,A)));end
     data=Dict{String,Any}("eta_frobenius"=>string(normstr(K-Id)),
         "etaH_frobenius"=>string(normstr(errH)),
         "true_decrement"=>string(setprecision(BigFloat,512) do;sqrt(BigFloat(decrement2));end),
         "native_H_exact_spd"=>exact_spd(h),"true_H_exact_spd"=>exact_spd(Hstar))
+    @test data["native_H_exact_spd"] && data["true_H_exact_spd"]
     if B!==nothing
         b=Q.(B);data["native_B_exact_spd"]=exact_spd(b)
-        data["beta_frobenius"]=string(normstr(l'*b*l-Id))
+        @test data["native_B_exact_spd"]
+        F=l'*b*l-Id
+        data["beta_frobenius"]=string(normstr(F))
+        # eta <= ||E||F <= 3 max|Eij|. If eta<1, the true inverse-metric
+        # discrepancy is at least (1-eta)||F||2-eta; all bounds here are exact.
+        eta_bound=3maximum(abs,factor_error)
+        inverse_lower=(1-eta_bound)*maximum(abs,F)-eta_bound
+        @test eta_bound<1 && inverse_lower>ceiling
+        data["true_inverse_metric_lower_bound"]=string(inverse_lower)
     end
     data
 end
