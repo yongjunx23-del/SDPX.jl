@@ -178,10 +178,10 @@ end
     sessions =
         [SDPX.prepare(_r2_problem(), _r2_options()) for _ in 1:n_sessions]
     # Independent sessions own independent solve-local state objects.
-    for i in 2:n_sessions
-        @test sessions[i].state !== sessions[1].state
+    for i in 2:n_sessions, j in 1:i-1
+        @test sessions[i].state !== sessions[j].state
         @test sessions[i].structure.fingerprint ==
-            sessions[1].structure.fingerprint
+            sessions[j].structure.fingerprint
     end
     cache0 = SDPX.structure_cache_stats()
 
@@ -206,11 +206,11 @@ end
     end
     # Disjointness of these checked buffers, not an inventory of every
     # internal numeric allocation.
-    for i in 2:n_sessions
-        @test !Base.mightalias(results[i].x,results[1].x)
+    for i in 2:n_sessions, j in 1:i-1
+        @test !Base.mightalias(results[i].x,results[j].x)
         @test !Base.mightalias(sessions[i].state.last_reduced_objective,
-            sessions[1].state.last_reduced_objective)
-        @test sessions[i].state.previous !== sessions[1].state.previous
+            sessions[j].state.last_reduced_objective)
+        @test sessions[i].state.previous !== sessions[j].state.previous
     end
     for (i, session) in enumerate(sessions)
         @test session.state.solve_count == 1
