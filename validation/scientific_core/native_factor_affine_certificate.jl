@@ -75,7 +75,7 @@ function bfgs_bound(block,poly)
     Id=[RG.point(i==j ? 1 : 0) for i in 1:3,j in 1:3]
     M=[Id[i,j]-a[i]*a[j]/aa+b[i]*b[j]/(RG.point(block.mu)*p) for i in 1:3,j in 1:3]
     scaled=RG.point(block.mu)/(RG.point(block.scale)*RG.point(block.scale))
-    E=scaled.*RG.whiten(RG.point.(block.R),M).-Id
+    E=Ref(scaled).*RG.whiten(RG.point.(block.R),M).-Id
     etaM=RG.norm_bound(E);etaH=certificate.eta
     etaH<1 || return (status=:unsupported,reason=:factor_bound,etaM,etaH)
     # B -> B-Byy'B/(y'By) is monotone and homogeneous (minimum over a
