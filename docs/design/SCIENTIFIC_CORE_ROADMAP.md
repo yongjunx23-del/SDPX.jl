@@ -24,19 +24,20 @@
 - R1：BFLA `aaa71f3` 的有效舍入与 RRQR 创建语境元数据修复通过核心源码/证据复核。父流程独立执行：Julia 1.12 核心 10,960 项，Julia 1.10 核心 10,957 项加 1 项不适用，双线程 285 项；48 组同运行时默认舍入记录一致。Julia 1.11 与 LinearSolve 扩展仍未验证；QDLDL 仅有下述有限验证。
 - R2：结构缓存代际/锁协议 `b82c7a3` 已集成，2/4 线程各 98 项通过；实际因子所有者诊断 `a85d24b` 已集成，239 项诊断加 57 项 Newton 检查通过。
 - 新 BFLA 仅进入独立 SDPX 验证环境，96 项集成检查通过；原受保护环境与 provider 主分支不变。
-- R3：BFLA/QDLDL 0.4.1 在 n=12、256/512/1024-bit、单线程下通过 231 项父流程复测，包含原矩阵残差、所有权和失效控制；加载来源绑定 fail-closed。另有 886 项精确秩/相容性及原始 KKT 残差参考检查通过；借用的正则策略和 12 次细化是实验规则，不等于生产门。内部 factor-cache 适配器已集成为 `a72d1cc`，父流程通过 287 项适配器、24 项 MFLA 共用 seam、4 项缺失扩展/默认路线检查；使用 checked solve，调用者仍须提供合格移位算子与原始残差权威。公开 BigFloat 稀疏路线仍关闭，不构成 symmetric-core、规模或性能资格。
+- R3：BFLA/QDLDL 0.4.1 在 n=12、256/512/1024-bit、单线程下通过 231 项父流程复测，包含原矩阵残差、所有权和失效控制；加载来源绑定 fail-closed。另有 886 项精确秩/相容性及原始 KKT 残差参考检查通过；借用的正则策略和 12 次细化是实验规则，不等于生产门。内部 factor-cache 适配器已集成为 `a72d1cc`，父流程通过 287 项适配器、24 项 MFLA 共用 seam、4 项缺失扩展/默认路线检查；使用 checked solve，调用者仍须提供合格移位算子与原始残差权威。公开 BigFloat 稀疏路线仍关闭，不构成完整 symmetric-core、规模或性能资格。
 - R4：MFLA/MFA 两个尺寸已有同类型 ABBA 多进程重复观察、全幅输入和可测的产品对消；仍无通用或 solver 速度资格。显式实验性 MFA 串行策略及 runner 已通过限定审阅，父流程在 Julia 1.10/1.12 各复测 87 项及来源/哈希/日志失败控制。另一个 MFA 连续视图增量 `cdb8468` 在 MF3.2.6 下通过 215,412 项父流程测试；不能把旧 pin 的资格自动转移给新 pin。默认关闭，远端 CI 未执行；ABBA 不排除全部位置效应。
 - R5：MFLA 实验性并行策略的非单射目标存储拒绝与真实 limb-bit 检查经修复；父流程日志增量 `5399c0cc` 获独立窄审通过。Julia1.12 下 t1/t4 分别通过 218/234 项，实际公开调用回执观测到最多 4 个线程，串行标注 tasks_spawned=0；固定 MFA `cdb8468`、MF3.2.6，来源/环境前后散列一致。仅为这些显式实验调用的正确性资格，不是默认路线、solver 或大核数性能资格。
 - R0：独立几何反例已永久接线。Power 区间参考通过独立审阅及 337 项父流程复测；Exp 导数/坐标参考经范围修复后通过 129 项复测与审阅。二者均未接入生产；完整 SAME-metric 缩放与冻结 epoch 迁移仍未完成，完整公开套件仍受既有 Power/mixed Exp 失败阻断。
 
-### 尚未过门的当前候选
+### 受限集成与仍未过门的工作
 
-- R3 隔离候选的主窗口修复 `da0c244` 已获 Astra high 窄审通过：冻结精度与舍入、精确 CSC/回填映射绑定、实验结构数组独立所有权及真正的 post-factor 失败恢复；父流程 1,053 项通过（212 原有 +841 新增），210 个来源/环境散列不变。后继 `10ff7d1` 将内存准入明确改为 unavailable 并在构造前拒绝；显式私有研究入口不授予内存资格，1,080 项通过包括 27 项拒绝检查，后继窄审通过，旧概述注释已修正。仍为 LP-only 未集成候选，SOC、完整内存上界、公开路线与规模资格未完成。
-- BFLA 隔离后继 `5fce2e6` 新增显式 `ordering=:natural`，调用同一 QDLDL 的 `perm=nothing`；省略选项保留 AMD。父流程 244 项检查通过，另有 256/512/1024-bit 三个默认路径前后进程的精确有限值/精度/符号/元数据对照一致；独立审阅通过。SDPX 隔离桥接候选 `772b724` 已通过新 provider 的 1,513 项及旧 provider 的 1,400 项检查，各自 262 个来源/环境散列前后一致；包含 MFLA 共用 seam、旧 BFLA 拒绝自然排序且保留 AMD，以及 256/512-bit 自然排序研究方向的原五方程验收。桥接窄审待完成，内存准入仍拒绝；自然排序本身不补足完整内存上界。原 BFLA 主分支与 `aaa71f3` 资格不变。
+- R3 主窗口修复 `da0c244` 已获 Astra high 窄审通过：冻结精度与舍入、精确 CSC/回填映射绑定、实验结构数组独立所有权及真正的 post-factor 失败恢复；父流程 1,053 项通过（212 原有 +841 新增），210 个来源/环境散列不变。后继 `10ff7d1` 将内存准入改为 unavailable 并在构造前拒绝；显式私有研究入口不授予内存资格，1,080 项通过包括 27 项拒绝检查，窄审通过。最终研究实现与下述桥接已整合到开发分支 `4701fac`，源码除路线图外与已审阅 `772b724` 完全一致。资格仍限 LP-only、UNADMITTED 小型研究；SOC、完整内存上界、公开路线与规模资格未完成。
+- BFLA 隔离后继 `5fce2e6` 新增显式 `ordering=:natural`，调用同一 QDLDL 的 `perm=nothing`；省略选项保留 AMD。父流程 244 项检查及三个精度的默认路径前后进程精确对照通过，独立审阅通过。SDPX 桥接 `772b724` 窄审通过，开发分支整合后重新通过新 provider 的 1,513 项及旧 provider 的 1,400 项检查；各自 262 个散列前后一致，260 个非私有环境散列与被审版本相同。覆盖旧 BFLA 拒绝自然排序且保留 AMD、MFLA 共用 seam、256/512-bit 研究方向的原五方程验收。内存准入仍拒绝，BFLA 主分支与原 `aaa71f3` 资格不变。
+- 存储诊断隔离候选 `849bb50` 只统计选定数组的逻辑存储，不由 SDPX 加载。初稿 `ce8c9bb` 被审阅发现 `precision(x)` 会修复反序列化后的 MPFR 指针，父流程在三个精度均复现原始第 4 个 limb word 被改写；现改为已锁定的只读 `x.prec`，增加原始字节不变回归。162 项通过、169 个散列不变，修复复核待完成；独立 C 头文件探针支持相应布局字段。仍不包含完整对象/阶段、MPFR/GMP scratch、allocator/GC 或 RSS 上界，不授予内存准入或 HPC Linux 资格。
 - Exp 参考测试 `0c8f767` 已恢复真正跨表示的逐元素协变门，而非仅修改阈值；父流程通过 metric251/chart129 项，最大协变误差约 3.48e-14，最终独立窄审通过。资格限于 reference-only；生产共轭、fallback、epoch、corrector 或 Newton 仍未完成。
 - PBS 算术 pilot `211161.node220` 的 harness `6e68fc2` 被父流程判为不能计 A/B 性能资格：所谓 ABBA/BAAB 实为输入种子交换，非调用交替；同进程三次采样也不是独立进程重复，计时插桩和执行来源绑定尚需修复。用户明确批准取消后，父流程核对目标身份与 Q 状态，仅对该 job 执行 qdel（exit0），随后核实 C 状态；原 payload/receipt 保留，未提交重复任务，held210917 不动。此结论不撤销已取得的本地 provider 正确性资格。
 
-新增证据：`local-archives/high-precision-ecosystem-20260908/` 下的 `mfla-parallel-parent-validation/`、`sparse-adapter-parent-validation/`、`exp-covariance-parent-fix/` 和 `r5-kernel-pbs-pilot-20260908/parent-methodology-audit.md`。
+新增证据：`local-archives/high-precision-ecosystem-20260908/` 下的 `mfla-parallel-parent-validation/`、`sparse-adapter-parent-validation/`、`exp-covariance-parent-fix/` 、`r3-reviewed-integration/`、`julia112-logical-storage-parent/`、`power-production-next/` 和 `r5-kernel-pbs-pilot-20260908/parent-methodology-audit.md`。
 
 ## 架构选择与不可越过的门
 
@@ -51,7 +52,7 @@
 **保留范围**：独立 primal/dual/HSD 推导，强弱不可行及非 Slater 边界；Exp 自协调性/Fenchel 关系；SOC `2μe` 与 Euclidean/svec pairing；所有 RHS、scalar closure、coupled/fused/trial/refinement/ray 消费者。
 
 **下一步**：
-- Power：联合处理根残差、可靠区间、停滞和有限预算，不能只收紧区间或盲加迭代数。覆盖 Float64、BF256/BF512、x4 冷种子和近边界点。
+- Power：先修复共享对数比值的信息丢失。父流程确认 Float64 `n=3*2^-54,d=1` 的 `log1p(fl((n-d)/d))` 及对应 Phi 误差约 0.287682，而现有 floor 仅 6.7291e-13；不据此声称它就是历史求解失败原因。完整 native 误差账本仍缺失，Cartesian 诊断也不能被当作独立重算真实梯度。随后联合处理根残差、可靠区间、停滞和有限预算，禁止仅收紧区间或盲加迭代数。覆盖 Float64、BF256/BF512、x4 冷种子和近边界点。
 - Exp：补中心比值消去的精确点回归及范围/溢出负例；以正确的 Float64 ulp 和显式舍入参考区分梯度重构误差与配对求和误差。研究稳定梯度/metric 表示，保留全部独立门。
 - PSD：把实际 SDPX 生成的 `S/Y/P/Pinv/R/Q/Lambda` 直接提升精度回放，不更换 Cholesky、svec 展开或重新求逆；分别处理谱相对精度、表示和检查误差。对 factor-coordinate 或 scaled-frame 方案给出双向误差传播及失效条件。
 - 把所有已确认反例纳入永久测试；不把舍入上界、两个精度下的失败或局部失败推成普遍不可能性。
@@ -67,7 +68,7 @@
 **高精度增补**：
 - 256/512/1024-bit × ambient/scoped precision/rounding × task/thread 传播；明确支持的舍入模式，再选择统一实现或对不支持模式提前拒绝。重点判别 MA 的 `ROUNDING_MODE[]` 与 BFLA 的 `rounding_raw(BigFloat)`。
 - 明确 finite/overflow/subnormal、EFT 前提、normalized/canonical、误差预算、可复现与正确舍入的不同资格。MFA x2–x4 深对消用精确 dyadic 参考；x5–x8 safe 层保持研究/参考身份。
-- Julia 1.12.6 BigFloat 使用 Julia 管理的 `Memory{Limb}`。分别测持久存储、可能的 MPFR/GMP 临时分配和 RSS；不得宣称全部 limb 分配对 Julia 不可见，也不假定存在主导性能的 MPFR 全局锁。
+- Julia 1.12.6 BigFloat 为不可变包装，内部 `Memory{Limb}` 仍可变。本机 aarch64 Darwin 的具体数组内联 8-byte 包装；Memory 同时包含 32-byte MPFR 描述符及 significand，不另计逐元素 boxed BigFloat。按实际 backing capacity 和 Memory 身份去重，不能用值相等代替；`precision(x)` 也不必然是只读操作。分别计算逻辑存储、MPFR/GMP 临时分配、allocator/GC 与 RSS；不得把局部逻辑账目当完整内存上界或推广到其他 ABI。
 
 **验收**：无错误 positive certification；source/result mutation 不影响既有结果；默认舍入数值行为保持可核对，非支持上下文明确失败；测试实际加载版本与宣称一致。
 
