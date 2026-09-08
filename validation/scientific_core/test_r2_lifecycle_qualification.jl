@@ -53,7 +53,7 @@ println("provenance: SDPX version=",
     Pkg.dependencies()[Base.UUID("9c19f76d-03c5-4610-b403-7c8fdd8897fd")].version)
 
 if !isempty(_EXPECT_ROOT)
-    @test _LOADED_ROOT == _EXPECT_ROOT
+    @test realpath(_LOADED_ROOT) == realpath(_EXPECT_ROOT)
 end
 if !isempty(_EXPECT_HEAD)
     @test _LOADED_HEAD == _EXPECT_HEAD
