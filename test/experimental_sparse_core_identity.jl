@@ -202,25 +202,26 @@ end
         end
     end
 
-    @testset "experimental metadata is not shared cache payload" begin
+    @testset "experimental metadata is private and does not publish cache payload" begin
+        cache_before = SDPX.structure_cache_stats()
         first_ws, system, ctx = _identity_fixture()
         second_ws, _, _ = _identity_fixture()
-        cached = lock(SDPX._SYMMETRIC_CORE_STRUCTURE_LOCK) do
-            SDPX._SYMMETRIC_CORE_STRUCTURE_CACHE.patterns[(BigFloat, first_ws.pattern.signature)]
+        @test SDPX.structure_cache_stats() == cache_before
+        for name in (:ar_colptr, :ar_rowval, :colptr, :rowval, :ar_slots,
+                     :theta_slots, :x_diag_slots, :block_ranges, :block_shapes)
+            a, b = getproperty(first_ws.pattern, name), getproperty(second_ws.pattern, name)
+            @test a == b
+            @test a !== b
         end
-        for name in (:colptr, :rowval, :ar_slots, :theta_slots, :x_diag_slots,
-                     :block_ranges, :block_shapes)
-            a, b, c = getproperty(first_ws.pattern, name), getproperty(second_ws.pattern, name), getproperty(cached, name)
-            @test a == b == c
-            @test a !== b && a !== c && b !== c
-        end
+        second_slots = copy(second_ws.pattern.theta_slots)
         first_ws.pattern.theta_slots[1], first_ws.pattern.theta_slots[2] =
             first_ws.pattern.theta_slots[2], first_ws.pattern.theta_slots[1]
         @test_throws ArgumentError SDPX.factor_experimental_sparse_core_epoch!(first_ws, system, 2)
-        @test second_ws.pattern.theta_slots == cached.theta_slots
+        @test second_ws.pattern.theta_slots == second_slots
         @test SDPX._core_factor_matches_pattern(second_ws.cache, second_ws.pattern)
         third_ws, _, _ = _identity_fixture()
         @test SDPX.factor_status(third_ws.cache) === SDPX.Fresh
+        @test SDPX.structure_cache_stats() == cache_before
     end
 
     @testset "refill maps are checked before they can write" begin

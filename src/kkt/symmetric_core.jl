@@ -2883,6 +2883,83 @@ function experimental_sparse_core_memory_inventory(nr::Integer, m::Integer, a::I
     )
 end
 
+# Private research pattern allocation is independent of the shared cache.
+# These are checked logical lengths, NOT capacity/byte/RSS admission bounds.
+function _research_private_lp_counts(n::Integer, m::Integer, a::Integer)
+    n >= 0 && m >= 0 && a >= 0 || throw(ArgumentError("negative private LP dimensions"))
+    nr, rows, entries = Int(n), Int(m), Int(a)
+    d = Base.checked_add(nr, rows)
+    d <= EXPERIMENTAL_SPARSE_CORE_MAX_DIMENSION || throw(ArgumentError("private LP dimension outside research scope"))
+    entries <= Base.checked_mul(nr, rows) || throw(ArgumentError("private LP nonzero count outside scope"))
+    q = Base.checked_add(d, entries)
+    return (n=nr, m=rows, d=d, a=entries, q=q)
+end
+function _research_private_lp_counts(A::SparseMatrixCSC)
+    A isa SparseMatrixCSC{BigFloat,Int} || throw(ArgumentError("private LP requires BigFloat/Int CSC storage"))
+    m, n = size(A)
+    counts = _research_private_lp_counts(n, m, length(A.nzval))
+    length(A.rowval) == counts.a && length(A.colptr) == n + 1 || throw(DimensionMismatch("private LP CSC lengths"))
+    A.colptr[1] == 1 && A.colptr[end] == counts.a + 1 || throw(ArgumentError("private LP CSC endpoints"))
+    for j in 1:n
+        1 <= A.colptr[j] <= A.colptr[j+1] <= counts.a + 1 || throw(ArgumentError("private LP CSC pointers"))
+        previous = 0
+        for k in A.colptr[j]:A.colptr[j+1]-1
+            row = A.rowval[k]
+            previous < row <= m || throw(ArgumentError("private LP CSC rows must be sorted and unique"))
+            previous = row
+        end
+    end
+    return counts
+end
+
+"""Private exact-length LP pattern: no cache lookup/publication or Ar copy.
+Only the final pattern owns new arrays. Existing refill/signature semantics are
+reused; visible lengths do not certify backing capacity or total live bytes.
+"""
+function _research_private_lp_pattern(system::NewtonSystem{BigFloat})
+    A = system.A
+    A isa SparseMatrixCSC || throw(ArgumentError("private LP requires sparse A"))
+    n, m, d, a, q = _research_private_lp_counts(A)
+    cone = system.cone
+    cone isa Union{ProductConeLinearization{BigFloat},BlockProductConeLinearization{BigFloat}} ||
+        throw(ArgumentError("private LP requires a product cone"))
+    length(cone.block_ranges) == m && all(i -> cone.block_ranges[i] == (i:i), 1:m) ||
+        throw(ArgumentError("private LP requires ordered scalar blocks"))
+    ar_colptr = Vector{Int}(undef, n+1); copyto!(ar_colptr, A.colptr)
+    ar_rowval = Vector{Int}(undef, a); copyto!(ar_rowval, A.rowval)
+    colptr = Vector{Int}(undef, d+1)
+    rowval = Vector{Int}(undef, q)
+    ar_slots = Vector{Int}(undef, a)
+    theta_slots = Vector{Int}(undef, m)
+    x_diag_slots = Vector{Int}(undef, n)
+    ranges = Vector{UnitRange{Int}}(undef, m)
+    shapes = fill(:dense_lower, m)
+    slot = 1
+    for j in 1:n
+        colptr[j] = slot; rowval[slot] = j; x_diag_slots[j] = slot; slot += 1
+        for k in A.colptr[j]:A.colptr[j+1]-1
+            rowval[slot] = n + A.rowval[k]; ar_slots[k] = slot; slot += 1
+        end
+    end
+    for i in 1:m
+        ranges[i] = i:i; colptr[n+i] = slot
+        rowval[slot] = n+i; theta_slots[i] = slot; slot += 1
+    end
+    colptr[d+1] = slot
+    slot == q+1 || error("private LP slot coverage")
+    signature = _symmetric_core_structure_signature(n, m, ar_colptr, ar_rowval, ranges, shapes)
+    pattern = SymmetricCorePattern{BigFloat}(n,m,d,ar_colptr,ar_rowval,ranges,shapes,
+        colptr,rowval,ar_slots,theta_slots,x_diag_slots,alloc_zeros(BigFloat,q),signature)
+    _core_write_ar!(pattern, A)
+    if cone isa ProductConeLinearization{BigFloat}
+        _core_validate_theta_blocks(pattern, cone.operator)
+        _core_write_theta_lower!(pattern, cone.operator)
+    else
+        _core_write_block_thetas!(pattern, cone)
+    end
+    return pattern
+end
+
 """Memory-admitting experimental preparation: currently fails closed.
 
 No complete owned-live byte bound is available. Unknown or invalid capacity
@@ -2975,11 +3052,9 @@ function _research_prepare_experimental_sparse_core_state(
         "experimental sparse core identity coordinates require nr == n, " *
         "got nr=$nr, n=$n",
     ))
-    d = nr + m
-    d <= EXPERIMENTAL_SPARSE_CORE_MAX_DIMENSION || throw(ArgumentError(
-        "experimental sparse core dimension $d exceeds the admitted " *
-        "small-system bound $EXPERIMENTAL_SPARSE_CORE_MAX_DIMENSION",
-    ))
+    # Validate counts/CSC structure before witness indexing or structural allocation.
+    counts = _research_private_lp_counts(system.A)
+    d = counts.d
     cone = system.cone
     cone isa Union{ProductConeLinearization{BigFloat},
                    BlockProductConeLinearization{BigFloat}} ||
@@ -2990,7 +3065,7 @@ function _research_prepare_experimental_sparse_core_state(
     block_ranges = symmetric_core_block_ranges(cone)
     _experimental_validate_families(block_ranges, cone_families)
     block_sizes = Int[length(rows) for rows in block_ranges]
-    ar_nnz = system.A isa SparseMatrixCSC ? nnz(system.A) : m * n
+    ar_nnz = counts.a
     # Dimension-only budget gate BEFORE any allocation below.
     estimate = experimental_sparse_core_bytes(nr, m, ar_nnz, block_sizes)
     estimate >= typemax(Int) && throw(ArgumentError(
@@ -3021,19 +3096,10 @@ function _research_prepare_experimental_sparse_core_state(
     end
     # Research-only allocations. The inventory above is not yet a certified
     # simultaneous-live bound; do not promote this gate to production policy.
-    # Normal core patterns share read-only cache metadata. This experiment
-    # explicitly checks malformed live metadata, so give it private copies:
-    # mutation of one admitted pattern must not poison the global cache or
-    # a later workspace. The default/shared-cache policy is unchanged.
-    built = _symmetric_core_pattern_from_validated(system, V)
-    pattern = SymmetricCorePattern{BigFloat}(
-        built.nr, built.m, built.dimension,
-        copy(built.ar_colptr), copy(built.ar_rowval),
-        copy(built.block_ranges), copy(built.block_shapes),
-        copy(built.colptr), copy(built.rowval),
-        copy(built.ar_slots), copy(built.theta_slots), copy(built.x_diag_slots),
-        built.nzval, built.signature,
-    )
+    # The private research path allocates its final owned pattern directly:
+    # no global cache side effects, cached-template overlap, or sparse(A) copy.
+    # Default/shared constructors and memory admission remain unchanged.
+    pattern = _research_private_lp_pattern(system)
     wrapper = ExperimentalSparseCoreCache(
         pattern, system, delta; symbolic_epoch=Int(symbolic_epoch), ordering=ordering,
     )
