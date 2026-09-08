@@ -40,6 +40,8 @@ end
 function save(name,data)
     open(joinpath(OUT,name*".toml"),"w") do io;TOML.print(io,data;sorted=true);end
 end
+rawbits(A::AbstractArray{Float64})=Dict("shape"=>collect(size(A)),"bits"=>bitstring.(vec(A)))
+rawbits(x::Float64)=Dict("bits"=>bitstring(x))
 before=snapshot();save("before",before)
 try
     include("test_factor_preserving_affine.jl")
@@ -58,6 +60,21 @@ try
             "dkappa_bits"=>bitstring(result.direction.dkappa),
             "transformed_residual_max"=>maximum(abs,result.transformed_residual))
         out["exact_reference"]=item.info
+        out["research_physical_equations_pass"]=all(x->x<=Q(FactorPreservingAffine.PHYSICAL_FORCING),item.reference.errors)
+        out["factor_formula_pass"]=all(x->x["factor_formula_frobenius_squared"]<=Q(FactorPreservingAffine.RG.KAPPA)^2,item.reference.metrics)
+        out["true_hessian_formula_pass"]=all(x->x["true_hessian_formula_frobenius_squared"]<=Q(FactorPreservingAffine.RG.KAPPA)^2,item.reference.metrics)
+        out["native_runtime_bounds"]="unavailable; reference-verified research only"
+        out["stored_epoch"]=Dict(string(k)=>rawbits(getfield(epoch,k)) for k in
+            (:b,:c,:x,:s,:y,:tau,:kappa,:mu,:Ahat,:bhat,:core))
+        out["stored_epoch"]["A"]=Dict("shape"=>collect(size(epoch.A)),"colptr"=>copy(epoch.A.colptr),
+            "rowval"=>copy(epoch.A.rowval),"nzval"=>rawbits(epoch.A.nzval))
+        out["stored_epoch"]["factor"]=rawbits(epoch.factor.factors)
+        out["stored_epoch"]["pivots"]=copy(epoch.factor.ipiv)
+        out["stored_epoch"]["lp_scales"]=rawbits(epoch.cone.lp_scales)
+        out["stored_epoch"]["blocks"]=[Dict("offset"=>b.offset,"L"=>rawbits(b.L),"R"=>rawbits(b.R),
+            "scale"=>rawbits(b.scale),"mu"=>rawbits(b.mu),"primal"=>rawbits(b.primal),
+            "dual"=>rawbits(b.dual),"shadow"=>rawbits(b.shadow)) for b in epoch.cone.blocks]
+        out["rhs"]=Dict(string(k)=>rawbits(getfield(result.rhs,k)) for k in fieldnames(typeof(result.rhs)))
         push!(rows,out);save("research-results",Dict("cases"=>rows,"production_admitted"=>false))
         println("REFERENCE_CHECKED_UNPROMOTED ",id," physical_errors=",item.info["physical_normalized_errors"])
     end
