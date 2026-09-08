@@ -31,6 +31,8 @@
 
 ### 受限集成与仍未过门的工作
 
+- R0 隔离 PSD 阶段捕获 `836e085` 完成父流程检查，独立审阅待完成，不集成观察钩子。七个 n=2 Float64 案例在 base/off/on 三进程的终态、workspace 与算子输出位型相同，28/28/181 共 237 项通过，各 230 个散列不变。dyadic 反例的首个 Jacobi 已在非零 off≈8.88e-16≤tol≈4.44e-15 时不旋转返回；实际首个 core inverse 的 DMD−I 误差已约 0.7071，不只是后续 Pinv 构造问题。最终原逆向门正确拒绝。captured_toy 也在首个绝对阈值处退出，但原坐标误差须由保留的带符号传播项分析，不能仅凭未加权 core 残差作普遍结论。参考、拷贝所有权、失败后 valid、精确存储矩阵形状与算子控制见 `psd-stage-capture/parent-report.md`；尚无数值修复或 PSD 求解资格。
+- Provider 后继诊断 PBS `211443` 确认 login2/node120 的 Git 版本相同但 RPM/二进制散列不同；独立前后来源不变。严格 node120 专用散列绑定后，PBS `211446` 的身份、零测试 preflight 和末尾来源门均通过，QDLDL 240 项、四线程 285 项通过；core 为 10952 通过、0 失败、1 个 `lu` 导出歧义错误，不能计完整通过。父流程隔离 harness 修复 `faf152b` 仅将 LinearAlgebra 改为 module import 并限定两处 BLAS 名称：本地复现旧错误，新 core 10960 项及三个既有选择 660 项均通过，35 个 core 文件/入口出口标记不变，逐项前后散列相同。该修复独立审阅与再次计算节点验证仍待完成；不改 provider/test/阈值，不覆盖旧 campaign，不授予性能资格。证据：`provider-git-diagnostic-ebc1d91a/`、`node120-provider-retry-fb2e1748/`、`provider-namespace-fix/`。
 - BFLA `5fce2e6` 的新 Mac 兼容性选择由冻结 harness `5f742c4` 执行：Julia 1.10.11 QDLDL/自然排序 240 项、Julia 1.12.6 四线程 285 项、LinearSolve 5.16.0/SciMLBase 3.53.1 扩展 135 项，共 660 项通过。父流程核对原始日志与逐项相等的前后快照（305/293/1323 个散列）；三个私有环境离线建立，无源码或 pin 变更。资格仅限这些选择，不追溯授予旧 `aaa71f3` 的 LinearSolve 资格，也不等于完整核心、求解器或性能资格。证据：`provider-qualification-parent/parent-mac-verification.json`，原始记录 `/var/tmp/sdpx-mac-compat-l5B4wQTL/`。
 - 同一 harness 的 PBS `211442.node220`（node120、8 核、16GB、2 小时）已结束，但 core/QDLDL/threading 三项均在数值测试前退出 1：私有 Git shim 报 `Real Git SHA mismatch`，真实 Git 子进程退出 91。不得计为 Linux 数值通过；计划、原始日志及 8 个文件的传输散列已保留于 `provider-qualification-parent/pbs211442/`。登录节点 Git 的固定散列尚未取得计算节点兼容资格；先独立记录计算节点真实二进制身份与来源，再审定修复，不移除散列门、不覆盖原 campaign。远端 AMD 0.5.3 与 Mac 0.5.4 的闭包亦须分别标注。
 
