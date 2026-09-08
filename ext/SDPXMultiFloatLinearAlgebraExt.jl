@@ -1360,8 +1360,10 @@ end
 # Optional QDLDL sparse signed-LDL provider (delegation seam).
 # MFLA exposes `sparse_ldlt_available` / `sparse_ldlt_cache` only when its
 # own QDLDL extension is loaded; otherwise SDPX fails closed.  The provided
-# pattern is the SDPX symmetric-core upper-triangular CSC with a +1/-1
-# D-sign descriptor (quasi-definite K), matching the QDLDL contract.
+# pattern is a caller-supplied eligible upper-triangular factor operator
+# with a +1/-1 D-sign descriptor. A raw zero-primal-diagonal symmetric core
+# is not strictly quasi-definite; any required static shift belongs to the
+# caller, and original-operator residual certification remains separate.
 # ---------------------------------------------------------------------------
 
 function SDPX.SparseQDLDLProviderAvailable(::Type{MF}) where {MF<:MultiFloat}

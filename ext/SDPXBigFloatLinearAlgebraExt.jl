@@ -13,6 +13,7 @@ module SDPXBigFloatLinearAlgebraExt
 using SDPX
 using BigFloatLinearAlgebra
 using LinearAlgebra
+using SparseArrays
 
 const BFLA = BigFloatLinearAlgebra
 
@@ -1090,6 +1091,95 @@ function SDPX._build_symmetric_core_ldlt_cache_provider(
         cache, BigFloatFactorRequirements(pattern.dimension, precision_bits),
     )
     return cache
+end
+
+# ---------------------------------------------------------------------------
+# Optional QDLDL sparse signed-LDL delegation (INTERNAL, R3 bounded).
+#
+# Bridges the existing provider-neutral `SDPX.SparseQDLDLCache{BigFloat}` to
+# the reviewed BFLA QDLDL extension (`BFLA.sparse_ldlt_cache`, aaa71f3) over
+# QDLDL 0.4.1.  No kernel is duplicated and no new backend is introduced:
+# QDLDL owns symbolic/numeric LDL, BFLA owns precision and destination
+# ownership, and SDPX owns only cache lifecycle (see
+# `src/factor_cache/routes/qdldl_sparse.jl`).
+#
+# Loading safety: BFLA exposes `sparse_ldlt_available` / `sparse_ldlt_cache`
+# from core and fails closed when its own QDLDL extension is absent, so
+# ordinary BFLA/SDPX loading is unaffected by a missing QDLDL.  The
+# extension-only `BFLASparseLDLCache` type is never named here; the provider
+# payload is held opaquely in the SDPX-owned wrapper below.
+#
+# Caller contract (mirrors the route header): the caller supplies an
+# explicitly eligible (e.g. caller-shifted) upper-triangular operator; the
+# raw augmented core is NOT quasi-definite and the original operator stays
+# separate as the residual authority.  This adapter is not wired into any
+# public `optimize!` route; native high-precision routing remains
+# unqualified.
+# ---------------------------------------------------------------------------
+
+"""
+    _BFLASparseQDLDLProvider{C}
+
+SDPX-owned opaque handle for one BFLA QDLDL sparse-LDL cache.  `inner` is
+the BFLA-owned cache object (held opaquely so no extension-only type is
+referenced before the provider is loaded); `precision_bits` snapshots the
+ambient BigFloat precision at construction and `n` the frozen order.
+"""
+struct _BFLASparseQDLDLProvider{C}
+    inner::C
+    precision_bits::Int
+    n::Int
+end
+
+function SDPX.SparseQDLDLProviderAvailable(::Type{BigFloat})
+    isdefined(BFLA, :sparse_ldlt_available) || return false
+    try
+        return BFLA.sparse_ldlt_available(BigFloat) === true
+    catch
+        return false
+    end
+end
+
+function SDPX.SparseQDLDLProviderCache(
+    ::Type{BigFloat},
+    pattern::SparseMatrixCSC{BigFloat,Int},
+    dsigns::AbstractVector{<:Integer},
+)
+    SDPX.SparseQDLDLProviderAvailable(BigFloat) || throw(ArgumentError(
+        "QDLDL-backed sparse LDL provider is not loaded for BigFloat; " *
+        "load QDLDL alongside BigFloatLinearAlgebra",
+    ))
+    bits = precision(BigFloat)
+    inner = BFLA.sparse_ldlt_cache(
+        pattern; precision_bits=bits, dsigns=collect(Int, dsigns), nrhs=1,
+    )
+    return _BFLASparseQDLDLProvider(inner, bits, size(pattern, 1))
+end
+
+function SDPX._qdldl_provider_factorize!(
+    provider::_BFLASparseQDLDLProvider,
+    A::SparseMatrixCSC{BigFloat,Int},
+)
+    BFLA.factorize!(provider.inner, A)
+    BFLA.issuccess(provider.inner) || throw(ArgumentError(
+        "BFLA QDLDL numeric factorization failed; solve authority revoked",
+    ))
+    return provider
+end
+
+function SDPX._qdldl_provider_solve!(
+    provider::_BFLASparseQDLDLProvider,
+    destination::AbstractVector{BigFloat},
+    rhs::AbstractVector{BigFloat},
+)
+    # Ordinary SDPX solves use the provider CHECKED solve, which repairs
+    # (replaces) destination slots before the in-place triangular pass, so
+    # arbitrary caller-owned destinations — including `fill(BigFloat(0), n)`
+    # shared-slot storage — are safe.  No trusted (caller-guaranteed
+    # ownership) path is retained here; destination/rhs aliasing still
+    # rejects via the provider's mightalias gate.
+    BFLA.solve!(destination, provider.inner, rhs)
+    return destination
 end
 
 end

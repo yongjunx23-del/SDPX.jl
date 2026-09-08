@@ -63,6 +63,34 @@ high-precision sparse factorization is not currently a production capability.
 A sparse request without a supported exact provider fails closed or follows an
 explicit same-arithmetic dense/bordered plan; it never selects Float64.
 
+### Bounded internal sparse signed-LDL adapter (R3, not native routing)
+
+`SDPX.SparseQDLDLCache` is an INTERNAL adapter only: it bridges the existing
+provider-neutral cache lifecycle to the optional QDLDL-backed MFLA/BFLA
+sparse-LDL providers without kernel duplication or a new backend, and it is
+not wired into any public `optimize!` route. Native high-precision sparse
+routing remains unqualified, and BigFloat `sparse_augmented` Settings stay
+disabled (`kkt_route=:sparse_augmented` still requires Float64 CHOLMOD
+arithmetic).
+
+Caller contract: the caller supplies an explicitly eligible (e.g.
+caller-shifted) symmetric quasi-definite upper-triangular operator. The raw
+augmented core `K = [0 Ar'; Ar -Theta]` is NOT quasi-definite as stored
+(structural zeros on the reduced-x diagonals), so it must never be sent
+here; the original operator stays separate and remains the residual
+authority. Construction freezes the BigFloat working precision; every
+`factorize!` requires the current ambient precision and all input values
+to match it before any same-epoch reuse. Wrong element/index/storage
+types hit a rejecting fallback that revokes authority first. A reused
+`matrix_epoch` promises an unchanged operator (the numeric refactor is
+skipped without comparing values). Storage, pattern, finiteness and precision
+violations throw; a changed finite operator under the same epoch violates the
+caller's promise and is not detected. Any failed factorization leaves the
+cache `Failed` with no stale solves.
+Ordinary solves use the provider checked (slot-repairing) solve, so
+arbitrary caller-owned destinations are safe and no trusted path exists
+here.
+
 ## Factor receipts
 
 A `FactorReceipt` binds:
