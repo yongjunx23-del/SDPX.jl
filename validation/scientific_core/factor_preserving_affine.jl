@@ -3,6 +3,7 @@ module FactorPreservingAffine
 using SDPX, LinearAlgebra, SparseArrays, TOML
 include("power_half_root_geometry.jl")
 include("power_half_root_geometry_capture.jl")
+include("half_power_compensated_factor.jl")
 const RG=PowerHalfRootGeometry
 const CAP=HalfRootGeometryCapture
 const word=CAP.floatword
@@ -123,6 +124,7 @@ function inverse_action(cone,v)
 end
 struct AffineEpoch{F}
     source_record::Int
+    factor_mode::Symbol
     A::SparseMatrixCSC{Float64,Int}
     b::Vector{Float64}
     c::Vector{Float64}
@@ -149,10 +151,11 @@ function verify(e::AffineEpoch)
     SDPX.validate_cone_linearization(e.cone)
     epoch_fingerprint(e)==e.frozen || error("affine numerical epoch drift")
     (size(e.A),Tuple(e.A.colptr),Tuple(e.A.rowval),Tuple(e.factor.ipiv),
-        Tuple((b.offset,b.frozen) for b in e.cone.blocks),e.cone.frozen_lp)==e.frozen_structure || error("affine structure/factor drift")
+        Tuple((b.offset,b.frozen) for b in e.cone.blocks),e.cone.frozen_lp,e.factor_mode)==e.frozen_structure || error("affine structure/factor drift")
     true
 end
-function build(row)
+function build(row;factor_mode::Symbol=:stored_native)
+    factor_mode in (:stored_native,:compensated_half_candidate) || error("unsupported factor experiment")
     RG.Phi._runtime_ok() || error("unsupported Float64 arithmetic context")
     row["schema"]==1 && row["provider"]=="explicit_research_dual_hessian_one_secant" || error("provider policy")
     m,n=row["A_shape"];1<=n<=16 && 1<=m<=32 || error("bounded affine shape")
@@ -189,8 +192,16 @@ function build(row)
         replay.root.status===:qualified && get(replay.native,"factor_certificate",false) || error("root/factor replay unsupported")
         tag=SDPX.PowerConjugateTag{Float64}(word(p["alpha_bits"]))
         SDPX._ns_conjugate_primal_interior(tag,s[rows]...) || error("native current-primal domain gate failed")
-        metric,info=block_metric(offset,replay.snapshots["L"],s[rows],y[rows],replay.snapshots["shadow"],mu)
-        push!(blocks,metric);push!(construction,info)
+        L=replay.snapshots["L"]
+        factor_info=nothing
+        if factor_mode===:compensated_half_candidate
+            factor_info=HalfPowerCompensatedFactor.factor(replay.snapshots["shadow"])
+            factor_info.status===:formed || error("compensated factor domain unsupported")
+            L=factor_info.L
+        end
+        legacy_ok,legacy_error=SDPX._ns_structural_hessian_factor_certificate!(L,tag,replay.snapshots["shadow"]...)
+        metric,info=block_metric(offset,L,s[rows],y[rows],replay.snapshots["shadow"],mu)
+        push!(blocks,metric);push!(construction,(;info...,factor_mode,factor_info,legacy_ok,legacy_error))
     end
     cone=FactorCone(m,scales,blocks,words(scales));SDPX.validate_cone_linearization(cone)
     Ahat=hcat([transform(cone,Vector(A[:,j]),:W) for j in 1:n]...)
@@ -207,8 +218,8 @@ function build(row)
     factor=lu(K;check=true)
     frozen=fingerprint(A.nzval,b,c,x,s,y,tau,kappa,mu,Ahat,bhat,K,factor.factors)
     structural=(size(A),Tuple(A.colptr),Tuple(A.rowval),Tuple(factor.ipiv),
-        Tuple((b.offset,b.frozen) for b in cone.blocks),cone.frozen_lp)
-    AffineEpoch(row["source_record"],A,b,c,x,s,y,tau,kappa,mu,cone,Ahat,bhat,K,factor,frozen,structural,reports,construction)
+        Tuple((b.offset,b.frozen) for b in cone.blocks),cone.frozen_lp,factor_mode)
+    AffineEpoch(row["source_record"],factor_mode,A,b,c,x,s,y,tau,kappa,mu,cone,Ahat,bhat,K,factor,frozen,structural,reports,construction)
 end
 function affine_rhs(e::AffineEpoch)
     verify(e)

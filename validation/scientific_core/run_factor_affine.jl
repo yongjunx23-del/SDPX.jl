@@ -2,6 +2,8 @@ using SDPX, SHA, TOML, LinearAlgebra
 import MultiFloats, MultiFloatLinearAlgebra, BigFloatLinearAlgebra
 const ROOT=realpath(joinpath(@__DIR__,"../.."))
 const OUT=ENV["FACTOR_AFFINE_OUT"]
+const FACTOR_MODE=isempty(ARGS) ? "stored" : only(ARGS)
+@assert FACTOR_MODE in ("stored","compensated")
 @assert VERSION==v"1.12.6" && Threads.nthreads()==1 && realpath(pkgdir(SDPX))==ROOT==realpath(pwd())
 BLAS.set_num_threads(1)
 function snapshot()
@@ -24,6 +26,7 @@ function snapshot()
         hashes[name*"/Project.toml"]=bytes2hex(sha256(read(joinpath(root,"Project.toml"))))
     end
     for f in ("factor_preserving_affine.jl","factor_affine_reference.jl","test_factor_preserving_affine.jl",
+        "half_power_compensated_factor.jl","test_compensated_half_factor.jl","COMPENSATED_HALF_FACTOR.md",
         "run_factor_affine.jl","FACTOR_PRESERVING_AFFINE.md","power_half_root_geometry.jl",
         "power_half_root_geometry_capture.jl","power_half_phi_reference.jl",
         "fixtures/factor_affine_trial_17.toml","fixtures/factor_affine_trial_19.toml")
@@ -44,12 +47,13 @@ rawbits(A::AbstractArray{Float64})=Dict("shape"=>collect(size(A)),"bits"=>bitstr
 rawbits(x::Float64)=Dict("bits"=>bitstring(x))
 before=snapshot();save("before",before)
 try
-    include("test_factor_preserving_affine.jl")
+    include(FACTOR_MODE=="stored" ? "test_factor_preserving_affine.jl" : "test_compensated_half_factor.jl")
     rows=Dict{String,Any}[]
     for item in FACTOR_AFFINE_RESULTS
         epoch=item.epoch;result=item.candidate;id=epoch.source_record
         residual=result.residual
-        out=Dict("source_record"=>id,"production_admitted"=>false,
+        out=Dict("source_record"=>id,"production_admitted"=>false,"factor_mode"=>string(epoch.factor_mode),
+            "candidate_legacy_factor_pass"=>[c.legacy_ok for c in epoch.construction],
             "root_statuses"=>[string(r.root.status) for r in epoch.root_reports],
             "old_root_pass"=>[r.old_result[1] for r in epoch.root_reports],
             "native_inverse_pass"=>[get(r.native,"inverse",false) for r in epoch.root_reports],
