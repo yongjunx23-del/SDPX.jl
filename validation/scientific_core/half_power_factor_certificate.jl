@@ -41,16 +41,19 @@ function product(budget,terms...)
     result
 end
 enclose(a)=isempty(a) ? RG.point(0) : RG.checked(Phi._enclose_sum(a))
-function verify(shadow,L,dual)
-    eltype(shadow)===eltype(L)===eltype(dual)===Float64 && length(shadow)==length(dual)==3 && size(L)==(3,3) ||
+verify(shadow,L,dual)=_verify(shadow,L,dual)
+verify_hessian(shadow,L)=_verify(shadow,L,nothing)
+function _verify(shadow,L,dual)
+    eltype(shadow)===eltype(L)===Float64 && length(shadow)==3 && size(L)==(3,3) ||
         return (status=:unsupported,reason=:type)
+    dual===nothing || (eltype(dual)===Float64 && length(dual)==3) || return (status=:unsupported,reason=:type)
     Phi._runtime_ok() || return (status=:unsupported,reason=:runtime)
     x,y,z=shadow
-    all(A->all(isfinite,A),(shadow,L,dual)) && 0x1p-8<=x<=0x1p32 && 0x1p-8<=y<=0x1p32 &&
+    all(A->all(isfinite,A),(shadow,L)) && (dual===nothing || all(isfinite,dual)) && 0x1p-8<=x<=0x1p32 && 0x1p-8<=y<=0x1p32 &&
         (iszero(z)||0x1p-8<=abs(z)<=0x1p32) || return (status=:unsupported,reason=:coordinate_domain)
     all(v->iszero(v)||0x1p-160<=abs(v)<=0x1p200,L) && all(i->L[i,i]>0,1:3) &&
         all(iszero,(L[1,2],L[1,3],L[2,3])) || return (status=:unsupported,reason=:factor_domain)
-    all(v->iszero(v)||0x1p-8<=abs(v)<=0x1p8,dual) || return (status=:unsupported,reason=:dual_domain)
+    dual===nothing || all(v->iszero(v)||0x1p-8<=abs(v)<=0x1p8,dual) || return (status=:unsupported,reason=:dual_domain)
     budget=Budget(0,0)
     try
         X,Y,Z=constant.((x,y,z));E=[constant(L[i,j]) for i in 1:3,j in 1:3]
@@ -106,6 +109,13 @@ function verify(shadow,L,dual)
                 backward=max(backward,(RG.point(RG.absupper(residual))/work).hi)
             end
         end
+        gamma64=(RG.point(64)*RG.point(eps(Float64)))/(RG.point(1)-RG.point(64)*RG.point(eps(Float64)))
+        forcing=(RG.point(8)*gamma64).lo
+        if dual===nothing
+            passed=eta<=RG.KAPPA && backward<=forcing
+            return (;status=passed ? :certified : :unsupported,reason=:true_stored_hessian_only,
+                eta,backward,forcing,products=budget.products,sums=budget.sums,F)
+        end
         # Exact numerator of L^-1(-g_true-dual), using adjugate(L).
         U,V,W=constant.(Tuple(dual));twoPD=product(budget,constant(2),p,d)
         r=[sub(add(product(budget,constant(2),p,Y),mul(Y,d,budget),budget),mul(twoPD,U,budget),budget),
@@ -121,8 +131,6 @@ function verify(shadow,L,dual)
         vnorm=RG.norm_bound(v)
         eta<1 || return (;status=:unsupported,reason=:metric_bound,eta,backward,vnorm,products=budget.products,sums=budget.sums)
         decrement=(RG.point(vnorm)/RG.sqrt_interval(RG.point(1)-RG.point(eta))).hi
-        gamma64=(RG.point(64)*RG.point(eps(Float64)))/(RG.point(1)-RG.point(64)*RG.point(eps(Float64)))
-        forcing=(RG.point(8)*gamma64).lo
         passed=eta<=RG.KAPPA && decrement<=RG.KAPPA && backward<=forcing
         (;status=passed ? :certified : :unsupported,reason=passed ? :true_stored_factor_and_decrement : :budget,
             eta,decrement,backward,forcing,products=budget.products,sums=budget.sums,F,v)
