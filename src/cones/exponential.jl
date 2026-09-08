@@ -54,24 +54,31 @@ end
     return total
 end
 
+# Subtraction can destroy relative information when numerator << denominator:
+# e.g. Float64 numerator=3*2^-54, denominator=1 produces -1+2^-52, so log1p
+# returns log(2^-52), not log(3*2^-54). Keep the computed argument away from -1;
+# the bounds are exact binary constants, approximately operand ratios [1/2,2].
+@inline _nonsymmetric_log_ratio_uses_log1p(relative) =
+    isfinite(relative) && oftype(relative, -0.5) <= relative <= one(relative)
+
 @inline function _nonsymmetric_positive_log_ratio(numerator, denominator)
     relative = (numerator - denominator) / denominator
-    if isfinite(relative) && relative > -one(relative)
+    if _nonsymmetric_log_ratio_uses_log1p(relative)
         return _nonsymmetric_stable_log1p(relative)
     end
     return log(numerator) - log(denominator)
 end
 
-# The value and its arithmetic-work certificate deliberately travel together.
-# A small logarithm can be the result of subtracting two O(1) positive
-# quantities, so `abs(value)` alone is not a backward-error scale.  The first
-# branch records the work in `(numerator-denominator)/denominator`; the second
-# records the two logarithms whose difference is returned.
+# Value and arithmetic-work accounting deliberately use the same branch.
+# `abs(value)` alone misses cancellation. The first branch records the work
+# in `(numerator-denominator)/denominator`; the second records the two logs
+# whose difference is returned. These quantities alone are NOT a rigorous
+# transcendental-error or complete Phi-enclosure certificate.
 @inline function _nonsymmetric_positive_log_ratio_terms(
     numerator, denominator,
 )
     relative = (numerator - denominator) / denominator
-    if isfinite(relative) && relative > -one(relative)
+    if _nonsymmetric_log_ratio_uses_log1p(relative)
         value = _nonsymmetric_stable_log1p(relative)
         ratio = numerator / denominator
         arithmetic_work = abs(ratio) + one(ratio)
