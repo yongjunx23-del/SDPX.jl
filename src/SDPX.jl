@@ -14,6 +14,7 @@ include("cones/power.jl")
 # Newton routine is deliberately a cold, independent sign/direction oracle.
 include("cones/nonsymmetric/linesearch3.jl")
 include("cones/nonsymmetric/types.jl")
+include("cones/nonsymmetric/exact_spd3.jl")
 include("cones/nonsymmetric/conjugate3.jl")
 include("cones/nonsymmetric/scaling3.jl")
 include("cones/nonsymmetric/corrector3.jl")

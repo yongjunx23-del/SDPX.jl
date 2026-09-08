@@ -6,6 +6,7 @@ using LinearAlgebra
 using SparseArrays
 
 include(joinpath(@__DIR__, "nonsymmetric_log_ratio.jl"))
+include(joinpath(@__DIR__, "float64_inverse_publication.jl"))
 
 include(joinpath(
     @__DIR__, "..", "benchmark", "general", "GenericConicBenchmark.jl",

@@ -683,12 +683,12 @@ end
     # off-diagonal entry differently.  Averaging those copies is not always
     # backward stable: near a cone face, changing the sensitive column by
     # half an ulp from the other solve can violate its otherwise tiny solve
-    # residual.  Preserve the historical midpoint when it certifies.  Only
-    # mutable BigFloat storage then enumerates the eight exact symmetric
-    # selections of the already-computed upper/lower entries.  Accept only a
-    # matrix whose three columns all pass the existing componentwise solve
-    # certificate and which is itself SPD.  This changes no tolerance and
-    # introduces no unverified regularization.
+    # residual. Preserve historical midpoint arithmetic and return behavior.
+    # BigFloat retains its eight upper/lower selections. Float64 now admits
+    # those same stored-entry selections only after ALL existing native gates
+    # and an additional exact stored-value SPD veto. Rounded Cholesky alone
+    # does not prove stored-matrix SPD; the new veto does not qualify the
+    # unchanged midpoint/BigFloat paths. No tolerance or regularization changes.
     upper12 = _coo_owned_scalar(inverse_hessian[1, 2])
     lower12 = _coo_owned_scalar(inverse_hessian[2, 1])
     upper13 = _coo_owned_scalar(inverse_hessian[1, 3])
@@ -696,7 +696,7 @@ end
     upper23 = _coo_owned_scalar(inverse_hessian[2, 3])
     lower23 = _coo_owned_scalar(inverse_hessian[3, 2])
     half = inv(o + o)
-    candidate_limit = T === BigFloat ? 8 : 0
+    candidate_limit = (T === BigFloat || T === Float64) ? 8 : 0
     @inbounds for candidate in 0:candidate_limit
         if iszero(candidate)
             # Preserve the historical midpoint whenever it remains fully
@@ -739,9 +739,16 @@ end
         # allocation-free factorization gate and does not impose a fragile
         # output-relative H*Hinv-I test on a strongly conditioned metric.
         zero_distinct!(rhs)
-        _ns_conjugate_spd_solve!(
+        if _ns_conjugate_spd_solve!(
             solution, inverse_hessian, rhs, workspace.factor,
-        ) && return true
+        )
+            # Verification-only exact arithmetic: no matrix entries are formed
+            # here, and a positive exact sign can never waive a native failure.
+            if T === Float64 && !iszero(candidate)
+                _ns_float64_exact_spd3_veto(inverse_hessian) || continue
+            end
+            return true
+        end
     end
     return false
 end
