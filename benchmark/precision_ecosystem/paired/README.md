@@ -1,10 +1,25 @@
 # Repaired paired benchmark foundation — not performance qualification
 
-This first slice provides immutable native-input fixtures and a genuinely
-independent exact oracle. The positional ABBA/BAAB timing driver, all-sample
-retention/validation, untimed execution-receipt probes, and three-process
-aggregation are still required before any performance submission or claim.
-The cancelled old pilot remains invalid and is not reused as timing evidence.
+The exact-input/reference foundation and the paired timing layer have received
+independent review for bounded local observations. This is not a general
+performance qualification. The cancelled old pilot remains invalid and is not
+reused as timing evidence.
+
+`run.jl fixture_directory expected_plan_sha256 repetition` consumes one frozen
+fixture/reference and creates a new PAIRED_OUT directory. Each process runs two
+blocks containing both ABBA and BAAB, with untimed Debug probes, balanced warmup,
+pristine resets, separate output slots and exact checking of every measured
+output. Allocation calls and process-wide RSS are separate. Use at least three
+independent processes per cell; their launchers must record actual PID, argv,
+exit and result-file SHA256 in each directory's receipt.json. `aggregate.py`
+checks those bindings and reports process-level observations.
+
+Configurations share the requested thread budget, not necessarily the active
+worker count. In the reviewed 23×65×17 tail cell at budget4, the direct planner
+uses2 workers while MFA launches4. Preserve that distinction, uncontrolled
+affinity, single-cell scope and observed variability; neither general arithmetic
+nor solver speedup follows. Larger/matched-worker cells and broader campaigns
+remain pending; performance_qualification stays false.
 
 ## Exact reference
 
