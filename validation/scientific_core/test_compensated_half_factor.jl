@@ -1,10 +1,17 @@
 using Test, TOML, LinearAlgebra, SDPX
 include("factor_preserving_affine.jl")
 include("factor_affine_reference.jl")
+include("native_factor_affine_certificate.jl")
 const FA=FactorPreservingAffine
 const FAR=FactorAffineReference
 const HF=FA.HalfPowerCompensatedFactor
 const Q=Rational{BigInt}
+const NC=NativeFactorAffineCertificate
+function exact_positive3(A)
+    determinant=A[1,1]*(A[2,2]*A[3,3]-A[2,3]*A[3,2])-
+        A[1,2]*(A[2,1]*A[3,3]-A[2,3]*A[3,1])+A[1,3]*(A[2,1]*A[3,2]-A[2,2]*A[3,1])
+    A==A' && A[1,1]>0 && A[1,1]*A[2,2]-A[1,2]*A[2,1]>0 && determinant>0
+end
 const FACTOR_AFFINE_RESULTS=Any[]
 @testset "compensated actual-shadow half-Power factor candidate" begin
     for id in (17,19)
@@ -14,6 +21,20 @@ const FACTOR_AFFINE_RESULTS=Any[]
         @test !candidate.production_admitted
         @test epoch.factor_mode===:compensated_half_candidate
         @test all(x->x<=Q(FA.PHYSICAL_FORCING),reference.errors)
+        native=NC.certify(epoch,candidate)
+        native.status===:certified || println("NATIVE_AFFINE_UNSUPPORTED ",native)
+        @test native.status===:certified
+        @test !native.production_admitted
+        @test all(i->Q(native.errors[i])>=reference.errors[i],1:5)
+        for group in 1:5,i in eachindex(reference.residuals[group])
+            @test Q(native.bounds[group][i].lo)<=reference.residuals[group][i]<=Q(native.bounds[group][i].hi)
+        end
+        for (i,metric) in enumerate(reference.metrics)
+            cert=native.metrics[length(epoch.cone.lp_scales)+i]
+            @test Q(cert.etaM)^2>=metric["factor_formula_frobenius_squared"]
+            E=metric["true_hessian_formula_error"];bound=Q(cert.true_bound)*Matrix{Q}(I,3,3)
+            @test exact_positive3(bound-E) && exact_positive3(bound+E)
+        end
         for (block,construction) in zip(epoch.cone.blocks,epoch.construction)
             result=construction.factor_info;shadow=block.shadow;x,y,z=Q.(shadow)
             p=x*y;d=p-z*z;delta=d/p
@@ -59,6 +80,10 @@ const FACTOR_AFFINE_RESULTS=Any[]
         end
         info=FAR.rounded_diagnostics(reference)
         info["candidate_legacy_factor_gates"]=[c.legacy_ok for c in epoch.construction]
+        info["native_affine_certificate"]=Dict("status"=>string(native.status),"errors"=>native.errors,
+            "coefficient_error"=>native.coefficient_error,"products"=>native.products,"sums"=>native.sums,
+            "true_metric_bounds"=>[c.true_bound for c in native.metrics],
+            "residual_bounds"=>[[[v.lo,v.hi] for v in group] for group in native.bounds])
         info["native_true_geometry"]=[Dict("status"=>string(c.runtime_geometry.status),
             "eta"=>c.runtime_geometry.eta,"decrement"=>c.runtime_geometry.decrement,
             "backward"=>c.runtime_geometry.backward,"products"=>c.runtime_geometry.products,

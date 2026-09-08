@@ -67,6 +67,7 @@ function transforms(cone)
         E=Wb*ideal*Wb'-Id;Et=Wb*ideal_true*Wb'-Id
         push!(metrics,Dict("offset"=>block.offset,"factor_formula_frobenius_squared"=>sum(abs2,E),
             "true_hessian_formula_frobenius_squared"=>sum(abs2,Et),
+            "factor_formula_error"=>E,"true_hessian_formula_error"=>Et,
             "exact_target_secant"=>(ideal*y==s),"scale_relative_error"=>abs(scale^2-mu)/mu))
     end
     @assert S*W==Matrix{Q}(I,n,n)
