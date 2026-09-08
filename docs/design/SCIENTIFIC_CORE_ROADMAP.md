@@ -31,6 +31,9 @@
 
 ### 受限集成与仍未过门的工作
 
+- BFLA `5fce2e6` 的新 Mac 兼容性选择由冻结 harness `5f742c4` 执行：Julia 1.10.11 QDLDL/自然排序 240 项、Julia 1.12.6 四线程 285 项、LinearSolve 5.16.0/SciMLBase 3.53.1 扩展 135 项，共 660 项通过。父流程核对原始日志与逐项相等的前后快照（305/293/1323 个散列）；三个私有环境离线建立，无源码或 pin 变更。资格仅限这些选择，不追溯授予旧 `aaa71f3` 的 LinearSolve 资格，也不等于完整核心、求解器或性能资格。证据：`provider-qualification-parent/parent-mac-verification.json`，原始记录 `/var/tmp/sdpx-mac-compat-l5B4wQTL/`。
+- 同一 harness 的 PBS `211442.node220`（node120、8 核、16GB、2 小时）已结束，但 core/QDLDL/threading 三项均在数值测试前退出 1：私有 Git shim 报 `Real Git SHA mismatch`，真实 Git 子进程退出 91。不得计为 Linux 数值通过；计划、原始日志及 8 个文件的传输散列已保留于 `provider-qualification-parent/pbs211442/`。登录节点 Git 的固定散列尚未取得计算节点兼容资格；先独立记录计算节点真实二进制身份与来源，再审定修复，不移除散列门、不覆盖原 campaign。远端 AMD 0.5.3 与 Mac 0.5.4 的闭包亦须分别标注。
+
 - R3 主窗口修复 `da0c244` 已获 Astra high 窄审通过：冻结精度与舍入、精确 CSC/回填映射绑定、实验结构数组独立所有权及真正的 post-factor 失败恢复；父流程 1,053 项通过（212 原有 +841 新增），210 个来源/环境散列不变。后继 `10ff7d1` 将内存准入改为 unavailable 并在构造前拒绝；显式私有研究入口不授予内存资格，1,080 项通过包括 27 项拒绝检查，窄审通过。最终研究实现与下述桥接已整合到开发分支 `4701fac`，源码除路线图外与已审阅 `772b724` 完全一致。资格仍限 LP-only、UNADMITTED 小型研究；SOC、完整内存上界、公开路线与规模资格未完成。
 - BFLA 隔离后继 `5fce2e6` 新增显式 `ordering=:natural`，调用同一 QDLDL 的 `perm=nothing`；省略选项保留 AMD。父流程 244 项检查及三个精度的默认路径前后进程精确对照通过，独立审阅通过。SDPX 桥接 `772b724` 窄审通过，开发分支整合后重新通过新 provider 的 1,513 项及旧 provider 的 1,400 项检查；各自 262 个散列前后一致，260 个非私有环境散列与被审版本相同。覆盖旧 BFLA 拒绝自然排序且保留 AMD、MFLA 共用 seam、256/512-bit 研究方向的原五方程验收。内存准入仍拒绝，BFLA 主分支与原 `aaa71f3` 资格不变。
 - 存储诊断 `849bb50` 的只读 P1 复核通过，已按参考范围整合至开发分支 `83d73d2`；只统计选定数组的逻辑存储，不由 SDPX 加载。初稿 `ce8c9bb` 的 `precision(x)` 会修复反序列化后的 MPFR 指针，父流程在三个精度均复现原始第 4 个 limb word 被改写；改为已锁定的只读 `x.prec` 并增加原始字节不变回归。整合后重新通过 162 项检查、169 个散列不变，157 个源码/测试散列与被审版本相同；独立 C 头文件探针支持相应布局字段。仍不包含完整对象/阶段、MPFR/GMP scratch、allocator/GC 或 RSS 上界，不授予内存准入或 HPC Linux 资格。
