@@ -40,6 +40,19 @@ using Test, SDPX, LinearAlgebra, SparseArrays
             alias=reshape(nonzeros(Ai),2,2)
             @test_throws ArgumentError SDPX.buildP_owned!(alias,sparse_cons,1,T[1])
             @test Matrix(Ai)==ones(T,2,2)
+            inactive=SDPX.SparseCons{T}([[spzeros(T,2,2)]],[Int[]],[Int[]],[zeros(T,3,0)])
+            wrong=SDPX.alloc_zeros(T,3,3)
+            for i in eachindex(wrong);SDPX._store_owned_scalar!(wrong,i,T(7));end
+            @test_throws DimensionMismatch SDPX.buildP_owned!(wrong,inactive,1,T[1])
+            @test all(==(T(7)),wrong)
+            v=SDPX.alloc_zeros(T,1);SDPX._store_owned_scalar!(v,1,T(11))
+            @test_throws DimensionMismatch SDPX.accumulate_v_owned!(v,inactive,1,wrong,one(T))
+            @test v==T[11]
+            proper=SDPX.alloc_zeros(T,2,2)
+            @test SDPX.buildP_owned!(proper,inactive,1,T[1])===proper
+            @test all(iszero,proper)
+            @test SDPX.accumulate_v_owned!(v,inactive,1,proper,one(T))===v
+            @test v==T[11]
         end
     end
 end

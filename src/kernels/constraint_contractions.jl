@@ -34,6 +34,9 @@ end
 function _constraint_sparse_sources(destination,cons::SparseCons,block,nvars,shape,input)
     blocks=cons.Asp[block];active=cons.active[block]
     length(blocks)==nvars || throw(DimensionMismatch())
+    # All-zero coefficient blocks have no active variables but still carry
+    # their matrix dimensions. Validate those before zeroing/accumulating.
+    isempty(blocks) || size(first(blocks))==shape || throw(DimensionMismatch())
     _constraint_disjoint(destination,input)
     for i in active
         checkbounds(blocks,i)
