@@ -35,6 +35,24 @@ const FACTOR_AFFINE_RESULTS=Any[]
             E=metric["true_hessian_formula_error"];bound=Q(cert.true_bound)*Matrix{Q}(I,3,3)
             @test exact_positive3(bound-E) && exact_positive3(bound+E)
         end
+        bad=deepcopy(candidate);bad.direction.dx[1]+=1e-3
+        @test NC.certify(epoch,bad).status===:unsupported
+        bad=deepcopy(candidate);bad.direction.dy[1]=NaN
+        @test NC.certify(epoch,bad).status===:unsupported
+        bad=deepcopy(candidate);bad.rhs.cone_corrector[1]+=1
+        @test NC.certify(epoch,bad).reason===:non_affine
+        bad_epoch=deepcopy(epoch);bad_epoch.Ahat[1,1]+=1e-3
+        @test_throws ErrorException NC.certify(bad_epoch,candidate)
+        # A self-consistent but wrong newly formed coefficient snapshot must
+        # fail numerical verification, not merely its old integrity fingerprint.
+        frozen=FA.epoch_fingerprint(bad_epoch)
+        args=ntuple(i->fieldnames(typeof(bad_epoch))[i]===:frozen ? frozen : getfield(bad_epoch,i),fieldcount(typeof(bad_epoch)))
+        refrozen=typeof(bad_epoch)(args...)
+        @test NC.certify(refrozen,candidate).status===:unsupported
+        block=deepcopy(first(epoch.cone.blocks));block.R[1,1]*=1.01
+        frozen=FA.fingerprint(block.L,block.R,block.scale,block.mu,block.primal,block.dual,block.shadow)
+        wrong=FA.BlockMetric(block.offset,block.L,block.R,block.scale,block.mu,block.primal,block.dual,block.shadow,frozen)
+        @test NC.bfgs_bound(wrong,NC.polynomials(wrong)).status===:unsupported
         for (block,construction) in zip(epoch.cone.blocks,epoch.construction)
             result=construction.factor_info;shadow=block.shadow;x,y,z=Q.(shadow)
             p=x*y;d=p-z*z;delta=d/p

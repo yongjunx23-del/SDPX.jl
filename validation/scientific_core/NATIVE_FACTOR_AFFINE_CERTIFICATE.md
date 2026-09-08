@@ -71,6 +71,10 @@ Thus successful transformed residuals alone cannot certify recovery. Tests use
 independent rational coefficients/factors/directions to check every physical
 residual interval and normalized-error upper bound. Exact rational Loewner tests
 check the true-BFGS bound; the L-BFGS Frobenius bound is checked separately.
+Negative controls cover changed directions, NaN, non-affine RHS, stale epochs,
+a re-fingerprinted but incorrect Ahat, and an independently re-fingerprinted
+wrong R. Numerical verification must reject even when an integrity fingerprint
+is internally consistent; fingerprints alone are not mathematical evidence.
 
 This certificate does not replace any old production root/factor/inverse status,
 prove corrector coverage or authorize a line-search update. Those acceptance
