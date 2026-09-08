@@ -4,6 +4,7 @@ using SDPX, LinearAlgebra, SparseArrays, TOML
 include("power_half_root_geometry.jl")
 include("power_half_root_geometry_capture.jl")
 include("half_power_compensated_factor.jl")
+include("half_power_factor_certificate.jl")
 const RG=PowerHalfRootGeometry
 const CAP=HalfRootGeometryCapture
 const word=CAP.floatword
@@ -200,8 +201,9 @@ function build(row;factor_mode::Symbol=:stored_native)
             L=factor_info.L
         end
         legacy_ok,legacy_error=SDPX._ns_structural_hessian_factor_certificate!(L,tag,replay.snapshots["shadow"]...)
+        runtime_geometry=HalfPowerFactorCertificate.verify(replay.snapshots["shadow"],L,y[rows])
         metric,info=block_metric(offset,L,s[rows],y[rows],replay.snapshots["shadow"],mu)
-        push!(blocks,metric);push!(construction,(;info...,factor_mode,factor_info,legacy_ok,legacy_error))
+        push!(blocks,metric);push!(construction,(;info...,factor_mode,factor_info,legacy_ok,legacy_error,runtime_geometry))
     end
     cone=FactorCone(m,scales,blocks,words(scales));SDPX.validate_cone_linearization(cone)
     Ahat=hcat([transform(cone,Vector(A[:,j]),:W) for j in 1:n]...)

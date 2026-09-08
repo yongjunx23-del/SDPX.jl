@@ -28,6 +28,23 @@ const FACTOR_AFFINE_RESULTS=Any[]
             Li=FAR.inverse_lower(Q.(block.L));H=FAR.true_hessian(shadow)
             error=Li*H*Li'-Matrix{Q}(I,3,3)
             @test sum(abs2,error)<=Q(FA.RG.KAPPA)^2
+            certificate=construction.runtime_geometry
+            @test certificate.status===:certified
+            @test Q(certificate.eta)^2>=sum(abs2,error)
+            xq,yq,zq=Q.(shadow);dq=xq*yq-zq*zq
+            gradient=Q[-yq/dq-1/(2xq),-xq/dq-1/(2yq),2zq/dq]
+            residual=-gradient-Q.(block.dual)
+            exact_v=Li*residual
+            @test all(i->Q(certificate.v[i].lo)<=exact_v[i]<=Q(certificate.v[i].hi),1:3)
+            decrement2=dot(residual,vec(FAR.exact_solve(H,reshape(residual,3,1))))
+            @test Q(certificate.decrement)^2>=decrement2
+            @test certificate.eta<=FA.RG.KAPPA && certificate.decrement<=FA.RG.KAPPA
+            @test certificate.products<=1<<16 && certificate.sums<=1<<20
+            gram=Q.(block.L)*Q.(block.L)'
+            for j in 1:3,i in j:3
+                work=abs(gram[i,j])+abs(H[i,j])
+                @test iszero(work) ? gram[i,j]==H[i,j] : Q(certificate.backward)>=abs(gram[i,j]-H[i,j])/work
+            end
             for shift in (-4,4)
                 gauged=[ldexp(shadow[1],shift),ldexp(shadow[2],-shift),shadow[3]]
                 alternate=HF.factor(gauged)
@@ -42,6 +59,12 @@ const FACTOR_AFFINE_RESULTS=Any[]
         end
         info=FAR.rounded_diagnostics(reference)
         info["candidate_legacy_factor_gates"]=[c.legacy_ok for c in epoch.construction]
+        info["native_true_geometry"]=[Dict("status"=>string(c.runtime_geometry.status),
+            "eta"=>c.runtime_geometry.eta,"decrement"=>c.runtime_geometry.decrement,
+            "backward"=>c.runtime_geometry.backward,"products"=>c.runtime_geometry.products,
+            "sums"=>c.runtime_geometry.sums,
+            "F_bounds"=>[[v.lo,v.hi] for v in vec(c.runtime_geometry.F)],
+            "v_bounds"=>[[v.lo,v.hi] for v in c.runtime_geometry.v]) for c in epoch.construction]
         push!(FACTOR_AFFINE_RESULTS,(;epoch,candidate,reference,info))
         println("COMPENSATED_HALF_FACTOR ",id," ",info)
     end
@@ -53,4 +76,11 @@ const FACTOR_AFFINE_RESULTS=Any[]
     @test HF.factor([Inf,1.,0.]).status===:unsupported
     @test HF.factor([0x1p40,1.,0.]).status===:unsupported
     @test HF.factor(Float32[1,1,0]).status===:unsupported
+    verifier=FA.HalfPowerFactorCertificate
+    central=verifier.verify([1.,1.,0.],control.L,[1.5,1.5,0.])
+    @test central.status===:certified
+    corrupt=copy(control.L);corrupt[1,1]*=1.01
+    @test verifier.verify([1.,1.,0.],corrupt,[1.5,1.5,0.]).status===:unsupported
+    @test verifier.verify([1.,1.,0.],control.L,[1.6,1.5,0.]).status===:unsupported
+    @test verifier.verify([0x1p-32,1.,0.],control.L,[1.5,1.5,0.]).status===:unsupported
 end

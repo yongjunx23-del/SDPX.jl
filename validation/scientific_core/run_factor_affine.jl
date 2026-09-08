@@ -26,7 +26,8 @@ function snapshot()
         hashes[name*"/Project.toml"]=bytes2hex(sha256(read(joinpath(root,"Project.toml"))))
     end
     for f in ("factor_preserving_affine.jl","factor_affine_reference.jl","test_factor_preserving_affine.jl",
-        "half_power_compensated_factor.jl","test_compensated_half_factor.jl","COMPENSATED_HALF_FACTOR.md",
+        "half_power_compensated_factor.jl","half_power_factor_certificate.jl","test_compensated_half_factor.jl",
+        "COMPENSATED_HALF_FACTOR.md","HALF_POWER_FACTOR_CERTIFICATE.md",
         "run_factor_affine.jl","FACTOR_PRESERVING_AFFINE.md","power_half_root_geometry.jl",
         "power_half_root_geometry_capture.jl","power_half_phi_reference.jl",
         "fixtures/factor_affine_trial_17.toml","fixtures/factor_affine_trial_19.toml")
