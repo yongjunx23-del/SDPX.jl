@@ -56,6 +56,10 @@ function block_metric(offset,L,s,y,shadow,mu)
     size(L)==(3,3) && length(s)==length(y)==length(shadow)==3 || throw(DimensionMismatch())
     all(A->all(isfinite,A),(L,s,y,shadow)) && isfinite(mu) && mu>0 || error("nonfinite metric inputs")
     all(i->L[i,i]>0,1:3) && all(iszero,(L[1,2],L[1,3],L[2,3])) || error("invalid lower factor")
+    sx,sy,sz=RG.point.(s)
+    s[1]>0 && s[2]>0 && (sx*sy-sz*sz).lo>0 || error("current half-Power primal interior unresolved")
+    pairing=sum((RG.point(s[i])*RG.point(y[i]) for i in 1:3);init=RG.point(0))
+    pairing.lo>0 || error("exact pairing positivity unresolved")
     scale=sqrt(mu)
     a=scale.*lower_solve(L,y)
     b=upper_multiply(L,s)./scale
@@ -149,6 +153,7 @@ function verify(e::AffineEpoch)
     true
 end
 function build(row)
+    RG.Phi._runtime_ok() || error("unsupported Float64 arithmetic context")
     row["schema"]==1 && row["provider"]=="explicit_research_dual_hessian_one_secant" || error("provider policy")
     m,n=row["A_shape"];1<=n<=16 && 1<=m<=32 || error("bounded affine shape")
     ptr=copy(row["A_colptr"]);rows=copy(row["A_rowval"]);values=word.(row["A_bits"])
@@ -182,6 +187,8 @@ function build(row)
             "dual_bits"=>[string(reinterpret(UInt64,v);base=16,pad=16) for v in y[rows]])
         replay=CAP.replay(localrow);push!(reports,replay)
         replay.root.status===:qualified && get(replay.native,"factor_certificate",false) || error("root/factor replay unsupported")
+        tag=SDPX.PowerConjugateTag{Float64}(word(p["alpha_bits"]))
+        SDPX._ns_conjugate_primal_interior(tag,s[rows]...) || error("native current-primal domain gate failed")
         metric,info=block_metric(offset,replay.snapshots["L"],s[rows],y[rows],replay.snapshots["shadow"],mu)
         push!(blocks,metric);push!(construction,info)
     end
@@ -214,6 +221,8 @@ function solve(e::AffineEpoch,rhs::SDPX.HSDNewtonRHS{Float64}=affine_rhs(e))
     length(rhs.primal_affine)==m && length(rhs.dual_affine)==n || throw(DimensionMismatch())
     all(v->all(isfinite,v),(rhs.primal_affine,rhs.dual_affine,rhs.cone_corrector)) &&
         isfinite(rhs.homogeneous_gap) && isfinite(rhs.tau_kappa) || error("nonfinite RHS")
+    rhs=SDPX.HSDNewtonRHS(copy(rhs.primal_affine),copy(rhs.dual_affine),rhs.homogeneous_gap,
+        copy(rhs.cone_corrector),rhs.tau_kappa)
     rp=transform(e.cone,rhs.primal_affine,:W);h=transform(e.cone,rhs.cone_corrector,:W)
     right=vcat(rhs.dual_affine,rp-h,rhs.homogeneous_gap,rhs.tau_kappa)
     solution=e.factor\right

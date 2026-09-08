@@ -26,6 +26,15 @@ end
         for metric in reference.metrics
             @test metric["exact_target_secant"]
             @test metric["scale_relative_error"]<=8Q(eps(Float64))
+            @test metric["factor_formula_frobenius_squared"]<=Q(FA.RG.KAPPA)^2
+        end
+        if id==17
+            @test all(x->x["true_hessian_formula_frobenius_squared"]<=Q(FA.RG.KAPPA)^2,reference.metrics)
+        else
+            # ||E||2 >= ||E||F/sqrt(3): this is a real true-metric violation,
+            # not merely failure of an overly conservative upper bound.
+            @test reference.metrics[3]["true_hessian_formula_frobenius_squared"]>3Q(FA.RG.KAPPA)^2
+            @test !epoch.root_reports[3].native["inverse"]
         end
         sources=vcat([collect(Matrix{Float64}(I,epoch.cone.dimension,epoch.cone.dimension)[:,i]) for i in 1:epoch.cone.dimension],
             [Vector(epoch.A[:,i]) for i in axes(epoch.A,2)],
@@ -59,6 +68,10 @@ end
         second=FA.solve(epoch,other);second_reference=FAR.physical(epoch,second)
         @test FA.words(epoch.factor.factors)==factor_bits
         @test all(e->e<=Q(FA.PHYSICAL_FORCING),second_reference.errors)
+        rhs_snapshot=copy(second.rhs.primal_affine)
+        other.primal_affine[1]+=1
+        @test second.rhs.primal_affine==rhs_snapshot
+        @test !Base.mightalias(second.rhs.primal_affine,other.primal_affine)
         non_affine=SDPX.HSDNewtonRHS(copy(rhs.primal_affine),copy(rhs.dual_affine),rhs.homogeneous_gap,
             zeros(length(rhs.cone_corrector)),rhs.tau_kappa)
         @test_throws ErrorException FA.solve(epoch,non_affine)
