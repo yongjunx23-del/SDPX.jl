@@ -135,6 +135,11 @@ end
         @test result.p_res <= options.ϵ_primal
         @test result.d_res <= options.ϵ_dual
         @test result.gap_rel <= options.ϵ_gap
+        # Independent current-input checks: counters or a stale certificate
+        # alone cannot prove that the changed objective/RHS was consumed.
+        @test abs(sum(result.x)-only(b_new)) <= options.ϵ_primal*max(1.0,abs(only(b_new)))
+        @test minimum(_G0*result.x-_H0) >= -options.ϵ_primal
+        @test abs(dot(c_new,result.x)-result.pObj) <= 16eps(Float64)*max(1.0,abs(result.pObj))
         for block in axes(_G0,1)
             # Each box row has exactly one +/-1 coefficient; this replays
             # the actual returned slack in original coordinates.
