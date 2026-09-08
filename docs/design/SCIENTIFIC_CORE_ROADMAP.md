@@ -8,7 +8,7 @@
 
 本轮只读体系审阅锁定：SDPX `7ffcc416`、MFLA `50e6e0b`、BFLA `f95d3e6`、MultiFloats 3.2.6、用户提供的 [MultiFloatArithmetic](https://github.com/yongjunx23-del/MultiFloatArithmetic.jl) `d2bbbd8`；Julia 1.12.6、MutableArithmetics 1.8.0。MFA 是待评估材料，尚非 solver 执行依赖。
 
-四路源码调查经过独立 Astra 综合复核。原报告中的内存模型、算术资格、尺寸估算错误不得进入实现依据；本轮没有新的性能实测。范围/散列与原报告保存在 `local-archives/high-precision-ecosystem-20260908/` 对应证据集合，独立综合报告为 `ecosystem-astra-synthesis.md`。
+四路源码调查经过独立 Astra 综合复核。原报告中的内存模型、算术资格、尺寸估算错误不得进入实现依据；该次只读审阅未包含新的性能实测。范围/散列与原报告保存在 `local-archives/high-precision-ecosystem-20260908/` 对应证据集合，独立综合报告为 `ecosystem-astra-synthesis.md`。
 
 当前已建立 standard-HSD 数学契约、对数 Exp barrier 及独立 Newton 参考；完整 HSD 符号迁移获独立源码审阅通过。`7ffcc416` 的 1,252 项聚焦检查通过，**不等于完整公开路径资格**：Float64 Power、mixed Exp、紧容差 PSD 仍有失败。
 
@@ -24,9 +24,18 @@
 - R1：BFLA `aaa71f3` 的有效舍入与 RRQR 创建语境元数据修复通过核心源码/证据复核。父流程独立执行：Julia 1.12 核心 10,960 项，Julia 1.10 核心 10,957 项加 1 项不适用，双线程 285 项；48 组同运行时默认舍入记录一致。Julia 1.11 与 LinearSolve 扩展仍未验证；QDLDL 仅有下述有限验证。
 - R2：结构缓存代际/锁协议 `b82c7a3` 已集成，2/4 线程各 98 项通过；实际因子所有者诊断 `a85d24b` 已集成，239 项诊断加 57 项 Newton 检查通过。
 - 新 BFLA 仅进入独立 SDPX 验证环境，96 项集成检查通过；原受保护环境与 provider 主分支不变。
-- R3：BFLA/QDLDL 0.4.1 在 n=12、256/512/1024-bit、单线程下通过 231 项父流程复测，包含原矩阵残差、所有权和失效控制；加载来源绑定 fail-closed。另有 886 项精确秩/相容性及原始 KKT 残差参考检查通过；借用的正则策略和 12 次细化是实验规则，不等于生产门。尚未连接 SDPX 原生稀疏路线，也不构成规模/性能资格。
-- R4：MFLA/MFA 两个尺寸已有同类型 ABBA 多进程重复观察、全幅输入和可测的产品对消；仍无通用或 solver 速度资格。显式实验性 MFA 策略及 runner 已通过限定审阅，父流程在 Julia 1.10/1.12 各复测 87 项及来源/哈希/日志失败控制；默认关闭，远端 CI 未执行。ABBA 不排除全部位置效应，后续须测试实际调用路径并继续保留限定范围。
+- R3：BFLA/QDLDL 0.4.1 在 n=12、256/512/1024-bit、单线程下通过 231 项父流程复测，包含原矩阵残差、所有权和失效控制；加载来源绑定 fail-closed。另有 886 项精确秩/相容性及原始 KKT 残差参考检查通过；借用的正则策略和 12 次细化是实验规则，不等于生产门。内部 factor-cache 适配器已集成为 `a72d1cc`，父流程通过 287 项适配器、24 项 MFLA 共用 seam、4 项缺失扩展/默认路线检查；使用 checked solve，调用者仍须提供合格移位算子与原始残差权威。公开 BigFloat 稀疏路线仍关闭，不构成 symmetric-core、规模或性能资格。
+- R4：MFLA/MFA 两个尺寸已有同类型 ABBA 多进程重复观察、全幅输入和可测的产品对消；仍无通用或 solver 速度资格。显式实验性 MFA 串行策略及 runner 已通过限定审阅，父流程在 Julia 1.10/1.12 各复测 87 项及来源/哈希/日志失败控制。另一个 MFA 连续视图增量 `cdb8468` 在 MF3.2.6 下通过 215,412 项父流程测试；不能把旧 pin 的资格自动转移给新 pin。默认关闭，远端 CI 未执行；ABBA 不排除全部位置效应。
+- R5：MFLA 实验性并行策略的非单射目标存储拒绝与真实 limb-bit 检查经修复；父流程日志增量 `5399c0cc` 获独立窄审通过。Julia1.12 下 t1/t4 分别通过 218/234 项，实际公开调用回执观测到最多 4 个线程，串行标注 tasks_spawned=0；固定 MFA `cdb8468`、MF3.2.6，来源/环境前后散列一致。仅为这些显式实验调用的正确性资格，不是默认路线、solver 或大核数性能资格。
 - R0：独立几何反例已永久接线。Power 区间参考通过独立审阅及 337 项父流程复测；Exp 导数/坐标参考经范围修复后通过 129 项复测与审阅。二者均未接入生产；完整 SAME-metric 缩放与冻结 epoch 迁移仍未完成，完整公开套件仍受既有 Power/mixed Exp 失败阻断。
+
+### 尚未过门的当前候选
+
+- R3 实验核心 `e147b2b` 重审仍阻断：新 epoch 的静态 pattern 系数未完全绑定原 A，移位算子的精确匹配尚有缺口，内存清单仍需完善。已明确缩为 LP-only；SOC 不支持，不代表现有默认 SOC 支持被削减。
+- Exp 参考测试 `0c8f767` 已恢复真正跨表示的逐元素协变门，而非仅修改阈值；父流程通过 metric251/chart129 项，最大协变误差约 3.48e-14，最终窄审待完成。不得据此宣称生产共轭、fallback、epoch、corrector 或 Newton 完成。
+- PBS 算术 pilot `211161.node220` 的 harness `6e68fc2` 被父流程判为不能计 A/B 性能资格：所谓 ABBA/BAAB 实为输入种子交换，非调用交替；同进程三次采样也不是独立进程重复，计时插桩和执行来源绑定尚需修复。保留原 payload/receipt，不修改排队任务下的源码，不提交重复任务；作业处置待确认。此结论不撤销已取得的本地 provider 正确性资格。
+
+新增证据：`local-archives/high-precision-ecosystem-20260908/` 下的 `mfla-parallel-parent-validation/`、`sparse-adapter-parent-validation/`、`exp-covariance-parent-fix/` 和 `r5-kernel-pbs-pilot-20260908/parent-methodology-audit.md`。
 
 ## 架构选择与不可越过的门
 
