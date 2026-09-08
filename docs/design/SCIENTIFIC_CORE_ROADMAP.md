@@ -34,11 +34,13 @@
 - R3 主窗口修复 `da0c244` 已获 Astra high 窄审通过：冻结精度与舍入、精确 CSC/回填映射绑定、实验结构数组独立所有权及真正的 post-factor 失败恢复；父流程 1,053 项通过（212 原有 +841 新增），210 个来源/环境散列不变。后继 `10ff7d1` 将内存准入改为 unavailable 并在构造前拒绝；显式私有研究入口不授予内存资格，1,080 项通过包括 27 项拒绝检查，窄审通过。最终研究实现与下述桥接已整合到开发分支 `4701fac`，源码除路线图外与已审阅 `772b724` 完全一致。资格仍限 LP-only、UNADMITTED 小型研究；SOC、完整内存上界、公开路线与规模资格未完成。
 - BFLA 隔离后继 `5fce2e6` 新增显式 `ordering=:natural`，调用同一 QDLDL 的 `perm=nothing`；省略选项保留 AMD。父流程 244 项检查及三个精度的默认路径前后进程精确对照通过，独立审阅通过。SDPX 桥接 `772b724` 窄审通过，开发分支整合后重新通过新 provider 的 1,513 项及旧 provider 的 1,400 项检查；各自 262 个散列前后一致，260 个非私有环境散列与被审版本相同。覆盖旧 BFLA 拒绝自然排序且保留 AMD、MFLA 共用 seam、256/512-bit 研究方向的原五方程验收。内存准入仍拒绝，BFLA 主分支与原 `aaa71f3` 资格不变。
 - 存储诊断 `849bb50` 的只读 P1 复核通过，已按参考范围整合至开发分支 `83d73d2`；只统计选定数组的逻辑存储，不由 SDPX 加载。初稿 `ce8c9bb` 的 `precision(x)` 会修复反序列化后的 MPFR 指针，父流程在三个精度均复现原始第 4 个 limb word 被改写；改为已锁定的只读 `x.prec` 并增加原始字节不变回归。整合后重新通过 162 项检查、169 个散列不变，157 个源码/测试散列与被审版本相同；独立 C 头文件探针支持相应布局字段。仍不包含完整对象/阶段、MPFR/GMP scratch、allocator/GC 或 RSS 上界，不授予内存准入或 HPC Linux 资格。
-- R0 共享对数比值候选 `6b03d3c` 只在计算出的相对参数位于 [-1/2,1] 时用原 log1p 路径，其余用已有的分别取对数路径；value/work 共用分支，根、metric、求解阈值及迭代上限不变。原反例误差约 0.287682 降至 3.54e-15，独立固定参考目标通过，不靠新分支较大的 work floor。父流程通过 1,841 项内核/冷点及 544 项 Exp 检查，各自 259 个散列不变；内核修复范围的窄审通过。公开 Power：Float64 从旧 151 次 affine-boundary 失败变成 43 次 line-search 失败，仍未修好；BF256 从 86 次认证变为 76 次认证，不计速度资格。完整 native Phi 误差账本与一般 Power 几何/收敛资格仍缺失。
+- R0 共享对数比值修复 `6b03d3c` 已按窄审范围集成为 `366a82d`，整合后重新通过 1,841 项内核/冷点及 544 项 Exp 检查，各自 259 个散列不变。只在计算出的相对参数位于 [-1/2,1] 时用原 log1p 路径，其余用已有的分别取对数路径；value/work 共用分支，根、metric、求解阈值及迭代上限不变。原反例误差约 0.287682 降至 3.54e-15，独立固定参考目标通过，不靠新分支较大的 work floor。公开 Power：Float64 从旧 151 次 affine-boundary 失败变成 43 次 line-search 失败，仍未修好；BF256 从 86 次认证变为 76 次认证，不计速度资格。完整 native Phi 误差账本与一般 Power 几何/收敛资格仍缺失。
+- R0 诊断捕获 `d00149c` 获独立 Astra 审阅通过，限证据权威，不集成观察钩子。在外层及共轭内部回滚前复制实际 Float64 对象/位串；220 条记录中 78 条为内部回滚入口，不能仅凭入口标签判为失败。五次 source-bound 对照保持终态数值位及前 142 条外层记录一致，各 254 个散列不变。bt0/2 实际中点逆矩阵确实不定，拒绝正确；bt1 在新逆构造前失败，其旧/无效 B 不作新候选证据。真实梯度与 gap 梯度仍不等价，不能靠配对或逆矩阵发布解决完整几何。
+- R0 隔离候选 `d656070` 在中点拒绝后，才为 Float64 枚举原有 8 个 upper/lower 组合；所有原 native 门通过后，新增仅验证的精确 dyadic/BigInt Sylvester 符号否决。普通 native Cholesky 存在精确半正定/不定假阳性，父流程已复现简单反例及合成 L 扰动的组合反例。默认中点、既有 BigFloat 行为及 Float32/MultiFloat 范围不变；精确整数不生成矩阵值，不替代因子/求解或放宽门。固定 6400-bit 中间量上限不等于物理内存上界。父流程 355 新检查 +1841 内核 +544 Exp =2740 项通过，各 263 个散列不变；独立有理数 Schur 消元参考与真实存储因子支持首个选择 3/5/0。三个类型/精度的独立进程冷点精确值/精度/符号保持一致。公开 Float64 Power 仍在 64 次 line-search 失败，mixed Exp 仍在 22 次失败；BF256 保持 76/69 次认证，纯 Exp 保持 Float64/BF256 的 10/34 次认证。候选未集成，实现审阅进行中；无完整求解或速度资格。
 - Exp 参考测试 `0c8f767` 已恢复真正跨表示的逐元素协变门，而非仅修改阈值；父流程通过 metric251/chart129 项，最大协变误差约 3.48e-14，最终独立窄审通过。资格限于 reference-only；生产共轭、fallback、epoch、corrector 或 Newton 仍未完成。
 - PBS 算术 pilot `211161.node220` 的 harness `6e68fc2` 被父流程判为不能计 A/B 性能资格：所谓 ABBA/BAAB 实为输入种子交换，非调用交替；同进程三次采样也不是独立进程重复，计时插桩和执行来源绑定尚需修复。用户明确批准取消后，父流程核对目标身份与 Q 状态，仅对该 job 执行 qdel（exit0），随后核实 C 状态；原 payload/receipt 保留，未提交重复任务，held210917 不动。此结论不撤销已取得的本地 provider 正确性资格。
 
-新增证据：`local-archives/high-precision-ecosystem-20260908/` 下的 `mfla-parallel-parent-validation/`、`sparse-adapter-parent-validation/`、`exp-covariance-parent-fix/` 、`r3-reviewed-integration/`、`julia112-logical-storage-parent/`、`power-production-next/` 和 `r5-kernel-pbs-pilot-20260908/parent-methodology-audit.md`。
+新增证据：`local-archives/high-precision-ecosystem-20260908/` 下的 `mfla-parallel-parent-validation/`、`sparse-adapter-parent-validation/`、`exp-covariance-parent-fix/` 、`r3-reviewed-integration/`、`julia112-logical-storage-parent/`、`power-production-next/`、`logratio-reviewed-integration/`、`power-linesearch-capture/`、`float64-inverse-veto-parent/` 和 `r5-kernel-pbs-pilot-20260908/parent-methodology-audit.md`。
 
 ## 架构选择与不可越过的门
 
@@ -53,7 +55,7 @@
 **保留范围**：独立 primal/dual/HSD 推导，强弱不可行及非 Slater 边界；Exp 自协调性/Fenchel 关系；SOC `2μe` 与 Euclidean/svec pairing；所有 RHS、scalar closure、coupled/fused/trial/refinement/ray 消费者。
 
 **下一步**：
-- Power：先修复共享对数比值的信息丢失。父流程确认 Float64 `n=3*2^-54,d=1` 的 `log1p(fl((n-d)/d))` 及对应 Phi 误差约 0.287682，而现有 floor 仅 6.7291e-13；不据此声称它就是历史求解失败原因。完整 native 误差账本仍缺失，Cartesian 诊断也不能被当作独立重算真实梯度。随后联合处理根残差、可靠区间、停滞和有限预算，禁止仅收紧区间或盲加迭代数。覆盖 Float64、BF256/BF512、x4 冷种子和近边界点。
+- Power：共享对数比值的信息丢失已按窄范围修复；接续审阅 Float64 额外逆候选的精确否决，并在隔离诊断中捕获后续真实失败点，禁止放宽 useful-progress。原 Float64 `n=3*2^-54,d=1` 的约 0.287682 Phi 误差不再保留，但旧 floor 并非普遍可靠误差包络；不据此声称它解释全部历史失败。完整 native 误差账本仍缺失，Cartesian 诊断不能被当作独立重算真实梯度。联合处理根残差、可靠区间、停滞和有限预算，禁止仅收紧区间或盲加迭代数；精确 SPD 否决也不能替代根/梯度几何。覆盖 Float64、BF256/BF512、x4 冷种子和近边界点。
 - Exp：补中心比值消去的精确点回归及范围/溢出负例；以正确的 Float64 ulp 和显式舍入参考区分梯度重构误差与配对求和误差。研究稳定梯度/metric 表示，保留全部独立门。
 - PSD：把实际 SDPX 生成的 `S/Y/P/Pinv/R/Q/Lambda` 直接提升精度回放，不更换 Cholesky、svec 展开或重新求逆；分别处理谱相对精度、表示和检查误差。对 factor-coordinate 或 scaled-frame 方案给出双向误差传播及失效条件。
 - 把所有已确认反例纳入永久测试；不把舍入上界、两个精度下的失败或局部失败推成普遍不可能性。
