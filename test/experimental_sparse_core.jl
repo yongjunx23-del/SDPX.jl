@@ -21,6 +21,8 @@ using Test, SDPX, SparseArrays, LinearAlgebra
         @test inventory.returned_pair_bigfloat_slots == 2 * 2 + 5 * 3 + 4
         @test inventory.acceptance_array_bigfloat_slots == 2 + 5 * 3
         @test !isempty(inventory.unresolved)
+        @test :ordering_workspace ∉ inventory.unresolved # natural-order conditional count only
+        @test :operation_scratch ∈ inventory.unresolved
         before = lock(SDPX._SYMMETRIC_CORE_STRUCTURE_LOCK) do
             c = SDPX._SYMMETRIC_CORE_STRUCTURE_CACHE
             (c.hits, c.misses, length(c.patterns))

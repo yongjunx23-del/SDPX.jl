@@ -2853,9 +2853,10 @@ end
 
 """Diagnostic scalar-LP payload inventory; never a memory admission proof.
 
-Counts assume a FUTURE natural-order provider and exclude scalar fields,
-headers/capacities and unresolved simultaneous-live storage. No byte bound
-is inferred from these counts or from empirical allocation margins.
+Counts are conditioned on explicit natural ordering through a capable provider;
+this diagnostic does not establish availability or the caller's actual mode.
+Scalar fields, headers/capacities and unresolved simultaneous-live storage are
+excluded. No byte bound is inferred from counts or empirical allocation margins.
 """
 function experimental_sparse_core_memory_inventory(nr::Integer, m::Integer, a::Integer)
     0 <= nr <= EXPERIMENTAL_SPARSE_CORE_MAX_DIMENSION &&
@@ -2877,7 +2878,7 @@ function experimental_sparse_core_memory_inventory(nr::Integer, m::Integer, a::I
         array_payload_bigfloat_slots=8q + Int(a) + 18d + l,
         returned_pair_bigfloat_slots=2n + 5rows + 4,
         acceptance_array_bigfloat_slots=n + 5rows,
-        unresolved=(:ordering_workspace, :container_layout, :operation_scratch,
+        unresolved=(:container_layout, :operation_scratch,
                     :construction_overlap, :retained_results),
     )
 end
