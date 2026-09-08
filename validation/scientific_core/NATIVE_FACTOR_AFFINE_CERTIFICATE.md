@@ -28,7 +28,11 @@ products yield fewer than2^10 monomials; with bounded EFT growth and subtraction
 temporaries,2^440 is a conservative envelope. Every product prefix obeys the
 same degree limits. Thus all nonzero EFT values remain normal and no EFT
 intermediate overflows. Existing expansion-length/operation caps still refuse
-before excess work. Subsequent interval quotients may underflow conservatively;
+before excess work. Budgets apply separately to each block's polynomial/actions
+and its nested point-factor verifier. Complete returned totals include both;
+partial point records are explicitly labelled rather than assigned fake totals.
+Polynomial-only counts are also retained for attribution.
+Subsequent interval quotients may underflow conservatively;
 nonfinite/unresolved results refuse. No BigInt/BigFloat verification arithmetic.
 
 ## BFGS metric propagation

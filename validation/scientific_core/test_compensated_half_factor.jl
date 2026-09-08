@@ -25,6 +25,10 @@ const FACTOR_AFFINE_RESULTS=Any[]
         native.status===:certified || println("NATIVE_AFFINE_UNSUPPORTED ",native)
         @test native.status===:certified
         @test !native.production_admitted
+        @test native.counter_scope===:complete
+        point_certificates=[m.certificate for m in native.metrics if hasproperty(m,:certificate)]
+        @test native.products==native.polynomial_products+sum(c.products for c in point_certificates)
+        @test native.sums==native.polynomial_sums+sum(c.sums for c in point_certificates)
         @test all(i->Q(native.errors[i])>=reference.errors[i],1:5)
         for group in 1:5,i in eachindex(reference.residuals[group])
             @test Q(native.bounds[group][i].lo)<=reference.residuals[group][i]<=Q(native.bounds[group][i].hi)
@@ -100,6 +104,8 @@ const FACTOR_AFFINE_RESULTS=Any[]
         info["candidate_legacy_factor_gates"]=[c.legacy_ok for c in epoch.construction]
         info["native_affine_certificate"]=Dict("status"=>string(native.status),"errors"=>native.errors,
             "coefficient_error"=>native.coefficient_error,"products"=>native.products,"sums"=>native.sums,
+            "counter_scope"=>string(native.counter_scope),"polynomial_products"=>native.polynomial_products,
+            "polynomial_sums"=>native.polynomial_sums,
             "true_metric_bounds"=>[c.true_bound for c in native.metrics],
             "residual_bounds"=>[[[v.lo,v.hi] for v in group] for group in native.bounds])
         info["native_true_geometry"]=[Dict("status"=>string(c.runtime_geometry.status),

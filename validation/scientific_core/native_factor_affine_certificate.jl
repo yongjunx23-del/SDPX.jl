@@ -164,8 +164,16 @@ function certify(epoch,result)
         work=RG.point(abs(epoch.kappa))*RG.point(abs(dt))+RG.point(abs(epoch.tau))*RG.point(abs(dk))+RG.point(abs(rhs.tau_kappa))
         bounds[5]=[r];errors[5]=ratio_bound(r,work)
         passed=all(m->m.status===:certified,metrics) && all(e->e<=FA.PHYSICAL_FORCING,errors) && coefficient_error<=64eps(Float64)
+        polynomial_products=sum(p.budget.products for p in polys)
+        polynomial_sums=sum(p.budget.sums for p in polys)
+        point_certificates=[m.certificate for m in metrics if hasproperty(m,:certificate)]
+        complete=all(c->hasproperty(c,:products)&&hasproperty(c,:sums),point_certificates)
+        counts=complete ? (;counter_scope=:complete,polynomial_products,polynomial_sums,
+            products=polynomial_products+sum((c.products for c in point_certificates);init=0),
+            sums=polynomial_sums+sum((c.sums for c in point_certificates);init=0)) :
+            (;counter_scope=:partial_point_counts_unavailable,polynomial_products,polynomial_sums)
         (;status=passed ? :certified : :unsupported,reason=:affine_native_bounds,metrics,errors,bounds,coefficient_error,
-            products=sum(p.budget.products for p in polys),sums=sum(p.budget.sums for p in polys),production_admitted=false)
+            counts...,production_admitted=false)
     catch err
         err isa RG.EnclosureFailure || err isa RG.Phi.ArithmeticDomainError || rethrow()
         (;status=:unsupported,reason=err isa RG.EnclosureFailure ? err.reason : :eft_domain,production_admitted=false)
