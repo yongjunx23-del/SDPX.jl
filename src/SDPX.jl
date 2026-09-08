@@ -77,6 +77,10 @@ include("kkt/factor_receipt.jl")
 include("hsd/phase_timings.jl")
 include("factor_cache/structure_cache.jl")
 include("kkt/symmetric_core.jl")
+# Thin INTERNAL EXPERIMENTAL sparse-core wrapper (R3 bounded).  Included
+# after `kkt/symmetric_core.jl` because the wrapper constructor consumes
+# `SymmetricCorePattern`; it is not part of any public/native route.
+include("factor_cache/routes/experimental_sparse_core.jl")
 include("kkt/expanded_quasidefinite.jl")
 include("kkt/psd_panels.jl")
 include("kkt/reduced_schur.jl")

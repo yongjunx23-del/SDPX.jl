@@ -1374,6 +1374,15 @@ function SDPX.SparseQDLDLProviderAvailable(::Type{MF}) where {MF<:MultiFloat}
     end
 end
 
+# The existing MFLA factory supports only its AMD default. Report that
+# contract only while the actual factor retains permutation state.
+function SDPX._qdldl_provider_ordering(::Type{MF}, provider) where {MF<:MultiFloat}
+    factor = provider.factor
+    factor === nothing && return :unknown
+    return factor.perm !== nothing && factor.iperm !== nothing &&
+           factor.workspace.AtoPAPt !== nothing ? :amd : :unknown
+end
+
 function SDPX.SparseQDLDLProviderCache(
     ::Type{MF},
     pattern::SparseMatrixCSC{MF,Int},

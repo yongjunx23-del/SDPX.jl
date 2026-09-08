@@ -1124,11 +1124,14 @@ SDPX-owned opaque handle for one BFLA QDLDL sparse-LDL cache.  `inner` is
 the BFLA-owned cache object (held opaquely so no extension-only type is
 referenced before the provider is loaded); `precision_bits` snapshots the
 ambient BigFloat precision at construction and `n` the frozen order.
+`ordering` records the selected factory policy; queries also check the
+provider's declared mode and actual permutation-state presence.
 """
 struct _BFLASparseQDLDLProvider{C}
     inner::C
     precision_bits::Int
     n::Int
+    ordering::Symbol
 end
 
 function SDPX.SparseQDLDLProviderAvailable(::Type{BigFloat})
@@ -1138,6 +1141,27 @@ function SDPX.SparseQDLDLProviderAvailable(::Type{BigFloat})
     catch
         return false
     end
+end
+
+function SDPX.SparseQDLDLProviderOrderingAvailable(::Type{BigFloat}, ordering::Symbol)
+    ordering === :amd && return SDPX.SparseQDLDLProviderAvailable(BigFloat)
+    ordering === :natural || return false
+    isdefined(BFLA, :sparse_ldlt_ordering_available) || return false
+    return BFLA.sparse_ldlt_ordering_available(:natural) === true
+end
+
+function SDPX._qdldl_provider_ordering(::Type{BigFloat}, provider::_BFLASparseQDLDLProvider)
+    inner = provider.inner
+    declared = hasproperty(inner, :ordering) ? inner.ordering : :amd
+    declared === provider.ordering || return :unknown
+    factor = inner.factor
+    factor === nothing && return :unknown
+    natural = factor.perm === nothing && factor.iperm === nothing &&
+              factor.workspace.AtoPAPt === nothing
+    permuted = factor.perm !== nothing && factor.iperm !== nothing &&
+               factor.workspace.AtoPAPt !== nothing
+    (declared === :natural && natural) || (declared === :amd && permuted) || return :unknown
+    return declared
 end
 
 function SDPX.SparseQDLDLProviderCache(
@@ -1153,7 +1177,21 @@ function SDPX.SparseQDLDLProviderCache(
     inner = BFLA.sparse_ldlt_cache(
         pattern; precision_bits=bits, dsigns=collect(Int, dsigns), nrhs=1,
     )
-    return _BFLASparseQDLDLProvider(inner, bits, size(pattern, 1))
+    return _BFLASparseQDLDLProvider(inner, bits, size(pattern, 1), :amd)
+end
+
+function SDPX.SparseQDLDLProviderCache(
+    ::Type{BigFloat}, pattern::SparseMatrixCSC{BigFloat,Int},
+    dsigns::AbstractVector{<:Integer}, ordering::Symbol,
+)
+    ordering === :amd && return SDPX.SparseQDLDLProviderCache(BigFloat, pattern, dsigns)
+    SDPX.SparseQDLDLProviderOrderingAvailable(BigFloat, ordering) || throw(ArgumentError(
+        "loaded BFLA does not support explicit QDLDL ordering $ordering; no fallback",
+    ))
+    bits = precision(BigFloat)
+    inner = BFLA.sparse_ldlt_cache(pattern; precision_bits=bits,
+        dsigns=collect(Int, dsigns), nrhs=1, ordering=ordering)
+    return _BFLASparseQDLDLProvider(inner, bits, size(pattern, 1), ordering)
 end
 
 function SDPX._qdldl_provider_factorize!(

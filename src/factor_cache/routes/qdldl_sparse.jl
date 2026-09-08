@@ -71,6 +71,17 @@ specialise this seam when their QDLDL extension is loaded.
 """
 SparseQDLDLProviderAvailable(::Type{T}) where {T<:AbstractFloat} = false
 
+# Legacy three-argument factories retain AMD. Any additional ordering needs
+# explicit provider capability and a four-argument factory; no fallback.
+SparseQDLDLProviderOrderingAvailable(::Type{T}, ordering::Symbol) where {T<:AbstractFloat} =
+    ordering === :amd && SparseQDLDLProviderAvailable(T)
+_qdldl_provider_ordering(::Type{T}, provider) where {T<:AbstractFloat} = :unknown
+
+function SparseQDLDLProviderCache(::Type{T}, pattern, dsigns, ordering::Symbol) where {T<:AbstractFloat}
+    ordering === :amd || throw(ArgumentError("QDLDL provider ordering $ordering is unsupported for $T"))
+    return SparseQDLDLProviderCache(T, pattern, dsigns)
+end
+
 """
     SparseQDLDLProviderCache(::Type{T}, pattern, dsigns) -> provider
 
@@ -147,6 +158,7 @@ mutable struct SparseQDLDLCache{T,P} <: AbstractFactorCache{T}
     # for non-BigFloat arithmetics, whose precision is type-fixed and
     # enforced by the provider itself.
     precision_bits::Int
+    const ordering::Symbol
     provider::P
     symbolic_epoch::Int
     matrix_epoch::Int
@@ -160,17 +172,24 @@ mutable struct SparseQDLDLCache{T,P} <: AbstractFactorCache{T}
 end
 
 """
-    SparseQDLDLCache{T}(pattern, dsigns; symbolic_epoch, nrhs) -> cache
+    SparseQDLDLCache{T}(pattern, dsigns; symbolic_epoch, nrhs, ordering=:amd) -> cache
 
 Construct the cache for a frozen upper-triangular `pattern` and a signed
-D-sign descriptor.  Throws when no QDLDL provider is loaded (fail closed).
+D-sign descriptor. Omission retains the existing AMD factory. Explicit
+`:natural` requires provider capability and never retries through AMD.
+Ordering is frozen and checked against provider provenance/state before
+reuse or solve. Missing provider/capability fails closed.
 """
 function SparseQDLDLCache{T}(
     pattern::SparseMatrixCSC{T,Int},
     dsigns::AbstractVector{<:Integer};
     symbolic_epoch::Integer=0,
     nrhs::Integer=1,
+    ordering::Symbol=:amd,
 ) where {T<:AbstractFloat}
+    SparseQDLDLProviderOrderingAvailable(T, ordering) || throw(ArgumentError(
+        "QDLDL provider ordering $ordering is unavailable for $T; no ordering fallback",
+    ))
     SparseQDLDLProviderAvailable(T) || throw(ArgumentError(
         "QDLDL sparse LDL unavailable for arithmetic $(T); " *
         "load the MFLA/BFLA QDLDL extension",
@@ -181,17 +200,28 @@ function SparseQDLDLCache{T}(
     # provider is built at exactly this precision and every later
     # `factorize!` (including same-epoch reuse) is checked against it.
     frozen_bits = T === BigFloat ? precision(BigFloat) : 0
-    provider = SparseQDLDLProviderCache(T, pattern, dsigns)
+    provider = SparseQDLDLProviderCache(T, pattern, dsigns, ordering)
+    _qdldl_provider_ordering(T, provider) === ordering || throw(ArgumentError(
+        "QDLDL provider ordering disagrees with requested $ordering",
+    ))
     # Provider construction performs the one symbolic analysis for this
     # frozen pattern, so a successfully constructed cache owns exactly one
     # symbolic build.
     return SparseQDLDLCache{T,typeof(provider)}(
         size(pattern, 1), size(pattern),
         copy(pattern.colptr), copy(pattern.rowval),
-        Int[sign for sign in dsigns], Int(nrhs), frozen_bits, provider,
+        Int[sign for sign in dsigns], Int(nrhs), frozen_bits, ordering, provider,
         Int(symbolic_epoch), 0, 0, 1, 0, 0, 0,
         UInt64(0), Prepared,
     )
+end
+
+function _require_qdldl_ordering!(cache::SparseQDLDLCache{T}) where {T}
+    _qdldl_provider_ordering(T, cache.provider) === cache.ordering || begin
+        cache.status = Failed
+        throw(ArgumentError("QDLDL provider ordering drift; solve authority revoked"))
+    end
+    return nothing
 end
 
 """Validate a numeric factor input against the frozen cache authority.
@@ -207,6 +237,7 @@ function _validate_qdldl_numeric(
     cache::SparseQDLDLCache{T},
     A::SparseMatrixCSC{T,Int},
 ) where {T<:AbstractFloat}
+    _require_qdldl_ordering!(cache)
     size(A) == cache.prepared_shape || throw(DimensionMismatch(
         "SparseQDLDLCache factorize! dimension $(size(A)) does not match " *
         "the frozen shape $(cache.prepared_shape)",
@@ -242,6 +273,7 @@ function prepare!(
     cache::SparseQDLDLCache{T},
     requirements::AbstractFactorRequirements,
 ) where {T}
+    _require_qdldl_ordering!(cache)
     n = getproperty(requirements, :n)
     n >= 0 || throw(ArgumentError("SparseQDLDLCache dimension must be nonnegative"))
     # Frozen-shape ownership: the provider was constructed for the pattern
@@ -342,6 +374,7 @@ function solve!(
     destination::AbstractVector{T},
     rhs::AbstractVector{T},
 ) where {T}
+    _require_qdldl_ordering!(cache)
     _require_fresh(cache.status)
     length(rhs) == cache.n || throw(DimensionMismatch("solve rhs length != n"))
     length(destination) == cache.n ||
@@ -356,6 +389,7 @@ function solve_multi!(
     destination::AbstractMatrix{T},
     rhs::AbstractMatrix{T},
 ) where {T}
+    _require_qdldl_ordering!(cache)
     _require_fresh(cache.status)
     size(rhs, 1) == cache.n || throw(DimensionMismatch("solve rhs rows != n"))
     size(destination, 1) == cache.n || throw(DimensionMismatch(
@@ -378,6 +412,7 @@ function refine_once!(
     residual::AbstractVector{T},
     correction::AbstractVector{T},
 ) where {T}
+    _require_qdldl_ordering!(cache)
     _require_fresh_for_refine(cache.status)
     cache.factor_epoch > 0 ||
         throw(ArgumentError("QDLDL refine_once! requires a factored cache"))
@@ -409,9 +444,11 @@ factor_matrix_epoch(cache::SparseQDLDLCache) = cache.matrix_epoch
 factor_symbolic_epoch(cache::SparseQDLDLCache) = cache.symbolic_epoch
 factor_epoch(cache::SparseQDLDLCache) = cache.factor_epoch
 
-function factor_diagnostics(cache::SparseQDLDLCache)
+function factor_diagnostics(cache::SparseQDLDLCache{T}) where {T}
     return (
-        n=cache.n, symbolic_epoch=cache.symbolic_epoch,
+        n=cache.n, ordering=cache.ordering,
+        provider_ordering=_qdldl_provider_ordering(T, cache.provider),
+        symbolic_epoch=cache.symbolic_epoch,
         matrix_epoch=cache.matrix_epoch, factor_epoch=cache.factor_epoch,
         status=cache.status, symbolic_count=cache.symbolic_count,
         numeric_count=cache.numeric_count, solve_count=cache.solve_count,
