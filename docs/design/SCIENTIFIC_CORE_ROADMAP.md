@@ -31,9 +31,9 @@
 
 ### 尚未过门的当前候选
 
-- R3 实验核心 `e147b2b` 重审仍阻断：新 epoch 的静态 pattern 系数未完全绑定原 A，移位算子的精确匹配尚有缺口，内存清单仍需完善。已明确缩为 LP-only；SOC 不支持，不代表现有默认 SOC 支持被削减。
-- Exp 参考测试 `0c8f767` 已恢复真正跨表示的逐元素协变门，而非仅修改阈值；父流程通过 metric251/chart129 项，最大协变误差约 3.48e-14，最终窄审待完成。不得据此宣称生产共轭、fallback、epoch、corrector 或 Newton 完成。
-- PBS 算术 pilot `211161.node220` 的 harness `6e68fc2` 被父流程判为不能计 A/B 性能资格：所谓 ABBA/BAAB 实为输入种子交换，非调用交替；同进程三次采样也不是独立进程重复，计时插桩和执行来源绑定尚需修复。保留原 payload/receipt，不修改排队任务下的源码，不提交重复任务；作业处置待确认。此结论不撤销已取得的本地 provider 正确性资格。
+- R3 实验核心后继 `e625082` 已修复静态 Ar/x-zero 与缺失移位检查，但重审仍阻断：形成舍入语境未冻结，upper CSC 坐标结构未绑定，完整同时存活存储上界及 driver 内 post-factor 失败注入尚未闭合。202 项 worker 测试通过不代表这些门已覆盖。已明确缩为 LP-only；SOC 不支持，不代表现有默认 SOC 支持被削减。
+- Exp 参考测试 `0c8f767` 已恢复真正跨表示的逐元素协变门，而非仅修改阈值；父流程通过 metric251/chart129 项，最大协变误差约 3.48e-14，最终独立窄审通过。资格限于 reference-only；生产共轭、fallback、epoch、corrector 或 Newton 仍未完成。
+- PBS 算术 pilot `211161.node220` 的 harness `6e68fc2` 被父流程判为不能计 A/B 性能资格：所谓 ABBA/BAAB 实为输入种子交换，非调用交替；同进程三次采样也不是独立进程重复，计时插桩和执行来源绑定尚需修复。用户明确批准取消后，父流程核对目标身份与 Q 状态，仅对该 job 执行 qdel（exit0），随后核实 C 状态；原 payload/receipt 保留，未提交重复任务，held210917 不动。此结论不撤销已取得的本地 provider 正确性资格。
 
 新增证据：`local-archives/high-precision-ecosystem-20260908/` 下的 `mfla-parallel-parent-validation/`、`sparse-adapter-parent-validation/`、`exp-covariance-parent-fix/` 和 `r5-kernel-pbs-pilot-20260908/parent-methodology-audit.md`。
 
