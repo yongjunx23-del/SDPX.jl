@@ -208,8 +208,12 @@ function affine_rhs(e::AffineEpoch)
     SDPX.residual_newton_rhs(e.A*e.x+e.s-e.b*e.tau,
         transpose(e.A)*e.y+e.c*e.tau,dot(e.c,e.x)+dot(e.b,e.y)+e.kappa,-e.s,-e.tau*e.kappa)
 end
-function solve(e::AffineEpoch,rhs=affine_rhs(e))
+function solve(e::AffineEpoch,rhs::SDPX.HSDNewtonRHS{Float64}=affine_rhs(e))
     verify(e);m,n=size(e.A)
+    rhs.cone_corrector == -e.s || error("first experiment is affine-only; combined corrector unsupported")
+    length(rhs.primal_affine)==m && length(rhs.dual_affine)==n || throw(DimensionMismatch())
+    all(v->all(isfinite,v),(rhs.primal_affine,rhs.dual_affine,rhs.cone_corrector)) &&
+        isfinite(rhs.homogeneous_gap) && isfinite(rhs.tau_kappa) || error("nonfinite RHS")
     rp=transform(e.cone,rhs.primal_affine,:W);h=transform(e.cone,rhs.cone_corrector,:W)
     right=vcat(rhs.dual_affine,rp-h,rhs.homogeneous_gap,rhs.tau_kappa)
     solution=e.factor\right

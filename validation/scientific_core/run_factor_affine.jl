@@ -23,7 +23,8 @@ function snapshot()
         end
         hashes[name*"/Project.toml"]=bytes2hex(sha256(read(joinpath(root,"Project.toml"))))
     end
-    for f in ("factor_preserving_affine.jl","run_factor_affine.jl","power_half_root_geometry.jl",
+    for f in ("factor_preserving_affine.jl","factor_affine_reference.jl","test_factor_preserving_affine.jl",
+        "run_factor_affine.jl","power_half_root_geometry.jl",
         "power_half_root_geometry_capture.jl","power_half_phi_reference.jl",
         "fixtures/factor_affine_trial_17.toml","fixtures/factor_affine_trial_19.toml")
         hashes["qualification/"*f]=bytes2hex(sha256(read(joinpath(@__DIR__,f))))
@@ -41,12 +42,10 @@ function save(name,data)
 end
 before=snapshot();save("before",before)
 try
-    include("factor_preserving_affine.jl")
+    include("test_factor_preserving_affine.jl")
     rows=Dict{String,Any}[]
-    for id in (17,19)
-        fixture=TOML.parsefile(joinpath(@__DIR__,"fixtures/factor_affine_trial_$id.toml"))
-        epoch=FactorPreservingAffine.build(fixture)
-        result=FactorPreservingAffine.solve(epoch)
+    for item in FACTOR_AFFINE_RESULTS
+        epoch=item.epoch;result=item.candidate;id=epoch.source_record
         residual=result.residual
         out=Dict("source_record"=>id,"production_admitted"=>false,
             "root_statuses"=>[string(r.root.status) for r in epoch.root_reports],
@@ -58,10 +57,11 @@ try
             "direction_ds_bits"=>bitstring.(result.direction.ds),"dtau_bits"=>bitstring(result.direction.dtau),
             "dkappa_bits"=>bitstring(result.direction.dkappa),
             "transformed_residual_max"=>maximum(abs,result.transformed_residual))
-        push!(rows,out);save("formation-only",Dict("cases"=>rows,"qualified"=>false))
-        println("FORMATION_ONLY ",id," ",out)
+        out["exact_reference"]=item.info
+        push!(rows,out);save("research-results",Dict("cases"=>rows,"production_admitted"=>false))
+        println("REFERENCE_CHECKED_UNPROMOTED ",id," physical_errors=",item.info["physical_normalized_errors"])
     end
 finally
     after=snapshot();save("after",after);@assert before==after
 end
-println("SOURCE_UNCHANGED_FACTOR_AFFINE_FORMATION_ONLY")
+println("SOURCE_UNCHANGED_FACTOR_AFFINE_REFERENCE_CHECKS_PASSED")
