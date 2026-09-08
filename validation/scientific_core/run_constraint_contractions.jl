@@ -3,7 +3,7 @@ import MultiFloats, MultiFloatLinearAlgebra, BigFloatLinearAlgebra
 const ROOT=realpath(joinpath(@__DIR__,"../.."))
 const OUT=ENV["CONTRACTION_OUT"]
 const MODE=only(ARGS)
-@assert MODE in ("kernel","lifecycle") && VERSION==v"1.12.6"
+@assert MODE in ("kernel","lifecycle","bigfloat") && VERSION==v"1.12.6"
 @assert realpath(pkgdir(SDPX))==ROOT==realpath(pwd()) && Threads.nthreads()==4
 BLAS.set_num_threads(1)
 function gitstate(root,pin)
@@ -27,7 +27,8 @@ function snapshot()
         hashes[name*"/Project.toml"]=bytes2hex(sha256(read(joinpath(root,"Project.toml"))))
     end
     for f in ("test/constraint_contractions.jl","test/runtests.jl",
-        "validation/scientific_core/test_r2_lifecycle_qualification.jl","validation/scientific_core/run_constraint_contractions.jl")
+        "validation/scientific_core/test_r2_lifecycle_qualification.jl","validation/scientific_core/run_constraint_contractions.jl",
+        "validation/scientific_core/test_prepared_bigfloat_owned_results.jl")
         hashes["qualification/"*f]=bytes2hex(sha256(read(joinpath(ROOT,f))))
     end
     for (label,dir) in (("env",dirname(Base.active_project())),("protected","/tmp/sdpx-scientific-core-env-20260907")),f in ("Project.toml","Manifest.toml")
@@ -46,6 +47,8 @@ before=snapshot();save("before",before)
 try
     if MODE=="kernel"
         include(joinpath(ROOT,"test/constraint_contractions.jl"))
+    elseif MODE=="bigfloat"
+        include("test_prepared_bigfloat_owned_results.jl")
     else
         ENV["SDPX_EXPECT_ROOT"]=ROOT;ENV["SDPX_EXPECT_HEAD"]=ENV["CONTRACTION_HEAD"]
         include("test_r2_lifecycle_qualification.jl")
