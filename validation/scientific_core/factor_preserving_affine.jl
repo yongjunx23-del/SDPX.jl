@@ -206,6 +206,12 @@ function build(row;factor_mode::Symbol=:stored_native)
         push!(blocks,metric);push!(construction,(;info...,factor_mode,factor_info,legacy_ok,legacy_error,runtime_geometry))
     end
     cone=FactorCone(m,scales,blocks,words(scales));SDPX.validate_cone_linearization(cone)
+    _assemble_epoch(A,b,c,x,s,y,tau,kappa,mu,cone,row["source_record"],factor_mode,reports,construction)
+end
+# Shared numerical assembly; callers own/validate the native inputs and cone.
+# Capture reconstruction is confined to build above, not this numerical seam.
+function _assemble_epoch(A,b,c,x,s,y,tau,kappa,mu,cone,source_record,factor_mode,reports,construction)
+    m,n=size(A)
     Ahat=hcat([transform(cone,Vector(A[:,j]),:W) for j in 1:n]...)
     bhat=transform(cone,b,:W)
     # Full augmented core and homogeneous border, not normal equations.
@@ -221,7 +227,7 @@ function build(row;factor_mode::Symbol=:stored_native)
     frozen=fingerprint(A.nzval,b,c,x,s,y,tau,kappa,mu,Ahat,bhat,K,factor.factors)
     structural=(size(A),Tuple(A.colptr),Tuple(A.rowval),Tuple(factor.ipiv),
         Tuple((b.offset,b.frozen) for b in cone.blocks),cone.frozen_lp,factor_mode)
-    AffineEpoch(row["source_record"],factor_mode,A,b,c,x,s,y,tau,kappa,mu,cone,Ahat,bhat,K,factor,frozen,structural,reports,construction)
+    AffineEpoch(source_record,factor_mode,A,b,c,x,s,y,tau,kappa,mu,cone,Ahat,bhat,K,factor,frozen,structural,reports,construction)
 end
 function affine_rhs(e::AffineEpoch)
     verify(e)
