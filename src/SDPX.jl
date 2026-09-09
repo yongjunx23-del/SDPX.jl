@@ -151,6 +151,7 @@ include("hsd/factor_pair/factor_pair_hsd.jl")
 
 include("hsd/native_hsd_public.jl")
 include("public/optimize.jl")
+include("accuracy_contract.jl")
 include("entrypoint_bridge.jl")
 include("moi_wrapper.jl")
 
@@ -166,6 +167,10 @@ export clear_structure_cache!, set_structure_cache_enabled!
 export symbolic_analysis_count, symbolic_analysis_counts, symbolic_analysis_delta
 export NonsymmetricBackendChoice, NativeNonsymmetricBackend
 export ExperimentalHalfPowerFactorPairBackend, UnsupportedBackendError
+export AccuracyContract, AccuracyClass, UnsupportedAccuracyContext
+export AccuracyVerified, AccuracyUnsupported, AccuracyNumericalFailure
+export AccuracyInfrastructureFailure
+export accuracy_contract, accuracy_class
 
 # Symmetric-cone algebra (Subagent I) lives in the nested module
 # `SymmetricCones` (Nonnegative / SOC / PSDTriangle kernels). It is not part of
