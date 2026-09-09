@@ -191,9 +191,11 @@ calls; scratch must belong to a worker range, not a migrating task's
 diagnostic-only, not a memory-admission bound; whole-job CPU% includes
 startup/warmup; the campaign's bare `wait` does not aggregate child failures
 into FAIL, so throughput must count validated result records.
-- **Digest caveat**: threading changes Gram reduction order, so trajectories
-  differ across thread counts; bit-identity/A-B gates must compare within a
-  fixed thread count.
+- **Digest caveat**: the measured cluster α3 runs gave the same digest at
+  1/8/16/32 threads (`c354cf07`) while the local Mac gave `3a7833` at 1 and 4
+  threads, so the machine/runtime — not the thread count — changed the
+  trajectory here. Bit-identity/A-B gates must still compare within a fixed
+  configuration; do not assume either outcome.
 
 ## 3. What NOT to do
 
@@ -202,7 +204,11 @@ into FAIL, so throughput must count validated result records.
 - Do not treat the Q3 "factorization" bucket as serial LU; it is mostly
   parallel Gram work.
 - Do not relax tolerances or drop constraints to make parallel runs "match".
-- Do not compare digests across thread counts.
+- Digest caveat: the cluster α3 campaign produced the SAME digest (`c354cf07`) at
+  1/8/16/32 threads, and the local 1/4-thread runs both produced `3a7833`; the
+  machine difference (not the thread count) changed the trajectory. Do not
+  assume thread count changes the digest, and do not assume it cannot; compare
+  per fixed configuration and record the digest.
 
 ## 4. Measurement plan for any candidate
 
