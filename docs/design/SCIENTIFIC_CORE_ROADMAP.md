@@ -44,6 +44,8 @@
 - **R6-B 接口与恢复套件集成**（`ecf01f2`，CI 允许清单 `c5d0de0`）：`test/test_r6b_moi_mapping.jl`（35/35 通过，30.9s）涵盖非增量 MOI 包装器、copy_to、认证 LP 目标与选项拒绝；`test/test_r6b_checkpoint.jl`（26/26 通过，0.9s）涵盖 Float64/BigFloat 序列化往返、无 `.tmp` 残留、损坏与版本拒绝；CI 测试布局完整（48 mounted, 11 manual-only）。
 - **R2-C 多任务并发会话隔离与碰撞**（`b945537`）：在 `test/test_r2_full_qualification.jl` 中新增 11 个并发断言（全套 39/39 通过，threads=4）。并发独立会话位等价且槽隔离；同一会话并发碰撞被安全拒绝为 `ArgumentError("PreparedSolver is sequential...")` 无死锁；碰撞后会话无锁残留、后续求解即刻恢复 Optimal。
 - **LP random_large 选路归因关闭**（`c628083`）：实测 T1 29.19s vs T8 29.95s，实际走 native-HSD 稀疏 LDLT（因子化仅 2.3ms），首解 JIT 占 ~14s，`parallel_blas_panels` 是不可达算法；平坦是预期行为，无内层并行空间，不再 redesign。
+- **成熟求解器前端与结果返回**（`602bcc3`，元数据对齐 `82fb9d8`）：`Result` 与 `Model` 引入专业多行 `MIME"text/plain"` 摘要 banner；导出成熟求解器标准访问器（`objective_value`、`dual_objective_value`、`primal_residual`、`dual_residual`、`relative_gap`、`iterations`、`solve_time`、`is_optimal`、`is_primal_infeasible`、`is_dual_infeasible`、`primal_status`、`dual_status`、`termination_status`）与模型命名块查询（`variable_by_name`、`constraint_by_name`、`variable_names`、`constraint_names`）；`test/test_mature_solver_interface.jl` 全套 120/120 测试通过（Float64/BigFloat/MultiFloat）；CI 测试布局完整（49 mounted, 11 manual-only）；`CITATION.cff` 同步对齐 Project.toml v0.6.1。
+- **发布与部署同步**：分支 `development/scientific-core-20260907`（HEAD `82fb9d8`）已推送至 GitHub `origin`；本地 Desktop 仓库对应分支已完全同步；集群（`hpc`）已部署对应不可变 release `~/projects/SDPX.jl/releases/82fb9d8df9c2ffaac2ee0175dfb6fa7e782b827a/`，归档 SHA `732518c0`，环境单线程预编译全绿（exit 0）。
 - **CSDR α3 集群配对战役（进行中）**：作业 211771（ppn8/24GB/4h），基线 vs 候选在池 1 与 8 各 3 次新鲜进程预热+测算（共 12 次），目前池 1（6/12）全部完成 exit 0，池 8 正在执行。
 
 ## 架构选择与不可越过的门（保持不变）
