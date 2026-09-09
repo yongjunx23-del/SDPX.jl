@@ -51,9 +51,14 @@ module PersistentWorkerPool
 using TOML
 using Printf
 using Statistics
+using SHA
+using UUIDs
 
 const ROOT = normpath(joinpath(@__DIR__, "..", ".."))
 const SCRIPT = abspath(@__FILE__)
+const RUN_ID = get(ENV, "SDPX_POOL_RUN_ID", string(uuid4()))
+const SOURCE_COMMIT = get(ENV, "SDPX_POOL_SOURCE_COMMIT", readchomp(`git -C $ROOT rev-parse HEAD`))
+const SCRIPT_SHA = get(ENV, "SDPX_POOL_SCRIPT_SHA", bytes2hex(sha256(read(SCRIPT))))
 
 if !isdefined(Main, :GenericConicBenchmark)
     Base.include(Main, joinpath(ROOT, "benchmark", "general", "GenericConicBenchmark.jl"))
@@ -65,7 +70,7 @@ const BASE_SEED = UInt32(0x004c5003)
 const WORKLOAD_M = 400
 const WORKLOAD_N = 1200
 const WARMUP_SALT = UInt32(0x00FFFFFF)
-const PROTOCOL_VERSION = 1
+const PROTOCOL_VERSION = 2
 
 # --- Small utilities ----------------------------------------------------------
 function _arg(name::String, default=nothing)
@@ -80,14 +85,13 @@ function _source_porcelain()::String
     return readchomp(`git -C $ROOT status --porcelain`)
 end
 
-"""Fail closed on any *tracked* modification (solver/source drift would
-invalidate the comparison). Untracked files (e.g. this not-yet-committed
-harness) are tolerated but recorded verbatim in batch summaries for audit."""
+"""Require a clean checkout and the exact loaded SDPX source."""
 function _require_clean_source(stage::AbstractString)
-    tracked = readchomp(`git -C $ROOT diff --name-only`) *
-              readchomp(`git -C $ROOT diff --cached --name-only`)
-    isempty(strip(tracked)) || throw(ArgumentError(
-        "tracked source modifications at $stage: $tracked"))
+    porcelain = _source_porcelain()
+    isempty(porcelain) || throw(ArgumentError("source modifications at $stage: $porcelain"))
+    realpath(pkgdir(G.SDPX)) == realpath(ROOT) || throw(ArgumentError("loaded SDPX source mismatch"))
+    readchomp(`git -C $ROOT rev-parse HEAD`) == SOURCE_COMMIT || throw(ArgumentError("source HEAD changed"))
+    bytes2hex(sha256(read(SCRIPT))) == SCRIPT_SHA || throw(ArgumentError("harness changed"))
     return true
 end
 
@@ -100,6 +104,7 @@ function _atomic_toml(path::AbstractString, value::Dict{String,Any})
         close(io)
         mv(temporary, abspath(path); force=false)
     catch
+        isopen(io) && close(io)
         isfile(temporary) && rm(temporary; force=true)
         rethrow()
     end
@@ -154,6 +159,11 @@ function solve_item(index::Integer; label::AbstractString="item")
     wall_seconds = (time_ns() - wall_start) * 1e-9
     return Dict{String,Any}(
         "protocol_version" => PROTOCOL_VERSION,
+        "source_commit" => readchomp(`git -C $ROOT rev-parse HEAD`),
+        "script_sha256" => bytes2hex(sha256(read(SCRIPT))),
+        "run_id" => RUN_ID,
+        "loaded_sdpx" => realpath(pkgdir(G.SDPX)),
+        "julia_version" => string(VERSION),
         "label" => String(label),
         "item_index" => Int(index),
         "seed" => Int(item_seed(index)),
@@ -209,13 +219,19 @@ function _try_claim(queue_dir::AbstractString, index::Integer, worker_id::Intege
     lockpath = joinpath(queue_dir, "item_$(lpad(index, 4, '0')).lock")
     try
         mkdir(lockpath)
+    catch
+        isdir(lockpath) && return false
+        rethrow()
+    end
+    try
         open(joinpath(lockpath, "owner"), "w") do io
             println(io, "worker=$worker_id pid=$(Libc.getpid())")
         end
-        return true
     catch
-        return false
+        _release_claim(queue_dir, index)
+        rethrow()
     end
+    return true
 end
 
 function _release_claim(queue_dir::AbstractString, index::Integer)
@@ -244,7 +260,8 @@ function worker_main()
         base.objective_tolerance, base.source)
     warmup_result = Base.invokelatest(getproperty(G, :run_one), warmup_spec, Float64; threads=1)
     warmup_seconds = (time_ns() - warmup_wall) * 1e-9
-    warmup_ok = warmup_result.status === :optimal && warmup_result.certificate_valid
+    warmup_ok = warmup_result.status === :optimal && warmup_result.certificate_valid &&
+                warmup_result.expectation_met
     _atomic_toml(joinpath(result_dir, "warmup_$(worker_id).toml"), Dict{String,Any}(
         "protocol_version" => PROTOCOL_VERSION,
         "worker_id" => worker_id,
@@ -268,16 +285,22 @@ function worker_main()
     claimed = Int[]
     failures = Int[]
     peak_rss = Int(Sys.maxrss())
-    deadline = time() + parse(Float64, get(ENV, "SDPX_POOL_ITEM_TIMEOUT", "1700"))
-    while time() < deadline
+    # This is a cooperative batch-loop budget, NOT a per-item timeout.
+    # The parent owns the hard deadline and kills/reaps a stuck solve/warmup.
+    worker_start = time_ns()
+    worker_budget = parse(Float64, get(ENV, "SDPX_POOL_WORKER_TIMEOUT", "1700"))
+    while (time_ns() - worker_start) * 1e-9 < worker_budget
         remaining = [i for i in 0:(n_items-1)
                      if !isfile(result_path(result_dir, i))]
         isempty(remaining) && break
         progress = false
         for i in remaining
+            (time_ns() - worker_start) * 1e-9 >= worker_budget && break
             isfile(result_path(result_dir, i)) && continue
             _try_claim(queue_dir, i, worker_id) || continue
             try
+                # A previous owner may have published after our pre-claim check.
+                isfile(result_path(result_dir, i)) && continue
                 receipt = solve_item(i)
                 receipt["worker_id"] = worker_id
                 _atomic_toml(result_path(result_dir, i), receipt)
@@ -308,13 +331,12 @@ function worker_main()
         "missing_items" => missing,
         "warmup_seconds" => Float64(warmup_seconds),
         "peak_rss_bytes" => peak_rss,
-        "retained_maxrss_bytes" => Int(Sys.maxrss()),
-        "retained_rss_bytes" => current_rss_bytes(),
+        "post_batch_rss_bytes" => current_rss_bytes(),
     )
     _atomic_toml(joinpath(result_dir, "worker_$(worker_id)_summary.toml"), summary)
     _require_clean_source("worker$(worker_id)_end")
     println("WORKER $worker_id DONE claimed=$(length(claimed)) failures=$(length(failures)) " *
-            "missing=$(length(missing)) peak_rss=$peak_rss retained_rss=$(summary["retained_rss_bytes"])")
+            "missing=$(length(missing)) peak_rss=$peak_rss post_batch_rss=$(summary["post_batch_rss_bytes"])")
     if !isempty(failures) || !isempty(missing)
         exit(1)
     end
@@ -323,6 +345,9 @@ end
 # --- Parent launch helpers ------------------------------------------------------------------
 function _child_env()
     return Dict(
+        "SDPX_POOL_RUN_ID" => RUN_ID,
+        "SDPX_POOL_SOURCE_COMMIT" => SOURCE_COMMIT,
+        "SDPX_POOL_SCRIPT_SHA" => SCRIPT_SHA,
         "JULIA_NUM_THREADS" => "1",
         "JULIA_NUM_GC_THREADS" => "1",
         "OPENBLAS_NUM_THREADS" => "1",
@@ -342,30 +367,45 @@ end
 
 function _run_throttled(labeled::Vector{Tuple{String,Cmd}}, max_concurrent::Integer;
                         deadline_seconds::Real=1700)
+    max_concurrent >= 1 || throw(ArgumentError("workers must be positive"))
+    isfinite(deadline_seconds) && deadline_seconds > 0 ||
+        throw(ArgumentError("deadline must be positive and finite"))
     env = _child_env()
     failures = String[]
-    # Launch lazily, keeping at most max_concurrent live.
     pending = copy(labeled)
     live = Tuple{Base.Process,String}[]
-    deadline = time() + deadline_seconds
-    while !isempty(pending) || !isempty(live)
-        time() > deadline && throw(ArgumentError("deadline exceeded waiting for child processes"))
-        while !isempty(pending) && length(live) < max_concurrent
-            (label, cmd) = popfirst!(pending)
-            push!(live, (run(setenv(cmd, env...); wait=false), label))
-        end
-        # Poll for any completion.
-        progressed = false
-        for (k, (proc, label)) in enumerate(live)
-            if !process_running(proc)
-                wait(proc)
-                proc.exitcode != 0 && push!(failures, label)
-                deleteat!(live, k)
-                progressed = true
-                break
+    start = time_ns()
+    try
+        while !isempty(pending) || !isempty(live)
+            (time_ns() - start) * 1e-9 > deadline_seconds &&
+                throw(ArgumentError("deadline exceeded waiting for child processes"))
+            while !isempty(pending) && length(live) < max_concurrent
+                (label, cmd) = popfirst!(pending)
+                push!(live, (run(addenv(cmd, env...); wait=false), label))
             end
+            for k in reverse(eachindex(live))
+                proc, label = live[k]
+                if !process_running(proc)
+                    wait(proc)
+                    if !success(proc)
+                        push!(failures, label)
+                        deleteat!(live, k)
+                        return failures # finally reaps peers; missing items fail aggregation
+                    end
+                    deleteat!(live, k)
+                end
+            end
+            isempty(live) || sleep(0.05)
         end
-        progressed || sleep(1.0)
+    finally
+        # Children are direct Julia processes, not shell launchers. Always
+        # terminate and reap owned children on timeout, interrupt or launch error.
+        for (proc, _) in live
+            process_running(proc) && kill(proc, Base.SIGKILL)
+        end
+        for (proc, _) in live
+            wait(proc)
+        end
     end
     return failures
 end
@@ -406,19 +446,42 @@ function run_persistent_batch(n_items::Integer, n_workers::Integer, batch_dir::A
 end
 
 # --- Aggregation ------------------------------------------------------------------------------
+# Re-derive acceptance from receipt facts and the independently generated item
+# reference; never trust the convenience `certified` bit alone. This validates
+# reported certificate facts, not original-coordinate equations from x/y/s.
+function valid_receipt(r, index::Integer)
+    try
+        spec = item_spec(index)
+        get(r, "protocol_version", 0) == PROTOCOL_VERSION || return false
+        get(r, "run_id", "") == RUN_ID || return false
+        get(r, "loaded_sdpx", "") == realpath(ROOT) || return false
+        r["item_index"] == index && r["seed"] == Int(item_seed(index)) || return false
+        r["source_commit"] == readchomp(`git -C $ROOT rev-parse HEAD`) || return false
+        r["script_sha256"] == bytes2hex(sha256(read(SCRIPT))) || return false
+        r["status"] == "optimal" && r["certificate_valid"] === true &&
+            r["expectation_met"] === true || return false
+        all(isfinite(r[k]) for k in ("objective", "dual_objective", "primal_residual",
+            "dual_residual", "relative_gap", "solve_seconds", "item_wall_seconds")) || return false
+        all(r[k] >= 0 for k in ("primal_residual", "dual_residual", "relative_gap",
+            "solve_seconds", "item_wall_seconds")) || return false
+        return isapprox(r["objective"], spec.known_objective;
+            atol=spec.objective_tolerance, rtol=spec.objective_tolerance)
+    catch
+        return false
+    end
+end
+
 function aggregate_batch(mode::AbstractString, batch_dir::AbstractString,
                          result_dir::AbstractString, wall_seconds::Float64,
-                         child_failures, n_items::Integer)
+                         child_failures, n_items::Integer, n_workers::Integer)
     receipts = Dict{Int,Dict{String,Any}}()
     for i in 0:(n_items-1)
         path = result_path(result_dir, i)
         isfile(path) || continue
         receipts[i] = TOML.parsefile(path)
     end
-    certified = sort!([i for (i, r) in receipts
-                       if get(r, "certified", false) === true])
-    failed = sort!([i for (i, r) in receipts
-                    if get(r, "certified", false) !== true])
+    certified = sort!([i for (i, r) in receipts if valid_receipt(r, i)])
+    failed = sort!([i for (i, r) in receipts if !valid_receipt(r, i)])
     missing = [i for i in 0:(n_items-1) if !haskey(receipts, i)]
     solve_times = [Float64(receipts[i]["solve_seconds"]) for i in certified]
     item_walls = [Float64(receipts[i]["item_wall_seconds"]) for i in certified]
@@ -435,12 +498,21 @@ function aggregate_batch(mode::AbstractString, batch_dir::AbstractString,
         m === nothing && continue
         worker_summaries[parse(Int, m.captures[1])] = TOML.parsefile(joinpath(result_dir, name))
     end
-    peak_rss = isempty(receipts) ? 0 :
-        maximum(Int(r["maxrss_bytes"]) for r in values(receipts))
+    workers_valid = mode == "fresh" ||
+        (length(warmups) == n_workers && length(worker_summaries) == n_workers &&
+         all(get(w, "certificate_valid", false) === true && get(w, "status", "") == "optimal"
+             for w in values(warmups)) &&
+         all(isempty(w["failed_items"]) && isempty(w["missing_items"])
+             for w in values(worker_summaries)))
+    peak_samples = Int[r["maxrss_bytes"] for r in values(receipts)]
+    append!(peak_samples, Int[w["maxrss_bytes"] for w in values(warmups)])
+    append!(peak_samples, Int[w["peak_rss_bytes"] for w in values(worker_summaries)])
+    peak_rss = isempty(peak_samples) ? 0 : maximum(peak_samples)
     retained_rss = isempty(worker_summaries) ? 0 :
-        maximum(Int(s["retained_rss_bytes"]) for s in values(worker_summaries))
+        maximum(Int(s["post_batch_rss_bytes"]) for s in values(worker_summaries))
     summary = Dict{String,Any}(
         "protocol_version" => PROTOCOL_VERSION,
+        "run_id" => RUN_ID,
         "mode" => String(mode),
         "batch_dir" => String(batch_dir),
         "n_items" => Int(n_items),
@@ -456,12 +528,22 @@ function aggregate_batch(mode::AbstractString, batch_dir::AbstractString,
         "median_item_wall_seconds" => isempty(item_walls) ? 0.0 : Float64(median(item_walls)),
         "solve_seconds" => solve_times,
         "peak_rss_bytes" => peak_rss,
-        "retained_rss_bytes" => retained_rss,
+        "post_batch_rss_bytes" => retained_rss,
+        "batch_valid" => workers_valid && isempty(failed) && isempty(missing) && isempty(child_failures),
         "objectives" => Dict(string(i) => string(receipts[i]["objective"]) for i in keys(receipts)),
+        "numerical_fingerprints" => Dict(string(i) => join((repr(receipts[i][k]) for k in
+            ("status", "objective", "dual_objective", "primal_residual", "dual_residual",
+             "relative_gap", "iterations", "certificate_valid")), "|") for i in keys(receipts)),
         "iterations" => Dict(string(i) => Int(receipts[i]["iterations"]) for i in keys(receipts)),
         "warmup_seconds" => Dict(string(k) => Float64(v["warmup_seconds"]) for (k, v) in warmups),
         "source_commit" => readchomp(`git -C $ROOT rev-parse HEAD`),
         "source_porcelain" => _source_porcelain(),
+        "script_sha256" => bytes2hex(sha256(read(SCRIPT))),
+        "active_project" => something(Base.active_project(), ""),
+        "manifest_sha256" => let project = Base.active_project()
+            path = project === nothing ? "" : joinpath(dirname(project), "Manifest.toml")
+            isfile(path) ? bytes2hex(sha256(read(path))) : "absent"
+        end,
     )
     _atomic_toml(joinpath(batch_dir, "batch_summary.toml"), summary)
     return summary
@@ -470,14 +552,17 @@ end
 function parent_single(mode::AbstractString, n_items::Integer, n_workers::Integer,
                        outdir::AbstractString)
     _require_clean_source("parent_start")
-    batch_dir = joinpath(abspath(outdir), "batch_$(mode)_$(n_items)items_$(n_workers)w")
-    ispath(batch_dir) && rm(batch_dir; recursive=true, force=true)
+    root = abspath(outdir)
+    mkpath(dirname(root))
+    mkdir(root)
+    batch_dir = joinpath(root, "batch_$(mode)_$(n_items)items_$(n_workers)w")
+    ispath(batch_dir) && throw(ArgumentError("refusing to overwrite existing batch: $batch_dir"))
     mkpath(batch_dir)
     batch = mode == "fresh" ? run_fresh_batch(n_items, n_workers, batch_dir) :
         mode == "persistent" ? run_persistent_batch(n_items, n_workers, batch_dir) :
         throw(ArgumentError("unknown mode $mode"))
     summary = aggregate_batch(batch.mode, batch.batch_dir, batch.result_dir,
-        batch.wall_seconds, batch.child_failures, n_items)
+        batch.wall_seconds, batch.child_failures, n_items, n_workers)
     _require_clean_source("parent_end")
     @printf("%-10s certified=%d/%d failed=%d missing=%d wall=%.1fs throughput=%.2f solves/h median_solve=%.2fs peak_rss=%.2fGiB\n",
         mode, summary["n_certified"], summary["n_items"], summary["n_failed"],
@@ -490,22 +575,23 @@ end
 function parent_compare(n_items::Integer, n_workers::Integer, outdir::AbstractString, reps::Integer)
     _require_clean_source("compare_start")
     root = abspath(outdir)
-    mkpath(root)
+    mkpath(dirname(root))
+    mkdir(root) # Exclusive fresh run directory; never erase previous evidence.
     order = String[]
     for rep in 1:reps
-        push!(order, "fresh", "persistent")
+        isodd(rep) ? push!(order, "fresh", "persistent") : push!(order, "persistent", "fresh")
     end
     summaries = Dict{String,Any}[]
     for (seq, mode) in enumerate(order)
         rep = div(seq - 1, 2) + 1
         batch_dir = joinpath(root, "rep$(rep)_$(mode)")
-        ispath(batch_dir) && rm(batch_dir; recursive=true, force=true)
+        ispath(batch_dir) && throw(ArgumentError("refusing to overwrite existing batch: $batch_dir"))
         mkpath(batch_dir)
         println("COMPARE [$seq/$(length(order))] mode=$mode rep=$rep")
         batch = mode == "fresh" ? run_fresh_batch(n_items, n_workers, batch_dir) :
             run_persistent_batch(n_items, n_workers, batch_dir)
         summary = aggregate_batch(batch.mode, batch.batch_dir, batch.result_dir,
-            batch.wall_seconds, batch.child_failures, n_items)
+            batch.wall_seconds, batch.child_failures, n_items, n_workers)
         summary["rep"] = rep
         summary["sequence"] = seq
         # aggregate_batch already persisted batch_summary.toml in batch_dir;
@@ -519,21 +605,29 @@ function parent_compare(n_items::Integer, n_workers::Integer, outdir::AbstractSt
     # across ALL batches (fresh and persistent solve identical items).
     by_item = Dict{Int,Set{String}}()
     by_iter = Dict{Int,Set{Int}}()
-    for summary in summaries, (item_text, obj_text) in summary["objectives"]
+    for summary in summaries, (item_text, obj_text) in summary["numerical_fingerprints"]
         item = parse(Int, item_text)
         push!(get!(by_item, item, Set{String}()), String(obj_text))
         push!(get!(by_iter, item, Set{Int}()), Int(summary["iterations"][item_text]))
     end
-    isolation_ok = all(length(v) == 1 for v in values(by_item)) &&
+    isolation_ok = length(by_item) == n_items && length(by_iter) == n_items &&
+                   all(length(v) == 1 for v in values(by_item)) &&
                    all(length(v) == 1 for v in values(by_iter))
     fresh_tp = [s["certified_solves_per_hour"] for s in summaries if s["mode"] == "fresh"]
     persist_tp = [s["certified_solves_per_hour"] for s in summaries if s["mode"] == "persistent"]
-    gate_ratio = median(persist_tp) / median(fresh_tp)
+    gate_ratio = median(fresh_tp) > 0 ? median(persist_tp) / median(fresh_tp) : 0.0
+    all_valid = all(s["batch_valid"] for s in summaries)
+    rss_limit = parse(Int, _arg("rss-limit-bytes", "3221225472"))
+    rss_limit > 0 || throw(ArgumentError("RSS limit must be positive"))
+    memory_ok = all(0 < s["peak_rss_bytes"] <= rss_limit for s in summaries) &&
+        all(0 < s["post_batch_rss_bytes"] <= rss_limit for s in summaries if s["mode"] == "persistent")
     comparison = Dict{String,Any}(
         "protocol_version" => PROTOCOL_VERSION,
         "items" => Int(n_items),
         "workers" => Int(n_workers),
         "reps" => Int(reps),
+        "run_id" => RUN_ID,
+        "script_sha256" => SCRIPT_SHA,
         "interleaved_order" => order,
         "fresh_throughput" => fresh_tp,
         "persistent_throughput" => persist_tp,
@@ -541,7 +635,10 @@ function parent_compare(n_items::Integer, n_workers::Integer, outdir::AbstractSt
         "median_persistent_throughput" => Float64(median(persist_tp)),
         "gate_ratio_persistent_over_fresh" => Float64(gate_ratio),
         "gate_threshold" => 1.02,
-        "gate_pass" => Bool(gate_ratio >= 1.02),
+        "gate_pass" => Bool(all_valid && isolation_ok && memory_ok && gate_ratio >= 1.02),
+        "all_batches_valid" => all_valid,
+        "memory_samples_within_limit" => memory_ok,
+        "per_worker_rss_limit_bytes" => rss_limit,
         "state_isolation_ok" => isolation_ok,
         "source_commit" => readchomp(`git -C $ROOT rev-parse HEAD`),
     )
@@ -563,10 +660,14 @@ function main()
         n_workers = parse(Int, _arg("workers", "2"))
         outdir = _arg("outdir", joinpath(tempdir(), "sdpx_persistent_pool"))
         reps = parse(Int, _arg("reps", "2"))
+        n_items >= 1 && n_workers >= 1 && reps >= 1 ||
+            throw(ArgumentError("items, workers and reps must be positive"))
         if mode == "compare"
-            parent_compare(n_items, n_workers, outdir, reps)
+            comparison = parent_compare(n_items, n_workers, outdir, reps)
+            comparison["gate_pass"] || exit(1)
         else
-            parent_single(mode, n_items, n_workers, outdir)
+            summary = parent_single(mode, n_items, n_workers, outdir)
+            summary["batch_valid"] || exit(1)
         end
     else
         throw(ArgumentError("specify --solve-one, --worker, or --mode=fresh|persistent|compare"))

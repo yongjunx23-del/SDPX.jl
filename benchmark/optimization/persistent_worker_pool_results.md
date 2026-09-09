@@ -1,4 +1,10 @@
-# Persistent warmed worker pool vs fresh-process launcher: measurement verdict
+# Persistent warmed worker pool: historical exploratory measurements
+
+**Not an acceptance receipt.** Astra audit of `6a17505` found timeout,
+queue-race, validation and provenance blockers. The measurements below used
+tracked solver HEAD `f1c5df4` with an untracked, unhashed harness; they do not
+qualify the subsequently committed/repaired driver. Protocol v2 requires a
+new output directory and complete correctness/memory gates. Rerun pending.
 
 Date: 2026-09-09. Worktree branch `perf/persistent-pool-*`. Driver:
 `benchmark/optimization/persistent_worker_pool.jl` (execution management
@@ -28,7 +34,7 @@ Raw artifacts for this run live outside the worktree (`/tmp/pool_compare`,
 
 ## Measured comparison (interleaved fresh, persistent, fresh, persistent)
 
-| rep | mode | certified | wall incl. startup+collect | certified solves/h | per-item median solve | per-worker peak RSS | retained RSS after batch | failures |
+| rep | mode | reported valid | wall incl. startup+collect | reported-valid solves/h | per-item median solve | per-worker peak RSS | historical RSS column¹ | failures |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 1 | fresh (1 proc/item, 2 concurrent) | 8/8 | 167.4 s | 172.1 | 21.05 s | 1.93 GiB | 0 (processes exit) | 0 |
 | 1 | persistent (2 warmed workers) | 8/8 | 57.1 s | 504.3 | 3.78 s | 2.02 GiB max | 2.02 GiB max | 0 |
@@ -36,8 +42,9 @@ Raw artifacts for this run live outside the worktree (`/tmp/pool_compare`,
 | 2 | persistent | 8/8 | 58.1 s | 495.5 | 4.18 s | 1.96 GiB max | 1.96 GiB max | 0 |
 
 Medians: fresh 175.3 solves/h, persistent 499.9 solves/h.
-**Gate ratio (persistent/fresh) = 2.85 ≥ 1.02 → PASS** (~185% improvement,
-not a borderline 2%).
+Observed throughput ratio = **2.85** (~185% improvement). This exceeds the
+performance threshold alone; the original gate omitted correctness failures
+and cannot establish acceptance.
 
 Why: a fresh process pays Julia load + full JIT on every item (item wall
 ~36 s, of which ~20 s is the timed solve including JIT); a warmed worker
@@ -50,10 +57,9 @@ optimal+valid).
 
 ## Verdict
 
-**Accept gate PASSED on this workload.** The persistent warmed one-thread
-process pool is a genuine, large throughput win on the proven
-process-throughput axis and is kept as an opt-in tool
-(`--mode=persistent`; the fresh launcher remains the default path).
+Keep as an **opt-in experimental tool**, pending source-matched tests and a
+new comparison using the repaired gates. These receipts support startup/JIT
+amortization on this batch, not production qualification or α3 latency gains.
 
 ## Honest limitations
 
@@ -65,8 +71,11 @@ process-throughput axis and is kept as an opt-in tool
   a large share of persistent wall time; larger queues amortize it further
   (ratio grows), smaller queues shrink the win. The gate comparison counts
   warmup against the pool honestly.
-- Retained memory is bounded but real: ~2 GiB/worker stays resident after
-  the batch (== peak, no growth across items). Memory budgeting for larger
-  pools must reserve peak-per-worker, not per-item.
+- ¹The historical table mixed fresh post-exit zero with persistent pre-exit
+  samples/peaks. Both arms terminate workers at batch end. Sampled peaks did
+  grow across items (about 23–35 MB for rep 1 workers); four items per worker
+  establish neither a long-run retention bound nor absence of growth.
+  Protocol v2 labels end-of-work/pre-exit RSS separately and checks a configured
+  per-worker limit; that finite-run check is not a proof of bounded retention.
 - No claim about inner-thread latency or other cones/precisions; solver
   source untouched.
