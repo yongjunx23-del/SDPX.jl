@@ -1276,7 +1276,8 @@ function _native_hsd_diagnostics(
         q3_worker_budget=q3_executed ? core.worker_budget : 0,
         q3_budget_scope=q3_executed ?
             (T === Float64 ? :julia_tasks_only : :julia_tasks_and_provider_configuration) : :not_applicable,
-        ambient_blas_threads=LinearAlgebra.BLAS.get_num_threads(),
+        ambient_blas_threads=blas_threads(),
+        ambient_blas_backend=blas_backend(),
         row_scaling=executed_row_scaling,
         transform=executed_row_scaling,
         border_structure=executed_border,
