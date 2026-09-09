@@ -120,6 +120,48 @@
     @test st.pair === pair_before
     @test st.x == x_before
 
+    # Post-reduction admission adapter: the real canonical/equality-reduction
+    # pipeline for an admitted orthant+half-Power model must yield the exact
+    # factor-pair layout, and every excluded shape must return `nothing`
+    # (typed refusal by the caller), never a guessed permutation.
+    model = SDPX.Model(Float64)
+    sig = SDPX.variable!(model, :signal, 3; domain=SDPX.Reals())
+    epi = SDPX.variable!(model, :epigraph, 3; domain=SDPX.Nonnegative())
+    for i in 1:3
+        SDPX.constraint!(model, Symbol(:fix_, i), sig[i] - a[i], SDPX.ZeroCone())
+        SDPX.constraint!(model, Symbol(:term_, i), (epi[i], 1.0, sig[i]),
+            SDPX.PowerCone(0.5))
+    end
+    SDPX.objective!(model, SDPX.Minimize(), epi[1] + epi[2] + epi[3])
+    program = SDPX.compile_product_cone_model(model)
+    canon = SDPX.canonicalize(program)
+    red = SDPX.hsd_equality_reduce(canon)
+    layout_adm = FPH.reduced_layout(red.reduced)
+    @test layout_adm isa SDPX.NativeHalfPair.Layout
+    @test layout_adm.orthant == 3
+    @test layout_adm.alphas == (0.5, 0.5, 0.5)
+    Ared, bred, cred = FPH.canonical_problem(red.reduced)
+    @test size(Ared, 1) == 12 && size(Ared, 2) == 3
+    @test cred == ones(3)
+    # Excluded shapes refuse instead of guessing: an SOC model and a model
+    # without a Power block.
+    soc_model = SDPX.Model(Float64)
+    z = SDPX.variable!(soc_model, :z, 3; domain=SDPX.Reals())
+    SDPX.constraint!(soc_model, :soc, Any[1.0, z[1], z[2]], SDPX.LorentzCone())
+    SDPX.objective!(soc_model, SDPX.Minimize(), z[1] + z[3])
+    soc_program = SDPX.compile_product_cone_model(soc_model)
+    soc_red = SDPX.hsd_equality_reduce(SDPX.canonicalize(soc_program))
+    @test FPH.reduced_layout(soc_red.reduced) === nothing
+    lp_model = SDPX.Model(Float64)
+    w = SDPX.variable!(lp_model, :w, 2; domain=SDPX.Reals())
+    SDPX.constraint!(lp_model, :lo, w[1], SDPX.Nonnegative())
+    SDPX.constraint!(lp_model, :hi, 1.0 - w[2], SDPX.Nonnegative())
+    SDPX.objective!(lp_model, SDPX.Minimize(), w[1] + w[2])
+    lp_program = SDPX.compile_product_cone_model(lp_model)
+    lp_red = SDPX.hsd_equality_reduce(SDPX.canonicalize(lp_program))
+    @test FPH.reduced_layout(lp_red.reduced) === nothing
+    @test FPH.reduced_layout(nothing) === nothing
+
     # Boundary qualification (independent review counterexample): the source
     # quadratic formula returned Inf for a finite exit; the stabilized
     # positive root plus explicit coordinate positivity must not.

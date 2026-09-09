@@ -307,6 +307,40 @@ function _enforce_memory_admission(estimate::Int, limit::Union{Nothing,Int})
     return estimate
 end
 
+# ------------------------------------------------- post-reduction admission
+# First-admission shape only: a contiguous orthant prefix followed by 3-row
+# Power blocks with the exact half exponent.  Anything else returns `nothing`
+# so the caller refuses with a typed admission error; no row permutation or
+# cone substitution is inferred.
+function reduced_layout(reduced)::Union{Nothing,NP.Layout}
+    reduced === nothing && return nothing
+    blocks = SDPX.canonical_layout(reduced).blocks
+    orthant = 0
+    alphas = Float64[]
+    expected = 1
+    in_power = false
+    for block in blocks
+        block.offset == expected || return nothing
+        if block.cone === :nonnegative && block.dimension >= 1
+            in_power && return nothing
+            orthant += block.dimension
+        elseif block.cone === :power && block.dimension == 3 &&
+               block.parameter === 0.5
+            in_power = true
+            push!(alphas, 0.5)
+        else
+            return nothing
+        end
+        expected += block.dimension
+    end
+    isempty(alphas) && return nothing
+    return NP.Layout(orthant, Tuple(alphas))
+end
+
+function canonical_problem(reduced)
+    return (reduced.A, reduced.b, reduced.c)
+end
+
 # ------------------------------------------------------------- epoch adapter
 function _admitted_epoch(pair, A, b, c, x, tau, kappa, source_record)
     admitted = _translate(:epoch, () -> NP.epoch(pair, A, b, c, x, tau, kappa;
