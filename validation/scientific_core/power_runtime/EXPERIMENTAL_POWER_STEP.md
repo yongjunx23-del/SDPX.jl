@@ -40,6 +40,12 @@ coordinates, not the loop residual routine or cached vectors):
 - experimental merit target 1e-8: merit = 2.80e-9 <= 1e-8
 - objective 1.1242390972345995 vs exact 1.1242390986454483421 -> err 1.41e-9
 
+Precision-ladder context (identical public path): Float64x4/MFLA solves the
+same canonical problem optimal+cert_valid (obj_err 5.6e-23, 75 iters),
+BigFloat256/512 1.48e-26/3.74e-54, MOSEK 3.9e-17, Clarabel-BF256 7.3e-31; the
+Float64 production defect is specific to Float64 near-boundary interior
+scaling/root construction (see local-archives/.../power-precision-ladder/).
+
 227 driver assertions pass at the frozen worktree HEAD; per-step next-epoch
 five-equation certification (2^-17), NC affine certification, ordinary terminal
 certificate inequalities (complementarity, recovered gap, kappa/tau, normalized
