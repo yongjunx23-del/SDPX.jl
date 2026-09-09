@@ -41,7 +41,7 @@
 
 6. **R0-E 研究切片**（`1308d5e`）：按 oracle 设计实现补偿 Exp 评估器/共轭（精确指数归约 + atanh 级数 39 项、outward q、余项界；EFT 两分量；`log1p` 经 `t=ρ/(2+ρ)`；未改动 `16eps`/64 上限；类型化拒绝；范围/上下文守卫），独立 MPFR 审计，6/6 冻结记录、177 断言。结果：log 半径 ~1e-33（目标 2^-90）；**B 不是 "root unrepresentable"**——补偿根可认证（Rmax ~1e-23 vs 阈值 ~5.7e-21），旧 margin 台账才是失败点；A7 旧 shadow 仍被未改动的 exact identity 拒绝（defect -4.88e-11），改进 shadow 过 m12（-3.27e-12）但 rounded current-primal gradient 仍失败 m21（-6.27e-11），两者都如实报告。**不声称公开 Float64 Exp 状态变化。**
 
-7. **公开路由资格控制 + 审阅初检修复**：迭代中的 typed 数值拒绝已有 `NumericalFailure` Result 转换，但 cold_start 仍在 catch 外，完整拒绝语义尚未闭环；诚实 ExecutionPlan 组件（formulation reason/provenance、dense LU LA 配置、`factor_pair_dense_core` 存储计划）；64 MiB 估算门槛已强制（估算不完整，不能证明实际峰值上界）；新增公开资格控制（非 half 指数/SOC/Exp/LP 形状 typed 拒绝、非有限数据、目标符号/常数/缩放、源与结果 mutation 隔离、默认路由 unchanged）。
+7. **公开路由资格控制 + 审阅初检修复**：`24bacde` 已将 cold_start 与迭代纳入窄 typed 拒绝边界，并保留真实已接受状态及 LU 调用计数；165 项定向断言通过，独立复核与完整拒绝语义资格仍待闭环（见 `docs/evidence/FACTOR_PAIR_REFUSAL_REPAIR.md`）；诚实 ExecutionPlan 组件（formulation reason/provenance、dense LU LA 配置、`factor_pair_dense_core` 存储计划）；64 MiB 估算门槛已强制（估算不完整，不能证明实际峰值上界）；新增公开资格控制（非 half 指数/SOC/Exp/LP 形状 typed 拒绝、非有限数据、目标符号/常数/缩放、源与结果 mutation 隔离、默认路由 unchanged）。
 
 **独立审阅（`42dc47e3`）在 Codex usage limit 处中断（基础设施阻塞，不构成通过）**；其初检项仅部分处理，尚未独立验证闭环。仍未完成：该审阅的完整闭环、完整资格矩阵、完整内存上界、Exp whole-epoch 迁移决策。公开默认 Float64 Power/Exp dispatch **未修复**（默认仍 breakdown，known-issue control 保留）。
 
