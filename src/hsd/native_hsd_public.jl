@@ -1152,20 +1152,25 @@ function _native_hsd_diagnostics(
     else
         0
     end
-    executed_pivoting = core_executed ? :symmetric_pivoting : descriptor.pivoting
+    executed_pivoting = q3_executed ? (q3_cholesky ? :none : :partial) :
+                        core_executed ? :symmetric_pivoting : descriptor.pivoting
     executed_row_scaling = core_executed ? :none : descriptor.row_scaling
-    executed_border = core_executed ? :none : descriptor.border_structure
+    executed_border = q3_executed ?
+        (isempty(core.equality.free_ids) ? :none : :barrier_free_variable_border) :
+        core_executed ? :none : descriptor.border_structure
     planned_factorization = descriptor.available ? planned_kkt.factorization :
                             :not_applicable
     executed_factorization = executed_factorization_fact
     planned_formulation = descriptor.available ? planned_kkt.formulation :
                           :not_applicable
     executed_formulation = !equality_ready ? :not_executed :
+                            q3_executed ? :fixed_trace_equality_schur :
                             did_execute ? (core_executed ? :symmetric_augmented_hsd_core : executed_kkt.formulation) :
                             equality_only ? :not_applicable : :not_executed
     planned_backend = descriptor.available ? planned_kkt.backend :
                       :not_applicable
     executed_backend = !equality_ready ? :not_executed :
+                       q3_executed ? :fixed_trace_equality_core :
                        did_execute ? (core_executed ? :symmetric_augmented_core : executed_kkt.backend) :
                        equality_only ? :not_applicable : :not_executed
     planned_reuse = descriptor.available ? planned_kkt.factorization_reuse :
@@ -1268,6 +1273,10 @@ function _native_hsd_diagnostics(
         factorization_kernel=planned_kernel,
         planned_factorization_kernel=planned_kernel,
         executed_factorization_kernel=executed_kernel,
+        q3_worker_budget=q3_executed ? core.worker_budget : 0,
+        q3_budget_scope=q3_executed ?
+            (T === Float64 ? :julia_tasks_only : :julia_tasks_and_provider_configuration) : :not_applicable,
+        ambient_blas_threads=LinearAlgebra.BLAS.get_num_threads(),
         row_scaling=executed_row_scaling,
         transform=executed_row_scaling,
         border_structure=executed_border,

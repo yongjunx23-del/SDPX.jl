@@ -69,9 +69,15 @@ See `benchmark/optimization/persistent_worker_pool_results.md`.
   from `Limits.threads` through the core/equality workspace and provider;
   Q3 loops use bounded contiguous task ranges. Concurrent workspace budgets
   no longer overwrite each other. This is not global multi-solve admission.
+  Float64 Standard BLAS/LAPACK still uses the ambient BLAS width: its scope
+  is Julia tasks only. Diagnostics disclose that width and scope; controlled
+  campaigns require BLAS=1. Do not silently change process-global BLAS state.
 - `e1d78e9`: actual Q3 cache determines executed Cholesky/LU diagnostics;
   HKM SIMD checks x4 eligibility, both cone interiors and determinant
   validity, uses actual offsets, and atomically counts successful batches.
+  Follow-up diagnostics also distinguish partial LU pivots, unpivoted
+  Cholesky, and the barrier-free-variable border; fixed-trace Schur must not
+  be mislabeled as the generic symmetric augmented core.
   Earlier valid-fixture timing (~2.75× metric-only) was not solver-speed or
   broad refusal/type qualification.
 - Additional preparation instrumentation separates local elimination, panel
