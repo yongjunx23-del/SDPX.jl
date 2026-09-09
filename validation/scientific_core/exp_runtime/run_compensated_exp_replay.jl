@@ -145,7 +145,9 @@ setprecision(512) do
                 "E_P" => r.P.E_P, "Pmin" => r.P.Pmin, "p_star" => r.P.p_star)
             entry["replay"] = Dict("B1" => r.replay.B1, "B2" => r.replay.B2,
                 "B3" => r.replay.B3, "E_YZ" => r.replay.E_YZ,
-                "E_L" => r.replay.E_L, "L0" => r.replay.L0,
+                "E_L" => r.replay.E_L,
+                "L0_minus_one_bound" => r.replay.L0_minus_one_bound,
+                "ideal_ratio_bound" => r.replay.ideal_ratio_bound,
                 "Ymin" => r.replay.Ymin, "Zmin" => r.replay.Zmin)
             entry["gradient"] = [Dict("g" => first(r.gradient[i]),
                 "E" => r.gradient[i].E) for i in 1:3]

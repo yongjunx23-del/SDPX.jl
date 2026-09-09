@@ -625,39 +625,49 @@ function evaluate_conjugate(
         if !(Pmin_lo > 0.0) || !isfinite(Pmin_lo)
             return _refuse(:margin_guard, :replay_P, (P, Pcb.E))
         end
-        p_star = -1.0 / u # ideal root-defined margin (u < 0, so p_star > 0)
-        E_P = nextfloat(nextfloat(nextfloat(abs(P - p_star)) + _halfulp(P)) + Pcb.E)
-        # ---- D: correlation-aware replay bound (design section D) ----
-        Y0c = Y0.h + Y0.l
-        Ymin_lo = _abs_lo(Y0)
-        Z0c = Z0.h + Z0.l
-        Zmin_lo = _abs_lo(Z0)
-        if !(Ymin_lo > 0.0) || !(Zmin_lo > 0.0)
-            return _refuse(:coordinate_guard, :replay_guards, (Ymin_lo, Zmin_lo))
-        end
-        E_L = Lr.value.E
-        # Ideal-geometry log at the root-defined reconstruction.
-        L0r = _comp_log_ratio!(L, Z0c > 0 ? Z0c : Z, Y0c > 0 ? Y0c : Y)
-        L0c = L0r.value.h + L0r.value.l
-        Yabs = _cabs_up(Y0)
-        Zabs = _cabs_up(Z0)
-        Ylo = prevfloat(abs(abs(Y0.h) - abs(Y0.l)))
-        Zlo = prevfloat(abs(abs(Z0.h) - abs(Z0.l)))
-        E_YZ = nextfloat(nextfloat(e_Y / Zmin_lo) +
-            nextfloat(nextfloat(Yabs * e_Z) / prevfloat(Zmin_lo * Zlo)))
-        pabs = abs(p_star)
-        B1 = nextfloat(E_P / prevfloat(prevfloat(Pmin_lo * pabs) -
-            nextfloat(Pmin_lo * nextfloat(eps(pabs)))))
+        p_star = -1.0 / u # rounded diagnostic only, never proof authority
+        pCB = CB(-invu.h, -invu.l, invu.E)
+        # Enclose Ptrue + 1/u, including reciprocal error and stored X.
+        E_P = _center_upper(_cb_add!(L, Pcb, invu))
+        # ---- D: correlation-aware replay bound (review c4d09134) ----
+        # Keep ideal-coordinate balls distinct from the actual stored Y,Z.
+        Ymin_lo, Zmin_lo = _clo(Y0), _clo(Z0)
+        Ymax_hi, pstar_lo = _chi(Y0), _clo(pCB)
+        all(t -> isfinite(t) && t > 0.0,
+            (Y, Z, Ymin_lo, Zmin_lo, Ymax_hi, Pmin_lo, pstar_lo)) ||
+            return _refuse(:coordinate_guard, :replay_guards, nothing)
+        # Every denominator product rounds downward and is checked BEFORE use.
+        den_P = prevfloat(Pmin_lo * pstar_lo)
+        den_Y = prevfloat(Y * Ymin_lo)
+        den_Z = prevfloat(Z * Zmin_lo)
+        all(t -> isfinite(t) && t > 0.0, (den_P, den_Y, den_Z)) ||
+            return _refuse(:replay_unresolved, :replay_denominator, nothing)
+        # These two safeguards are stricter validation-only admissions, not
+        # claimed identical to legacy thresholds. Root/geometry gates stay fixed.
+        E_eval = nextfloat(Pcb.E + _halfulp(P))
+        half_margin = prevfloat(Pmin_lo / 2.0)
+        all(t -> isfinite(t) && t >= 0.0, (E_P, E_eval, e_Y, e_Z)) ||
+            return _refuse(:replay_unresolved, :replay_radius, nothing)
+        E_eval <= half_margin ||
+            return _refuse(:margin_guard, :margin_evaluation, (E_eval, half_margin))
+        E_P <= half_margin ||
+            return _refuse(:margin_guard, :reconstruction_deviation, (E_P, half_margin))
+        # Mean-value bound between TRUE stored and ideal coordinate logarithms.
+        E_L = nextfloat(nextfloat(e_Y / min(Y, Ymin_lo)) +
+            nextfloat(e_Z / min(Z, Zmin_lo)))
+        L0dev = nextfloat(_center_upper(_cb_sub!(L, Lr.value, _exact(1.0))) + E_L)
+        YZabs = nextfloat(Ymax_hi / Zmin_lo)
+        E_YZ = nextfloat(nextfloat(e_Y / Z) +
+            nextfloat(nextfloat(Ymax_hi * e_Z) / den_Z))
+        B1 = nextfloat(E_P / den_P)
         term_uR = nextfloat(abs(u) * Rmax)
-        L0dev = nextfloat(nextfloat(nextfloat(abs(L0c - 1.0) + _halfulp(L0c)) + L0r.value.E) +
-            _halfulp(L0c - 1.0))
         B2 = nextfloat(nextfloat(nextfloat(term_uR + nextfloat(E_L / Pmin_lo)) +
-            nextfloat(L0dev * B1)) +
-            nextfloat(e_Y / prevfloat(Ymin_lo * Ylo)))
-        YZabs = nextfloat(abs(Y0c / Z0c) + _halfulp(Y0c / Z0c))
+            nextfloat(L0dev * B1)) + nextfloat(e_Y / den_Y))
         B3 = nextfloat(nextfloat(nextfloat(E_YZ / Pmin_lo) +
-            nextfloat(YZabs * B1)) +
-            nextfloat(e_Z / prevfloat(Zmin_lo * Zlo)))
+            nextfloat(YZabs * B1)) + nextfloat(e_Z / den_Z))
+        all(t -> isfinite(t) && t >= 0.0,
+            (E_L, L0dev, YZabs, E_YZ, B1, B2, B3)) ||
+            return _refuse(:replay_unresolved, :replay_allowance, nothing)
         # Compensated gradient at the stored shadow + component rounding.
         ip = _cb_div!(L, _exact(1.0), Pcb)
         one = _exact(1.0)
@@ -678,6 +688,9 @@ function evaluate_conjugate(
         for g in (g1, g2, g3)
             isfinite(g) || return _refuse(:nonfinite, :gradient, nothing)
         end
+        word_bounds = (nextfloat(B1 + Eg1), nextfloat(B2 + Eg2), nextfloat(B3 + Eg3))
+        all(t -> isfinite(t) && t >= 0.0, (Eg1, Eg2, Eg3, word_bounds...)) ||
+            return _refuse(:replay_unresolved, :gradient_allowance, nothing)
         ops = (two_prod = L.two_prod, two_sum = L.two_sum,
             divisions = L.divisions, series_evals = L.series_evals)
         return (
@@ -707,8 +720,10 @@ function evaluate_conjugate(
             P = (value = P, E = Pcb.E, E_P = E_P, Pmin = Pmin_lo,
                 p_star = p_star),
             replay = (B1 = B1, B2 = B2, B3 = B3, E_YZ = E_YZ,
-                E_L = E_L, L0 = L0c,
-                Ymin = Ymin_lo, Zmin = Zmin_lo),
+                E_L = E_L, L0_minus_one_bound = L0dev, ideal_ratio_bound = YZabs,
+                Ymin = Y, Zmin = Z, ideal_Ymin = Ymin_lo, ideal_Zmin = Zmin_lo,
+                pstar_min = pstar_lo, E_eval = E_eval, half_margin = half_margin,
+                word_bounds = word_bounds),
             gradient = ((g1 = g1, E = Eg1), (g2 = g2, E = Eg2),
                 (g3 = g3, E = Eg3)),
             ops = ops,

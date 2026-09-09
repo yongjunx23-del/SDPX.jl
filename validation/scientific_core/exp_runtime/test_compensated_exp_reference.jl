@@ -43,6 +43,8 @@ const OLDSHADOW = Dict{String, NTuple{3, String}}(
 # Independent BigFloat hull center (diagnostic MPFR reference).
 bicenter(lo, hi) = (BigFloat(lo) + BigFloat(hi)) / 2
 
+include(joinpath(@__DIR__, "test_exp_replay_enclosures.jl"))
+
 @testset "R0-E compensated Exp reference" begin
 
     @testset "frozen records load bit-exact" begin
