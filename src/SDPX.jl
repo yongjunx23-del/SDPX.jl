@@ -32,7 +32,6 @@ include("cones/runtime/symmetric_api.jl")
 include("cones/runtime/nonsymmetric_api.jl")
 include("ir/canonical.jl")
 include("program/equilibrate.jl")
-include("program/presolve.jl")
 # RSOC transform is defined after canonical IR types so its map can be used
 # by the canonicalizer; `program/transforms.jl` is included once above.
 include("program/transforms_rsoc.jl")

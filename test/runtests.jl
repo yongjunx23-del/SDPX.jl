@@ -5,7 +5,6 @@ using SDPX
 using LinearAlgebra
 using SparseArrays
 
-include(joinpath(@__DIR__, "hkm_vec4_offset_metric.jl"))
 include(joinpath(@__DIR__, "affine_builder_exactness.jl"))
 include(joinpath(@__DIR__, "nonsymmetric_log_ratio.jl"))
 include(joinpath(@__DIR__, "float64_inverse_publication.jl"))
@@ -680,9 +679,8 @@ include(joinpath(@__DIR__, "..", "benchmark", "optimization", "test_measure_targ
 include(joinpath(@__DIR__, "..", "benchmark", "bootstrap", "physics",
     "smatrix_4d", "spec_only", "test_smatrix_4d_spec.jl"))
 
-# Regression coverage for repaired SIMD refusal/counter and affine ownership.
-include(joinpath(@__DIR__, "hkm_vec4_parity.jl"))
+# Provider-gated regressions (MultiFloats/MultiFloatLinearAlgebra) run via
+# the manual-only allowlist (quick-checks.yml), not the package test target.
 include(joinpath(@__DIR__, "affine_builder_ownership.jl"))
-include(joinpath(@__DIR__, "q3_worker_budget.jl"))
 include(joinpath(@__DIR__, "blas_controller_diagnostics.jl"))
 include(joinpath(@__DIR__, "test_mature_solver_interface.jl"))
