@@ -111,6 +111,8 @@ jobs:
               "qdldl_legacy_ordering.jl",
               "test_r4a_pairing_matrix.jl",
               "test_r1b_owned_object_matrix.jl",
+              "test_r6b_checkpoint.jl",
+              "test_r6b_moi_mapping.jl",
           ])
           unmounted = String[]
           for f in readdir("test")
