@@ -185,4 +185,16 @@ end
         @test NP.build(s,y,mu,layout;policy=NP.POLICY,settings) isa NP.PairRefusal
     end
     @test NP.build(Float32[1,1,0],[1.,1.,0.],1.,NP.Layout(0,(0.5,));policy=NP.POLICY,settings=SETTINGS).stage===:input
+    # P2 regression: power-free layouts have no warm probes, so an explicit
+    # empty warm tuple must refuse rather than skip anchor-level lineage.
+    orthant=NP.build([0.25],[1.0],1.0,NP.Layout(1,());policy=NP.POLICY,settings=SETTINGS)
+    @test orthant isa NP.PairReceipt
+    no_power=NP.build([0.25],[1.0],1.0,NP.Layout(1,());policy=NP.POLICY,settings=SETTINGS,
+        owner=orthant.owner,warm=())
+    @test no_power isa NP.PairRefusal && no_power.stage===:warm && no_power.reason===:no_power_blocks
+    # P1 regression: finite inputs that overflow the transform return a
+    # stage-typed refusal instead of escaping as an ErrorException.
+    overflow_A=sparse([1],[1],[floatmax(Float64)],1,1)
+    overflowed=NP.epoch(orthant,overflow_A,[0.0],[0.0],[0.0],1.0,1.0)
+    @test overflowed isa NP.PairRefusal && overflowed.stage===:epoch_factor
 end

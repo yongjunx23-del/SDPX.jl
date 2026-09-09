@@ -164,6 +164,7 @@ function build(s,y,mu,layout;policy,settings,owner=Owner(),warm=nothing)
     m=length(s);1<=m<=32 && length(y)==m && valid(layout,m) || return refuse(:input,:layout,reports)
     RG.Phi._runtime_ok() || return refuse(:input,:runtime,reports)
     all(isfinite,s) && all(isfinite,y) && isfinite(mu) && mu>0 || return refuse(:input,:finite_mu,reports)
+    warm===nothing || isempty(layout.alphas) && return refuse(:warm,:no_power_blocks,reports)
     warm===nothing || warm_valid(owner,warm,layout,settings,policy) || return refuse(:warm,:lineage,reports)
     sc=copy(s);yc=copy(y);scales=Float64[];blocks=FA.BlockMetric[]
     for i in 1:layout.orthant
@@ -240,8 +241,12 @@ function epoch(pair::PairReceipt,A,b,c,x,tau,kappa;source_record::Int=0)
             deepcopy(pair.cone),source_record,:native_half_pair,deepcopy(pair.reports),deepcopy(pair.reports))
         (;status=:formed_epoch,epoch=e,production_admitted=false)
     catch err
-        err isa SingularException || err isa DomainError || rethrow()
-        refuse(:epoch_factor,:singular_or_domain,reports)
+        if err isa SingularException || err isa DomainError || err isa PosDefException ||
+            err isa FA.FactorSeamNumericalFailure
+            push!(reports,(;exception=string(typeof(err)),message=sprint(showerror,err)))
+            return refuse(:epoch_factor,:singular_or_domain,reports)
+        end
+        rethrow()
     end
 end
 function trial(anchor::PairReceipt,tau,kappa,ds,dy,dtau,dkappa,alpha;warm=nothing)

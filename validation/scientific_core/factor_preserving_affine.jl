@@ -103,6 +103,10 @@ function SDPX.validate_cone_linearization(cone::FactorCone)
     expected==cone.dimension+1 || error("factor cone dimension drift")
     true
 end
+struct FactorSeamNumericalFailure <: Exception
+    message::String
+end
+Base.showerror(io::IO,e::FactorSeamNumericalFailure)=print(io,e.message)
 function transform(cone::FactorCone,v,kind::Symbol)
     SDPX.validate_cone_linearization(cone);length(v)==cone.dimension || throw(DimensionMismatch())
     kind in (:S,:St,:W,:Wt) || throw(ArgumentError("unknown transform"))
@@ -113,7 +117,7 @@ function transform(cone::FactorCone,v,kind::Symbol)
     for b in cone.blocks
         rows=b.offset:b.offset+2;out[rows]=transform(b,view(v,rows),kind)
     end
-    all(isfinite,out) || error("nonfinite product transform")
+    all(isfinite,out) || throw(FactorSeamNumericalFailure("nonfinite product transform"))
     out
 end
 function SDPX.apply_cone_linearization!(out::AbstractVector{Float64},cone::FactorCone,v::AbstractVector{Float64})
@@ -222,7 +226,7 @@ function _assemble_epoch(A,b,c,x,s,y,tau,kappa,mu,cone,source_record,factor_mode
     K[n+1:n+m,n+m+1]=-bhat
     K[n+m+1,1:n]=c;K[n+m+1,n+1:n+m]=bhat;K[n+m+1,n+m+2]=1
     K[n+m+2,n+m+1]=kappa;K[n+m+2,n+m+2]=tau
-    all(isfinite,K) || error("nonfinite affine core")
+    all(isfinite,K) || throw(FactorSeamNumericalFailure("nonfinite affine core"))
     factor=lu(K;check=true)
     frozen=fingerprint(A.nzval,b,c,x,s,y,tau,kappa,mu,Ahat,bhat,K,factor.factors)
     structural=(size(A),Tuple(A.colptr),Tuple(A.rowval),Tuple(factor.ipiv),
