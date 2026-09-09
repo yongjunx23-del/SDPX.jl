@@ -1104,14 +1104,22 @@ function _native_hsd_diagnostics(
         did_execute ? executed_kkt.provider :
         equality_only ? :not_applicable : :not_executed
     end
-    executed_factorization_fact = if core_executed
+    q3_executed = core_executed && core isa FixedTraceQ3CoreWorkspace
+    q3_cholesky = q3_executed && core.cache isa DenseSchurCholeskyCache
+    executed_factorization_fact = if q3_executed
+        q3_cholesky ? :cholesky : :lu_dense
+    elseif core_executed
         :symmetric_ldl
     else
         !equality_ready ? :not_executed :
         did_execute ? executed_kkt.factorization :
         equality_only ? :not_applicable : :not_executed
     end
-    executed_kernel_fact = if core_executed
+    executed_kernel_fact = if q3_executed
+        q3_cholesky ? :dense_cholesky :
+        executed_provider_fact === :multifloat_linear_algebra ? :mfla_pivoted_lu :
+        executed_provider_fact === :bigfloat_linear_algebra ? :bfla_pivoted_lu : :dense_lu
+    elseif core_executed
         executed_provider_fact === :cholmod ? :cholmod :
         executed_provider_fact === :multifloat_linear_algebra ? :mfla_pivoted_ldlt :
         executed_provider_fact === :bigfloat_linear_algebra ? :bfla_pivoted_ldlt : :generic_ldlt
@@ -1120,7 +1128,9 @@ function _native_hsd_diagnostics(
         did_execute ? executed_kkt.kernel :
         equality_only ? :not_applicable : :not_executed
     end
-    executed_storage_fact = if core_executed
+    executed_storage_fact = if q3_executed
+        :dense
+    elseif core_executed
         T === Float64 ? :sparse : :dense
     else
         !equality_ready ? :not_executed :

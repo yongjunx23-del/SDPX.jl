@@ -1417,7 +1417,7 @@ end
 
 # Internal diagnostic counter: how many vec4 metric batches were actually
 # taken (tests/measurement only; not public API).
-const _VEC4_METRIC_HITS = Ref{Int}(0)
+const _VEC4_METRIC_HITS = Threads.Atomic{Int}(0)
 
 @inline _vec4_all_finite(v) = isfinite(v[1]) && isfinite(v[2]) &&
     isfinite(v[3]) && isfinite(v[4])
@@ -1431,6 +1431,14 @@ must each have length 3; the caller checks that.  Returns false when any lane
 is non-finite.
 """
 @inline function _hkm_vec4_full_metric!(M, s, y, blocks, b0::Int)
+    eltype(M) === eltype(s) === eltype(y) === Float64x4 || return false
+    1 <= b0 && b0 + 3 <= length(blocks) || return false
+    size(M, 1) == size(M, 2) == 3 && size(M, 3) >= b0 + 3 || return false
+    for b in b0:(b0 + 3)
+        block = blocks[b]
+        block.length == 3 && block.offset >= 1 &&
+            block.offset + 2 <= min(length(s), length(y)) || return false
+    end
     V = MultiFloatVec{4,Float64,4}
     o0 = blocks[b0].offset - 1
     o1 = blocks[b0+1].offset - 1
@@ -1443,7 +1451,12 @@ is non-finite.
     z1 = V(y[o0+2], y[o1+2], y[o2+2], y[o3+2])
     z2 = V(y[o0+3], y[o1+3], y[o2+3], y[o3+3])
     xt = sqrt(x1*x1 + x2*x2)
+    zt = sqrt(z1*z1 + z2*z2)
     d = (x0 - xt) * (x0 + xt)
+    for lane in 1:4
+        x0[lane] > xt[lane] && z0[lane] > zt[lane] &&
+            isfinite(d[lane]) && d[lane] > zero(Float64x4) || return false
+    end
     m11 = (x0*z0 - x1*z1 - x2*z2) / d
     m12 = (x0*z1 - x1*z0) / d
     m23 = -(x1*z2 + x2*z1) / d
@@ -1491,9 +1504,9 @@ scalar path.  Returns false (scalar path) when the layout is not 4-aligned.
             # below remains the fail-closed fallback.
             compact = all(k2 -> blocks[b0+k2].length == 3, 0:3)
             if compact && k == 0
-                _VEC4_METRIC_HITS[] += 1
                 ok = _hkm_vec4_full_metric!(theta, s_all, y_all, blocks, b0)
                 ok || (failed[] = true; return)
+                Threads.atomic_add!(_VEC4_METRIC_HITS, 1)
             elseif !compact
                 SDPX._soc_fixed_trace_hkm_full_metric!(M, primal, dual) ||
                     (failed[] = true; return)
@@ -1533,6 +1546,7 @@ function SDPX._hkm_vec4_linearization!(
     length(plan.soc_blocks) == length(plan.soc_operator_indices) || return false
     blocks = plan.soc_blocks
     nb = length(blocks)
+    T === Float64x4 || return false
     nb >= 4 || return false
     nb % 4 == 0 || return false
     get(ENV, "SDPX_HKM_VEC4", "1") == "1" || return false
@@ -1555,29 +1569,12 @@ function SDPX._hkm_vec4_linearization!(
     s_all = base.s; y_all = base.y
     ds_all = base.ds_a; dy_all = base.dy_a
     theta = core.theta_inverse; rhs = core.hkm_rhs
-    nthreads = SDPX._q3_workers()
-    next_batch = Threads.Atomic{Int}(1)
     failed = Threads.Atomic{Bool}(false)
-    if nthreads <= 1 || nb < 128
-        for b0 in 1:4:nb
-            worker_batch(state, core, cone, plan, base, s_all, y_all,
-                ds_all, dy_all, theta, rhs, target, include_affine,
-                refresh_metric, b0, failed)
-            failed[] && return false
-        end
-    else
-        @sync for _ in 1:nthreads
-            Threads.@spawn begin
-                while !failed[]
-                    b0 = Threads.atomic_add!(next_batch, 4)
-                    b0 + 3 > nb && break
-                    worker_batch(state, core, cone, plan, base, s_all, y_all,
-                        ds_all, dy_all, theta, rhs, target, include_affine,
-                        refresh_metric, b0, failed)
-                end
-            end
-        end
-        failed[] && return false
+    SDPX._q3_foreach(1:4:nb, core.worker_budget; min_items=32) do b0
+        failed[] && return
+        worker_batch(state, core, cone, plan, base, s_all, y_all,
+            ds_all, dy_all, theta, rhs, target, include_affine,
+            refresh_metric, b0, failed)
     end
     failed[] && return false
     refresh_metric && (core.linearization_epoch = base.epoch)

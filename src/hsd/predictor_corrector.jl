@@ -757,9 +757,9 @@ function _product_hsd_fixed_trace_hkm_linearization!(
     end
 
     blocks = plan.soc_blocks
-    next_block = Threads.Atomic{Int}(1)
     failed = Threads.Atomic{Bool}(false)
     run_block = function (block_index::Int)
+        failed[] && return
         block = blocks[block_index]
         row0 = block.offset - 1
         rows = block.offset:(block.offset + 2)
@@ -795,23 +795,8 @@ function _product_hsd_fixed_trace_hkm_linearization!(
         end
         return
     end
-    if _q3_workers() <= 1 || length(blocks) < 256
-        for block_index in eachindex(blocks)
-            run_block(block_index)
-            failed[] && return false
-        end
-    else
-        @sync for _ in 1:_q3_workers()
-            Threads.@spawn begin
-                while !failed[]
-                    block_index = Threads.atomic_add!(next_block, 1)
-                    block_index > length(blocks) && break
-                    run_block(block_index)
-                end
-            end
-        end
-        failed[] && return false
-    end
+    _q3_foreach(run_block, eachindex(blocks), core.worker_budget)
+    failed[] && return false
     refresh_metric && (core.linearization_epoch = base.epoch)
     return true
 end

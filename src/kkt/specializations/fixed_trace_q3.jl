@@ -318,7 +318,8 @@ function fixed_trace_q3_copy_trsm_lower!(
     panel::AbstractMatrix{T},
     reduction::FixedTraceQ3Reduction{T},
     factors::AbstractMatrix{T},
-    inverse_pivots::AbstractMatrix{T},
+    inverse_pivots::AbstractMatrix{T};
+    workers::Integer=1,
 ) where {T}
     size(destination) == reverse(size(panel)) || throw(DimensionMismatch(
         "fixed-trace transformed panel dimensions disagree",
@@ -337,16 +338,8 @@ function fixed_trace_q3_copy_trsm_lower!(
         end
         return
     end
-    if block_work >= 16_384 && length(columns) >= Threads.nthreads() &&
-       Threads.nthreads() > 1
-        Threads.@threads :static for column in columns
-            transform_column(column)
-        end
-    else
-        @inbounds for column in columns
-            transform_column(column)
-        end
-    end
+    _q3_foreach(transform_column, columns, block_work >= 16_384 ? workers : 1;
+                min_items=1)
     return destination
 end
 
@@ -354,7 +347,8 @@ function fixed_trace_q3_trsm_lower!(
     reduction::FixedTraceQ3Reduction{T},
     factors::AbstractMatrix{T},
     inverse_pivots::AbstractMatrix{T},
-    values::AbstractMatrix{T},
+    values::AbstractMatrix{T};
+    workers::Integer=1,
 ) where {T}
     # Every column of the panel is an independent 2x2 forward substitution.
     # For the large fixed-trace CSDR panel (variables x equalities) the
@@ -362,20 +356,10 @@ function fixed_trace_q3_trsm_lower!(
     # pool; the serial path is kept for small panels to avoid spawn overhead.
     columns = axes(values, 2)
     block_work = size(reduction.active_ids, 2) * length(columns)
-    if block_work >= 16_384 && length(columns) >= Threads.nthreads() &&
-       Threads.nthreads() > 1
-        Threads.@threads :static for column in columns
-            fixed_trace_q3_trsv_lower!(
-                reduction, factors, inverse_pivots,
-                view(values, :, column),
-            )
-        end
-    else
-        @inbounds for column in columns
-            fixed_trace_q3_trsv_lower!(
-                reduction, factors, inverse_pivots, view(values, :, column),
-            )
-        end
+    _q3_foreach(columns, block_work >= 16_384 ? workers : 1; min_items=1) do column
+        fixed_trace_q3_trsv_lower!(
+            reduction, factors, inverse_pivots, view(values, :, column),
+        )
     end
     return values
 end
@@ -596,12 +580,14 @@ mutable struct FixedTraceQ3EqualitySchurWorkspace{T,B<:AbstractLABackend}
     local_rhs::Vector{T}
     local_solution::Vector{T}
     equality_work::Vector{T}
+    worker_budget::Int
 end
 
 function FixedTraceQ3EqualitySchurWorkspace(
     reduction::FixedTraceQ3Reduction{T}, panel::AbstractMatrix{T},
     backend::B=StandardLABackend(_la_arithmetic_symbol(T));
     copy_panel::Bool=true,
+    workers::Integer=1,
 ) where {T,B<:AbstractLABackend}
     blocks = size(reduction.active_ids, 2)
     variables = 2blocks + length(reduction.free_ids)
@@ -648,6 +634,7 @@ function FixedTraceQ3EqualitySchurWorkspace(
         alloc_zeros(T, variables),
         alloc_zeros(T, variables),
         alloc_zeros(T, equalities),
+        _q3_worker_limit(workers),
     )
 end
 
@@ -663,7 +650,8 @@ function prepare_fixed_trace_q3_equality_schur!(
         workspace.panel,
         workspace.local_elimination.reduction,
         workspace.local_elimination.factors,
-        workspace.local_elimination.inverse_pivots,
+        workspace.local_elimination.inverse_pivots;
+        workers=workspace.worker_budget,
     )
     la_syrk!(
         workspace.backend, workspace.schur, workspace.transformed_panel,
@@ -726,15 +714,7 @@ function _fixed_trace_q3_local_solve!(
         destination[first] = (z1 - l21 * x2) * inverse_l11
         return
     end
-    if length(blocks) >= 256 && Threads.nthreads() > 1
-        Threads.@threads :static for block in blocks
-            solve_block(block)
-        end
-    else
-        @inbounds for block in blocks
-            solve_block(block)
-        end
-    end
+    _q3_foreach(solve_block, blocks, workspace.worker_budget)
     return destination
 end
 
@@ -846,22 +826,35 @@ mutable struct Q3EpochTimings
 end
 Q3EpochTimings() = Q3EpochTimings(0.0, 0.0, 0.0, 0, 0)
 
-# Process-wide Q3 worker budget for the current solve, set from the admitted
-# `settings.limits.threads`.  `_q3_workers()` caps it by the Julia pool and is
-# used by the task-based Q3 loops (HKM scalar/vec4).  A process-global value is
-# safe because a process executes one solve at a time (prepared sessions are
-# sequential and reject concurrent use); it is NOT cross-process admission
-# control.  `@threads :static` loops still use the whole pool, so a requested
-# budget below the pool requires `--threads` to match (one process per config).
-const _Q3_WORKER_BUDGET = Ref{Int}(typemax(Int))
-
-function set_q3_worker_budget!(n::Integer)
+# A per-workspace maximum, never process-global solve state.
+function _q3_worker_limit(n::Integer)
     n >= 1 || throw(ArgumentError("Q3 worker budget must be positive"))
-    _Q3_WORKER_BUDGET[] = Int(n)
-    return Int(n)
+    return Int(min(n, Threads.nthreads()))
 end
 
-@inline _q3_workers() = min(Threads.nthreads(), _Q3_WORKER_BUDGET[])
+# Contiguous independent ranges; no thread-id scratch or :static scheduler.
+# Safe to call from a spawned task. Every child is joined, including failures.
+# Returns the number of participating tasks, not a CPU-utilization measurement.
+function _q3_foreach(f, indices, workers::Integer; min_items::Int=256)
+    budget = _q3_worker_limit(workers)
+    n = length(indices)
+    n == 0 && return 0
+    ntasks = n < min_items ? 1 : min(budget, n)
+    if ntasks == 1
+        for i in indices
+            f(i)
+        end
+    else
+        @sync for slot in 1:ntasks
+            lo = fld((slot - 1) * n, ntasks) + 1
+            hi = fld(slot * n, ntasks)
+            Threads.@spawn for pos in lo:hi
+                f(indices[pos])
+            end
+        end
+    end
+    return ntasks
+end
 
 mutable struct FixedTraceQ3CoreWorkspace{T,S,C,E,P}
     plan::P
@@ -967,6 +960,7 @@ function prepare_fixed_trace_q3_core_state(
     system::NewtonSystem{T}, plan;
     workers::Integer=Threads.nthreads(),
 ) where {T<:AbstractFloat}
+    workers = _q3_worker_limit(workers)
     n, m = length(system.c), length(system.b)
     plan.equality_panel |> size == (length(plan.zero_rows), n) ||
         throw(DimensionMismatch("fixed-trace canonical equality panel"))
@@ -982,13 +976,13 @@ function prepare_fixed_trace_q3_core_state(
             LPLUCache{T}(core_dimension)
     else
         ProviderLPLUCache{T}(
-            core_dimension; threads=Threads.nthreads(),
+            core_dimension; threads=workers,
         )
     end
     backend = cache isa ProviderLPLUCache ?
         cache.backend : StandardLABackend(_la_arithmetic_symbol(T))
     equality = FixedTraceQ3EqualitySchurWorkspace(
-        plan.reduction, plan.equality_panel, backend; copy_panel=false,
+        plan.reduction, plan.equality_panel, backend; copy_panel=false, workers=workers,
     )
     blocks = size(plan.reduction.active_ids, 2)
     return FixedTraceQ3CoreWorkspace{
@@ -1065,15 +1059,7 @@ function _fixed_trace_mul_A!(
         ax[o+2] = tail_map[2,1,b] * x[a1] + tail_map[2,2,b] * x[a2]
         return
     end
-    if length(blocks) >= 512 && Threads.nthreads() > 1
-        Threads.@threads :static for b in blocks
-            update_block(b)
-        end
-    else
-        @inbounds for b in blocks
-            update_block(b)
-        end
-    end
+    _q3_foreach(update_block, blocks, workspace.worker_budget; min_items=512)
     return ax
 end
 
@@ -1110,23 +1096,9 @@ function _fixed_trace_mul_At_dual_residual!(
         rD[a2] += tail_map[1,2,b] * y1 + tail_map[2,2,b] * y2
         return
     end
-    if length(blocks) >= 512 && Threads.nthreads() > 1
-        Threads.@threads :static for b in blocks
-            update_block(b)
-        end
-    else
-        @inbounds for b in blocks
-            update_block(b)
-        end
-    end
-    if length(rD) >= 2_048 && Threads.nthreads() > 1
-        Threads.@threads :static for j in eachindex(rD)
-            @inbounds rD[j] += c[j] * tau
-        end
-    else
-        @inbounds for j in eachindex(rD)
-            rD[j] += c[j] * tau
-        end
+    _q3_foreach(update_block, blocks, workspace.worker_budget; min_items=512)
+    _q3_foreach(eachindex(rD), workspace.worker_budget; min_items=2_048) do j
+        @inbounds rD[j] += c[j] * tau
     end
     return true
 end
@@ -1141,15 +1113,8 @@ function _fixed_trace_hsd_residual!(
     base::HSDState{T}, core::FixedTraceQ3CoreWorkspace{T},
 ) where {T}
     _fixed_trace_mul_A!(base.ax, core, base.x)
-    if base.m >= 2_048 && Threads.nthreads() > 1
-        Threads.@threads :static for k in 1:base.m
-            @inbounds base.rP[k] =
-                base.s[k] - base.b[k] * base.tau + base.ax[k]
-        end
-    else
-        @inbounds for k in 1:base.m
-            base.rP[k] = base.s[k] - base.b[k] * base.tau + base.ax[k]
-        end
+    _q3_foreach(1:base.m, core.worker_budget; min_items=2_048) do k
+        @inbounds base.rP[k] = base.s[k] - base.b[k] * base.tau + base.ax[k]
     end
     if core.structured_A
         _fixed_trace_mul_At_dual_residual!(
@@ -1185,15 +1150,8 @@ function _fixed_trace_trial_residual!(
 ) where {T}
     if core.structured_A
         _fixed_trace_mul_A!(base.rPt, core, base.xt)
-        if base.m >= 2_048 && Threads.nthreads() > 1
-            Threads.@threads :static for k in 1:base.m
-                @inbounds base.rPt[k] +=
-                    base.st[k] - base.b[k] * base.tau_t
-            end
-        else
-            @inbounds for k in 1:base.m
-                base.rPt[k] += base.st[k] - base.b[k] * base.tau_t
-            end
+        _q3_foreach(1:base.m, core.worker_budget; min_items=2_048) do k
+            @inbounds base.rPt[k] += base.st[k] - base.b[k] * base.tau_t
         end
         _fixed_trace_mul_At_dual_residual!(
             base.rDt, core, base.yt, base.c, base.tau_t,
@@ -1316,15 +1274,7 @@ function _fixed_trace_core_solve!(
             reduction.tail_map[2,2,block_index] * workspace.weighted[3,block_index]
         return
     end
-    if length(block_indices) >= 256 && Threads.nthreads() > 1
-        Threads.@threads :static for block_index in block_indices
-            weighted_block(block_index)
-        end
-    else
-        @inbounds for block_index in block_indices
-            weighted_block(block_index)
-        end
-    end
+    _q3_foreach(weighted_block, block_indices, workspace.worker_budget)
     @inbounds for (index, row) in enumerate(plan.zero_rows)
         workspace.equality_rhs[index] = rhs_rows[row]
     end
@@ -1399,15 +1349,7 @@ function _fixed_trace_core_solve!(
         end
         return
     end
-    if length(block_indices) >= 256 && Threads.nthreads() > 1
-        Threads.@threads :static for block_index in block_indices
-            recover_block(block_index)
-        end
-    else
-        @inbounds for block_index in block_indices
-            recover_block(block_index)
-        end
-    end
+    _q3_foreach(recover_block, block_indices, workspace.worker_budget)
     return x, y
 end
 
@@ -1420,7 +1362,7 @@ function factor_symmetric_core_epoch!(
         "fixed-trace HKM linearization epoch is stale",
     ))
     epoch_timing = workspace.epoch_timing
-    epoch_timing.workers = _q3_workers()
+    epoch_timing.workers = workspace.worker_budget
     epoch_timing.epochs += 1
     t0 = time_ns()
     _fixed_trace_core_prepare_metric!(workspace, system)
