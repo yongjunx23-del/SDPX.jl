@@ -8,6 +8,13 @@ include(joinpath(@__DIR__, "compensated_exp_reference.jl"))
 using .CompensatedExpReference
 const CER = CompensatedExpReference
 const IND = CER.Independent
+# Portable runtime whitelist: compensated positives require the exact pinned
+# context (see CER._runtime_ok()). On unsupported runtimes every compensated
+# entry refuses truthfully with reason :runtime_context (actual path in
+# compensated_exp_reference.jl: evaluate_conjugate/audit_pairings/
+# compensated_gradient_words check _runtime_ok() first and return
+# _refuse(:runtime_context,...), never a forged state). Pure interval/rational
+# controls below stay executable everywhere.
 
 f64(hex::String) = reinterpret(Float64, parse(UInt64, hex, base = 16))
 hexof(x::Float64) = string(reinterpret(UInt64, x), base = 16, pad = 16)
@@ -58,13 +65,21 @@ include(joinpath(@__DIR__, "test_exp_replay_enclosures.jl"))
     end
 
     @testset "runtime context guard is active" begin
-        @test CER._runtime_ok() === true
-        r = CER.evaluate_conjugate(-1.0, 0.0, 2.0)
-        @test r.context.julia_version == "1.12.6"
-        @test r.context.arch == "aarch64"
-        @test r.context.kernel == "Darwin"
-        @test occursin("Nearest", r.context.rounding)
-        @test r.context.fast_math == 0
+        if !CER._runtime_ok()
+            # Unsupported runtime: truthful current refusal (actual path
+            # returns _refuse(:runtime_context,:input,ctx)), never a skip.
+            r = CER.evaluate_conjugate(-1.0, 0.0, 2.0)
+            @test r.status === :refused && r.reason === :runtime_context
+            @test r.stage === :input
+        else
+            @test CER._runtime_ok() === true
+            r = CER.evaluate_conjugate(-1.0, 0.0, 2.0)
+            @test r.context.julia_version == "1.12.6"
+            @test r.context.arch == "aarch64"
+            @test r.context.kernel == "Darwin"
+            @test occursin("Nearest", r.context.rounding)
+            @test r.context.fast_math == 0
+        end
     end
 
     @testset "relative interval predicate has sound inclusion directions" begin
@@ -94,12 +109,19 @@ include(joinpath(@__DIR__, "test_exp_replay_enclosures.jl"))
     end
 
     @testset "gradient requires strictly positive signed margin" begin
-        for x in (0.0, 1.0, nextfloat(0.0))
-            r = CER.compensated_gradient_words(x, 1.0, 1.0)
-            @test r.status === :refused
-            @test r.reason in (:margin_guard, :exponent_range)
+        if !CER._runtime_ok()
+            for x in (0.0, 1.0, nextfloat(0.0), -1.0)
+                r = CER.compensated_gradient_words(x, 1.0, 1.0)
+                @test r.status === :refused && r.reason === :runtime_context
+            end
+        else
+            for x in (0.0, 1.0, nextfloat(0.0))
+                r = CER.compensated_gradient_words(x, 1.0, 1.0)
+                @test r.status === :refused
+                @test r.reason in (:margin_guard, :exponent_range)
+            end
+            @test CER.compensated_gradient_words(-1.0, 1.0, 1.0).status === :ok
         end
-        @test CER.compensated_gradient_words(-1.0, 1.0, 1.0).status === :ok
     end
 
     # Evaluate all six frozen records once; reuse receipts below.
@@ -116,6 +138,7 @@ include(joinpath(@__DIR__, "test_exp_replay_enclosures.jl"))
         end
         # B records must carry their ACTUAL authority: certified replay or a
         # typed arithmetic/range/root/replay reason — never a root myth.
+        # On unsupported runtimes the truthful reason is :runtime_context.
         for nm in ("B4", "B7", "B10")
             r = RC[nm]
             if r.status === :refused
@@ -123,9 +146,29 @@ include(joinpath(@__DIR__, "test_exp_replay_enclosures.jl"))
                     :denominator_unresolved, :root_unresolved,
                     :root_budget_exhausted, :coordinate_guard, :margin_guard,
                     :replay_unresolved, :exponent_range, :budget_exhausted,
-                    :numerical_refusal)
+                    :numerical_refusal, :runtime_context)
+                if !CER._runtime_ok()
+                    @test r.reason === :runtime_context
+                end
             else
                 @test r.status === :conjugate_replay_certified
+                @test CER._runtime_ok()
+            end
+        end
+    end
+
+    @testset "unsupported runtime refuses frozen records" begin
+        # Truthful current refusal for every frozen record on runtimes outside
+        # the whitelist (actual evaluate_conjugate path), never a skip.
+        if !CER._runtime_ok()
+            for nm in ("A4", "A7", "A10", "B4", "B7", "B10")
+                r = RC[nm]
+                @test r.status === :refused && r.reason === :runtime_context
+                @test r.stage === :input
+            end
+        else
+            for nm in ("A4", "A7", "A10", "B4", "B7", "B10")
+                @test RC[nm].status === :conjugate_replay_certified
             end
         end
     end
@@ -217,6 +260,21 @@ include(joinpath(@__DIR__, "test_exp_replay_enclosures.jl"))
     end
 
     @testset "old A7 shadow rejected by the exact identity predicate" begin
+        if !CER._runtime_ok()
+            s = words("A7", "s")
+            d = words("A7", "y")
+            g = CER.compensated_gradient_words(s[1], s[2], s[3])
+            @test g.status === :refused && g.reason === :runtime_context
+            so = Tuple(f64(h) for h in OLDSHADOW["A7"])
+            a = CER.audit_pairings(s_trial = s, d_trial = d, shadow = so,
+                grad_primal = (s[1], s[2], s[3]))
+            @test a.status === :refused && a.reason === :runtime_context
+            # Exact rational words stay checkable everywhere (pure control).
+            mrat = sum(Rational{BigInt}(d[i]) * Rational{BigInt}(so[i])
+                       for i in 1:3)
+            @test abs(Float64(mrat) - 3.0) > 8192 * eps(Float64) * 6 / 2
+            return
+        end
         s = words("A7", "s")
         d = words("A7", "y")
         g = CER.compensated_gradient_words(s[1], s[2], s[3])
@@ -234,6 +292,19 @@ include(joinpath(@__DIR__, "test_exp_replay_enclosures.jl"))
     end
 
     @testset "improved A7 shadow: both pairing verdicts reported" begin
+        if !CER._runtime_ok()
+            s = words("A7", "s")
+            d = words("A7", "y")
+            r = RC["A7"]
+            @test r.status === :refused && r.reason === :runtime_context
+            g = CER.compensated_gradient_words(s[1], s[2], s[3])
+            @test g.status === :refused && g.reason === :runtime_context
+            sh = s
+            a = CER.audit_pairings(s_trial = s, d_trial = d, shadow = sh,
+                grad_primal = s)
+            @test a.status === :refused && a.reason === :runtime_context
+            return
+        end
         s = words("A7", "s")
         d = words("A7", "y")
         r = RC["A7"]
@@ -263,6 +334,16 @@ include(joinpath(@__DIR__, "test_exp_replay_enclosures.jl"))
     end
 
     @testset "power-of-two inverse scaling preserves decisions" begin
+        if !CER._runtime_ok()
+            s = words("A7", "s")
+            d = words("A7", "y")
+            g = CER.compensated_gradient_words(s[1], s[2], s[3])
+            @test g.status === :refused && g.reason === :runtime_context
+            a = CER.audit_pairings(s_trial = s, d_trial = d, shadow = s,
+                grad_primal = s)
+            @test a.status === :refused && a.reason === :runtime_context
+            return
+        end
         s = words("A7", "s")
         d = words("A7", "y")
         r = RC["A7"]
@@ -281,6 +362,11 @@ include(joinpath(@__DIR__, "test_exp_replay_enclosures.jl"))
     end
 
     @testset "legacy positive control d=(-1,0,2)" begin
+        if !CER._runtime_ok()
+            r = CER.evaluate_conjugate(-1.0, 0.0, 2.0)
+            @test r.status === :refused && r.reason === :runtime_context
+            return
+        end
         r = CER.evaluate_conjugate(-1.0, 0.0, 2.0)
         @test r.status === :conjugate_replay_certified
         setprecision(512) do
@@ -290,6 +376,16 @@ include(joinpath(@__DIR__, "test_exp_replay_enclosures.jl"))
         end
     end
     @testset "input refusals: nonfinite, domain, range" begin
+        if !CER._runtime_ok()
+            # Runtime guard precedes input classification on the actual path.
+            for args in ((NaN, 0.0, 1.0), (-1.0, Inf, 1.0), (-1.0, 0.0, Inf),
+                (-1.0, 0.0, 0.0), (1.0, 0.0, 2.0), (-5.0e-324, 0.0, 1.0),
+                (-1.0, -1.0, 1.0), (-1.0, -10.0, 1.0))
+                r = CER.evaluate_conjugate(args...)
+                @test r.status === :refused && r.reason === :runtime_context
+            end
+            return
+        end
         # NaN / Inf
         @test CER.evaluate_conjugate(NaN, 0.0, 1.0).reason === :nonfinite
         @test CER.evaluate_conjugate(-1.0, Inf, 1.0).reason === :nonfinite
@@ -312,6 +408,13 @@ include(joinpath(@__DIR__, "test_exp_replay_enclosures.jl"))
     end
 
     @testset "budget refusals" begin
+        if !CER._runtime_ok()
+            r0 = CER.evaluate_conjugate(-1.0, 0.0, 2.0; max_iterations = 0)
+            @test r0.status === :refused && r0.reason === :runtime_context
+            rb = CER.evaluate_conjugate(-1.0, 0.0, 2.0; budget = 10)
+            @test rb.status === :refused && rb.reason === :runtime_context
+            return
+        end
         @test CER.evaluate_conjugate(-1.0, 0.0, 2.0; max_iterations = 0).reason ===
               :budget
         rb = CER.evaluate_conjugate(-1.0, 0.0, 2.0; budget = 10)
@@ -322,6 +425,11 @@ include(joinpath(@__DIR__, "test_exp_replay_enclosures.jl"))
     end
 
     @testset "perturbed root fails the unchanged threshold" begin
+        if !CER._runtime_ok()
+            r = CER.evaluate_conjugate(-1.0, 0.0, 2.0)
+            @test r.status === :refused && r.reason === :runtime_context
+            return
+        end
         r = CER.evaluate_conjugate(-1.0, 0.0, 2.0)
         @test r.status === :conjugate_replay_certified
         setprecision(512) do
@@ -336,6 +444,11 @@ include(joinpath(@__DIR__, "test_exp_replay_enclosures.jl"))
     end
 
     @testset "perturbed low component / underreported radius detected" begin
+        if !CER._runtime_ok()
+            @test RC["A7"].status === :refused
+            @test RC["A7"].reason === :runtime_context
+            return
+        end
         r = RC["A7"]
         @test r.status === :conjugate_replay_certified
         d = words("A7", "y")
@@ -356,6 +469,11 @@ include(joinpath(@__DIR__, "test_exp_replay_enclosures.jl"))
     end
 
     @testset "corrupt stored X breaks the receipt binding" begin
+        if !CER._runtime_ok()
+            @test RC["B4"].status === :refused
+            @test RC["B4"].reason === :runtime_context
+            return
+        end
         r = RC["B4"]
         @test r.status === :conjugate_replay_certified
         Xc = nextfloat(r.out_words.X)
@@ -367,6 +485,11 @@ include(joinpath(@__DIR__, "test_exp_replay_enclosures.jl"))
     end
 
     @testset "ideal-p* substitution is detectable" begin
+        if !CER._runtime_ok()
+            @test RC["B4"].status === :refused
+            @test RC["B4"].reason === :runtime_context
+            return
+        end
         r = RC["B4"]
         X, Y, Z = r.out_words.X, r.out_words.Y, r.out_words.Z
         setprecision(512) do
@@ -390,6 +513,17 @@ include(joinpath(@__DIR__, "test_exp_replay_enclosures.jl"))
     end
 
     @testset "no failed-dot replacement or normalization" begin
+        if !CER._runtime_ok()
+            s = words("A7", "s")
+            d = words("A7", "y")
+            g = CER.compensated_gradient_words(s[1], s[2], s[3])
+            @test g.status === :refused && g.reason === :runtime_context
+            so = Tuple(f64(h) for h in OLDSHADOW["A7"])
+            a = CER.audit_pairings(s_trial = s, d_trial = d, shadow = so,
+                grad_primal = s)
+            @test a.status === :refused && a.reason === :runtime_context
+            return
+        end
         s = words("A7", "s")
         d = words("A7", "y")
         g = CER.compensated_gradient_words(s[1], s[2], s[3])
@@ -410,6 +544,14 @@ include(joinpath(@__DIR__, "test_exp_replay_enclosures.jl"))
     end
 
     @testset "gradient role swap changes the audit" begin
+        if !CER._runtime_ok()
+            s = words("A7", "s")
+            d = words("A7", "y")
+            a = CER.audit_pairings(s_trial = s, d_trial = d, shadow = s,
+                grad_primal = s)
+            @test a.status === :refused && a.reason === :runtime_context
+            return
+        end
         s = words("A7", "s")
         d = words("A7", "y")
         r = RC["A7"]
@@ -426,6 +568,15 @@ include(joinpath(@__DIR__, "test_exp_replay_enclosures.jl"))
     end
 
     @testset "receipt reuse: owner, generation, aliasing" begin
+        if !CER._runtime_ok()
+            r = CER.evaluate_conjugate(-1.0, 0.0, 2.0; owner = UInt64(0x1234),
+                generation = 7)
+            @test r.status === :refused && r.reason === :runtime_context
+            buf = [1.0, 2.0, 3.0]
+            @test CER.check_receipt_reuse(r, buf; owner = UInt64(0x1234),
+                generation = 7).reason === :receipt_not_certified
+            return
+        end
         r = CER.evaluate_conjugate(-1.0, 0.0, 2.0; owner = UInt64(0x1234),
             generation = 7)
         @test r.status === :conjugate_replay_certified
@@ -451,6 +602,11 @@ include(joinpath(@__DIR__, "test_exp_replay_enclosures.jl"))
     end
 
     @testset "operation ledger is populated" begin
+        if !CER._runtime_ok()
+            r = CER.evaluate_conjugate(-1.0, 0.0, 2.0)
+            @test r.status === :refused && r.reason === :runtime_context
+            return
+        end
         r = CER.evaluate_conjugate(-1.0, 0.0, 2.0)
         @test r.ops.two_prod > 100 && r.ops.two_sum > 100
         @test r.ops.divisions > 0 && r.ops.series_evals >= 2

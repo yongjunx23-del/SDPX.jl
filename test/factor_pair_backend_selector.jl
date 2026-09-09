@@ -115,6 +115,11 @@ end
 end
 
 @testset "R0-P4 opt-in public route: genuine original-coordinate certificate" begin
+    # Portable runtime whitelist: the positive certificate below requires the
+    # exact Float64 arithmetic context. On an unsupported runtime the
+    # experimental request must refuse truthfully (no optimal claim, no
+    # accepted state) via the actual `optimize!` path, never a skip.
+    # Guard: SDPX.FactorPreservingAffine.RG.Phi._runtime_ok().
     # A small Power model inside the declared experimental scope.
     model = SDPX.Model(Float64)
     a = (0.626678964309454, 0.3230223181314613, -0.7919401216799509)
@@ -127,6 +132,36 @@ end
             SDPX.PowerCone(Float64(0.5)))
     end
     SDPX.objective!(model, SDPX.Minimize(), t[1] + t[2] + t[3])
+
+    if !SDPX.FactorPreservingAffine.RG.Phi._runtime_ok()
+        # Unsupported runtime: the admitted plan-time scope still holds, but
+        # the reviewed kernels refuse the cold pair before any factorization.
+        # The public route must report that refusal truthfully (actual
+        # `optimize!` path: src/hsd/factor_pair/factor_pair_hsd.jl
+        # `cold_start` throws FactorPairNumericalRefusal(:pair,:cold_refused)
+        # via NativeHalfPair.build returning PairRefusal(:unsupported,:input,
+        # :runtime); `execute_with_refusal` publishes accepted_state_available
+        # == false with refusal_stage :pair and zero factorization attempts).
+        result = SDPX.optimize!(model; settings=SDPX.Settings(Float64;
+            verbosity=0, limits=SDPX.Limits(iterations=200, time=120.0, threads=1),
+            nonsymmetric_backend=SDPX.ExperimentalHalfPowerFactorPairBackend))
+        @test SDPX.status(result) !== :optimal
+        @test !SDPX.certificate(result).valid
+        d = SDPX.diagnostics(result)
+        @test d.selected_algorithms.nonsymmetric_backend ===
+              SDPX.ExperimentalHalfPowerFactorPairBackend
+        @test d.termination.factor_pair_execution.accepted_state_available == false
+        @test d.termination.factor_pair_execution.refusal_stage !== :none
+        # The default path stays native and is still exercised here.
+        result = SDPX.optimize!(model; settings=SDPX.Settings(Float64;
+            verbosity=0, limits=SDPX.Limits(iterations=200, time=60.0, threads=1)))
+        @test SDPX.status(result) in
+              (:optimal, :numerical_breakdown, :iteration_limit, :time_limit)
+        d = SDPX.diagnostics(result)
+        @test d.selected_algorithms.nonsymmetric_backend ===
+              SDPX.NativeNonsymmetricBackend
+        return
+    end
 
     # Explicit experimental selection executes the admitted factor-pair core
     # and returns through the ORDINARY original-coordinate recovery and

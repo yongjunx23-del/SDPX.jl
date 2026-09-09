@@ -55,15 +55,30 @@ end
 end
 
 @testset "directed replay-target enclosures" begin
-    for nm in ("A4","A7","A10","B4","B7","B10")
-        d = words(nm,"y")
+    # Portable whitelist: directed positives require the exact pinned context.
+    # On unsupported runtimes assert the truthful current refusal (actual
+    # evaluate_conjugate path returns :runtime_context), never a skip.
+    if !CER._runtime_ok()
+        for nm in ("A4","A7","A10","B4","B7","B10")
+            d = words(nm,"y")
+            r = CER.evaluate_conjugate(d...)
+            @test r.status === :refused && r.reason === :runtime_context
+            @test r.stage === :input
+        end
+        d = (-3.0, 0.0, 2.0)
+        r = CER.evaluate_conjugate(d...)
+        @test r.status === :refused && r.reason === :runtime_context
+    else
+        for nm in ("A4","A7","A10","B4","B7","B10")
+            d = words(nm,"y")
+            r = CER.evaluate_conjugate(d...)
+            @test r.status === :conjugate_replay_certified
+            r.status === :conjugate_replay_certified && ExpReplayDirectedAudit.check(r,d)
+        end
+        # Nonexact reciprocal: the true -1/u must be in the proof, not its RN word.
+        d = (-3.0, 0.0, 2.0)
         r = CER.evaluate_conjugate(d...)
         @test r.status === :conjugate_replay_certified
         r.status === :conjugate_replay_certified && ExpReplayDirectedAudit.check(r,d)
     end
-    # Nonexact reciprocal: the true -1/u must be in the proof, not its RN word.
-    d = (-3.0, 0.0, 2.0)
-    r = CER.evaluate_conjugate(d...)
-    @test r.status === :conjugate_replay_certified
-    r.status === :conjugate_replay_certified && ExpReplayDirectedAudit.check(r,d)
 end

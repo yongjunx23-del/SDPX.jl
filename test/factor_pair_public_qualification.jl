@@ -92,6 +92,22 @@ end
 end
 
 @testset "R0-P4 public qualification: objective sign/constant and scaling" begin
+    # Portable whitelist: positives require the exact Float64 context.
+    # Guard: SDPX.FactorPreservingAffine.RG.Phi._runtime_ok(). On unsupported
+    # runtimes the actual `optimize!` path refuses (cold pair :runtime) with
+    # no optimal claim and no accepted state.
+    if !SDPX.FactorPreservingAffine.RG.Phi._runtime_ok()
+        for mk in (()->_fp_power_model(), ()->_fp_power_model(constant=3.0),
+            ()->_fp_power_model(scale=4.0))
+            m, _ = mk()
+            r = SDPX.optimize!(m; settings=_fp_experimental_settings())
+            @test SDPX.status(r) !== :optimal
+            @test !SDPX.certificate(r).valid
+            @test SDPX.diagnostics(r).termination.factor_pair_execution.accepted_state_available == false
+            @test SDPX.diagnostics(r).termination.factor_pair_execution.refusal_stage !== :none
+        end
+        return
+    end
     model, a = _fp_power_model()
     result = SDPX.optimize!(model; settings=_fp_experimental_settings())
     @test SDPX.status(result) === :optimal
@@ -115,6 +131,18 @@ end
 end
 
 @testset "R0-P4 public qualification: source/result mutation isolation" begin
+    # Portable whitelist: the isolation positive requires a certified result.
+    # On unsupported runtimes assert the truthful refusal instead.
+    if !SDPX.FactorPreservingAffine.RG.Phi._runtime_ok()
+        model, _ = _fp_power_model()
+        r = SDPX.optimize!(model;
+            settings=_fp_experimental_settings(), outputs=_FP_OUTPUTS)
+        @test SDPX.status(r) !== :optimal
+        @test !SDPX.certificate(r).valid
+        @test SDPX.diagnostics(r).termination.factor_pair_execution.accepted_state_available == false
+        @test SDPX.diagnostics(r).termination.factor_pair_execution.refusal_stage !== :none
+        return
+    end
     model, a = _fp_power_model()
     result = SDPX.optimize!(model;
         settings=_fp_experimental_settings(), outputs=_FP_OUTPUTS)
