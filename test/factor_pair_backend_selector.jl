@@ -86,6 +86,7 @@ end
 
     d = SDPX.factor_pair_admission(SDPX.Settings(Float64;
         nonsymmetric_backend=experimental,
+        limits=SDPX.Limits(threads=1),
         iteration_knobs=(; sigma=nothing, beta=nothing, gamma=nothing,
             predictor=:sdpb)))
     @test !d.admitted && d.reason === :iteration_policy
@@ -99,19 +100,22 @@ end
     @test !SDPX.factor_pair_cones_admitted((:nonnegative,))
     @test !SDPX.factor_pair_cones_admitted((:psd, :power))
     d = SDPX.factor_pair_admission(SDPX.Settings(Float64;
-        nonsymmetric_backend=experimental); cones=(:nonnegative, :exp))
+        nonsymmetric_backend=experimental,
+        limits=SDPX.Limits(threads=1)); cones=(:nonnegative, :exp))
     @test !d.admitted && d.reason === :cones
 
     # In-scope request: every declared capability check passes, so the opt-in
     # backend is admitted for this exact scope.  Out-of-scope shapes are still
     # refused (post-reduction cone/layout check at the fork).
     d = SDPX.factor_pair_admission(SDPX.Settings(Float64;
-        nonsymmetric_backend=experimental); cones=(:nonnegative, :power))
+        nonsymmetric_backend=experimental,
+        limits=SDPX.Limits(threads=1)); cones=(:nonnegative, :power))
     @test d.admitted
     @test d.stage === :plan && d.reason === :experimental_factor_pair
     @test d.backend === SDPX.ExperimentalHalfPowerFactorPairBackend
     @test SDPX.enforce_factor_pair_admission!(SDPX.Settings(Float64;
-        nonsymmetric_backend=experimental); cones=(:nonnegative, :power)) === d
+        nonsymmetric_backend=experimental,
+        limits=SDPX.Limits(threads=1)); cones=(:nonnegative, :power)) === d
 end
 
 @testset "R0-P4 opt-in public route: genuine original-coordinate certificate" begin
