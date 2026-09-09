@@ -136,7 +136,9 @@ end
     @test own.current && own.prepared_dimension == own.executed_dimension == 17
     @test own.factor_owner === :factor_pair_session
     @test st.pending_epoch === pending && ledger.attempts == ledger.completed == 1
-    @test isbitstype(typeof(own)) # no mutable state/factor references escape
+    # Symbols are interned and not isbits; the receipt still contains only
+    # immutable scalar facts, never arrays, epochs, pairs or mutable owners.
+    @test fieldtypes(typeof(own)) == (Int, Int, Symbol, Bool, Symbol)
     @test st.A !== pending.A && st.x !== pending.x
     FPH.step!(st)
     anchor = st.owner.anchor
