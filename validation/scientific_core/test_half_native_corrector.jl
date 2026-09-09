@@ -34,6 +34,7 @@ inside(I,x)=Q(I.lo)<=x<=Q(I.hi)
     for id in (17,19)
         row=TOML.parsefile(joinpath(@__DIR__,"fixtures/factor_affine_trial_$id.toml"))
         epoch=FA.build(row;factor_mode=:compensated_half_candidate);affine=FA.solve(epoch)
+        @test all(c->c.runtime_geometry.status===:certified && hasproperty(c.runtime_geometry,:decrement),epoch.construction)
         for block in epoch.cone.blocks
             rows=block.offset:block.offset+2;s=epoch.s[rows];ds=affine.direction.ds[rows];dy=affine.direction.dy[rows]
             result=HC.compute(s,ds,dy)
@@ -53,6 +54,7 @@ inside(I,x)=Q(I.lo)<=x<=Q(I.hi)
             end
             @test result.factor.reason===:true_stored_hessian_only
             @test !hasproperty(result.factor,:decrement)
+            @test FA.HalfPowerFactorCertificate.verify(s,result.L,epoch.y[rows]).status===:unsupported
             @test !result.production_admitted
             H=FAR.true_hessian(s);Li=FAR.inverse_lower(Q.(result.L));E=Li*H*Li'-Matrix{Q}(I,3,3)
             @test Q(result.factor.eta)^2>=sum(abs2,E)
