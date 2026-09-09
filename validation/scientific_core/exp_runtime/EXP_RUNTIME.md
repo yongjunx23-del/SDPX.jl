@@ -60,3 +60,50 @@ disappears with precision (as it did for Power).
 Explicitly NOT claimed: this freeze does not establish that the failure is in
 any particular kernel; it fixes the well-posed target, the external baseline,
 and the observable breakdown quantities.
+
+## Localization (scout, HEAD 21484f3)
+
+Bounded instrumented probe (isolated worktree, `SDPX_DEBUG_LINE_SEARCH=1`,
+no src edits) reproduced the breakdown exactly (24 iters, merit 6.08e-6).
+First-failing stage: **conjugate scaling construction**
+(`try_update_nonsymmetric_scaling!` -> `try_update_scaling!`, the neighborhood
+gate of the line search), in two phases:
+
+1. First rejection (iter ~12, accepted merit 7.7e-4): trials at alpha 0.575/0.288
+   fail `NS_SCALING_SHADOW_IDENTITY_FAILED` with `NS_CONJUGATE_CONVERGED` at
+   exp-block offset 7 (trial_mu=1.127e-4, tau_t=3.712, kappa_t=3.256e-5) - the
+   double-secant Gram identity fails while the Fenchel shadow solves.
+2. Terminal (~20 rejected trials, offsets 4/10, offset 7 once): 
+   `NS_SCALING_CONJUGATE_FAILED / NS_CONJUGATE_BARRIER_FAILED` inside the
+   Exp-specific `exp_logarithmic_conjugate!` rho-equation kernel
+   (conjugate3.jl:1455-1464), tau_t in [6.35,7.17], kappa_t in [1.27e-6,2.18e-6],
+   trial_mu in [8.9e-6,1.36e-5]. Terminal micro-trial alpha=5.06e-20 passes
+   neighborhood/homotopy/merit but fails progress -> :line_search_breakdown.
+
+Every rejected trial is strictly primal/dual interior (`strict=true`) - a
+near-boundary INTERIOR scaling failure at large tau (~6-7) and tiny kappa
+(~1e-6), i.e. deep in the HSD central-path neighborhood where the exp shadow
+coordinates blow up like the reciprocal gap.
+
+**Ruled out (all pass):** theta/product metric (never reached), predictor
+direction and KKT factorization (25 factorizations, fallback_chain=(), factor
+cholmod_symmetric_ldl, regularization 4.07e-8 healthy), corrector (no
+NS_CORRECTOR_* failure), line-search homotopy and merit gates.
+
+**Power-family comparison:** same stage family (nonsymmetric conjugate/scaling
+construction failing at near-boundary interior points in Float64, mid-merit
+stall with exhausted backtracking) but Exp-specific manifestation: upstream of
+any metric, first a Gram shadow-identity mismatch with converged conjugate,
+then outright barrier failure in the Exp-only rho-equation path. The Power
+factor-pair repair does not transfer verbatim; the Exp rho-equation residual
+and its `psi = z - x`-scale roundoff need their own analysis (the analytic Exp
+Cholesky `L11 = 1/psi` terms in `_ns_structural_hessian_factor!` are the
+known-unstable-at-small-psi operations).
+
+**Next steps (bounded):** (1) capture the failing per-block (s,y) triples at
+offsets 4/7/10 via an in-memory observer (no src edits); (2) precision ladder -
+BigFloat256 through the same public path; if the breakdown disappears (as for
+Power), the defect is Float64 rounding in the Exp rho-equation/shadow-identity
+and the repair follows the factor-pair pattern adapted to the Exp psi-scale
+(compensated evaluation / re-derived L11=1/psi terms), NOT tolerance widening
+or an extra fallback.
