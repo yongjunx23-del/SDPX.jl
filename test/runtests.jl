@@ -5,6 +5,7 @@ using SDPX
 using LinearAlgebra
 using SparseArrays
 
+include(joinpath(@__DIR__, "hkm_vec4_offset_metric.jl"))
 include(joinpath(@__DIR__, "affine_builder_exactness.jl"))
 include(joinpath(@__DIR__, "nonsymmetric_log_ratio.jl"))
 include(joinpath(@__DIR__, "float64_inverse_publication.jl"))

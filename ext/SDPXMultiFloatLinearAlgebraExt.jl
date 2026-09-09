@@ -1415,16 +1415,27 @@ end
 # independent Q3 blocks are processed per SIMD group.
 # ---------------------------------------------------------------------------
 
-"""
-    _hkm_vec4_full_metric!(M, s, y, b0)
+# Internal diagnostic counter: how many vec4 metric batches were actually
+# taken (tests/measurement only; not public API).
+const _VEC4_METRIC_HITS = Ref{Int}(0)
 
-Compute the complete HKM metric for blocks `b0..b0+3` (consecutive, offsets
-`2(b-1)+1` assumed for the compact fixed-trace tail layout) into `M`'s 3×3
-per-block slices.  Returns false when any lane is non-finite.
+@inline _vec4_all_finite(v) = isfinite(v[1]) && isfinite(v[2]) &&
+    isfinite(v[3]) && isfinite(v[4])
+
 """
-@inline function _hkm_vec4_full_metric!(M, s, y, b0::Int)
+    _hkm_vec4_full_metric!(M, s, y, blocks, b0)
+
+Compute the complete HKM metric for blocks `b0..b0+3` into `M`'s 3×3 per-block
+slices, using each block's actual row offset from `blocks`.  The four blocks
+must each have length 3; the caller checks that.  Returns false when any lane
+is non-finite.
+"""
+@inline function _hkm_vec4_full_metric!(M, s, y, blocks, b0::Int)
     V = MultiFloatVec{4,Float64,4}
-    o0 = 3*(b0-1); o1 = 3*b0; o2 = 3*(b0+1); o3 = 3*(b0+2)
+    o0 = blocks[b0].offset - 1
+    o1 = blocks[b0+1].offset - 1
+    o2 = blocks[b0+2].offset - 1
+    o3 = blocks[b0+3].offset - 1
     x0 = V(s[o0+1], s[o1+1], s[o2+1], s[o3+1])
     x1 = V(s[o0+2], s[o1+2], s[o2+2], s[o3+2])
     x2 = V(s[o0+3], s[o1+3], s[o2+3], s[o3+3])
@@ -1439,7 +1450,7 @@ per-block slices.  Returns false when any lane is non-finite.
     m22 = (x0*z0 - x1*z1 + x2*z2) / d
     m13 = (x0*z2 - x2*z0) / d
     m33 = (x0*z0 + x1*z1 - x2*z2) / d
-    all(isfinite, (m11, m12, m23, m22, m13, m33)) || return false
+    all(_vec4_all_finite, (m11, m12, m23, m22, m13, m33)) || return false
     @inbounds for k in 0:3
         b = b0 + k
         M[1,1,b] = m11[k+1]; M[2,1,b] = m12[k+1]; M[3,2,b] = m23[k+1]
@@ -1473,12 +1484,15 @@ scalar path.  Returns false (scalar path) when the layout is not 4-aligned.
         primal = view(s_all, rows)
         dual = view(y_all, rows)
         if refresh_metric
-            # Vec4 metric: only when all 4 blocks share the compact
-            # 3-coordinate layout (offset = 3*(b-1)+1).  Otherwise the
-            # scalar kernel below is the fail-closed fallback.
-            compact = all(k2 -> blocks[b0+k2].offset == 3*(b0+k2-1)+1, 0:3)
+            # Vec4 metric: any four consecutive length-3 blocks, regardless of
+            # whether equality rows precede the SOC rows (the structured-A
+            # gate requires equality-first, so the old 3*(b-1)+1 layout
+            # assumption silently disabled this path).  The scalar kernel
+            # below remains the fail-closed fallback.
+            compact = all(k2 -> blocks[b0+k2].length == 3, 0:3)
             if compact && k == 0
-                ok = _hkm_vec4_full_metric!(theta, s_all, y_all, b0)
+                _VEC4_METRIC_HITS[] += 1
+                ok = _hkm_vec4_full_metric!(theta, s_all, y_all, blocks, b0)
                 ok || (failed[] = true; return)
             elseif !compact
                 SDPX._soc_fixed_trace_hkm_full_metric!(M, primal, dual) ||
