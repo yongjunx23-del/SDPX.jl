@@ -107,8 +107,12 @@ end
     SDPX.constraint!(model, :lo, x[1] - 1.0, SDPX.Nonnegative())
     SDPX.constraint!(model, :hi, 2.0 - x[1], SDPX.Nonnegative())
     SDPX.objective!(model, SDPX.Minimize(), x[1])
+    # Pin the thread request so the diagnostics assertions below are
+    # deterministic: the default `Limits(; threads=nothing)` resolves to
+    # `Base.Threads.nthreads()`, which differs between local and CI runs.
     result = SDPX.optimize!(
-        model; settings=SDPX.Settings(Float64; verbosity=0, kkt_route=:bordered),
+        model; settings=SDPX.Settings(Float64; verbosity=0, kkt_route=:bordered,
+            limits=SDPX.Limits(threads=1)),
     )
     @test SDPX.status(result) === :optimal
     @test SDPX.certificate(result).valid
