@@ -166,8 +166,9 @@
 
 ### R0实施包与具体交付
 
-- **R0-P1 外部差异定位**：T0首轮已完成并集成；问题本身排除ill-defined。下一步用BigFloat路径与MOSEK/Clarabel逐步对比Float64迭代，定位首个偏差阶段，而非继续局部证书。
-- **R0-P2 原生pair/trial**：审阅隔离候选 `44bd368`，补齐被中断的兼容性外层回执；覆盖owner/generation/settings、真实rounded shadow、原生BFGS、拒绝trial不替换anchor、原输入变更隔离。通过后仅作为实验构造器整合，不发布生产有效状态。
+- **R0-P2 原生pair/trial构造器已审阅集成（`0602a27`）**：替代capture依赖的FA.build研究路径；全gap多项式根/重建shadow/compensated factor/true-BFGS链，无解析根、无shadow坐标修复、无容差/精度变更。Owner.anchor!、warm lineage、拒绝trial不覆盖anchor、typed refusal（含triangular overflow的专属FactorSeamNumericalFailure）均经两轮closure审阅关闭。367项原生+239/273/530项兼容回执通过，253/247/247/248个散列不变；生产路由未变。
+- **关键负结论（父流程实测）**：在trial17首块的近边界点（L[3,3]≈6.5e-8、scale≈7.1e-4），**用Float64物化稠密Θ=S·S′不可行**：G·Θ−I≈7、Cholesky失败、secant≈2e-7。变换本身作为算子一致（WS−I≈1e-8），但稠密矩阵积在条件数≈1e14下灾难性对消。因此修复必须是把因子L/R/scale完整携带到消费者的factor-pair/whole-epoch后端，而不是把factor物化回旧dense Θ。
+- **R0-P1 外部差异定位**：T0首轮已完成并集成；问题本身排除ill-defined。Float64失败定位为近边界点的scaling构造失败（`NS_SCALING_CONJUGATE_FAILED`/`NS_CONJUGATE_ITERATION_LIMIT`/`NS_CONJUGATE_HESSIAN_NOT_SPD`，fallback失败，alpha在进度下限上方全部被scaling拒绝，通过scaling的trial在2.3e-23处仅progress失败）。
 - **R0-P3 完整accepted step**：用真实affine边界和mu_aff选择sigma，不用固定.25/.75样本代替；保留边界.995、默认damping.9、拒绝收缩.5、64次backtrack及当前残差homotopy/merit规则。当前merit高于 `16sqrt(eps)*scale` 时仍要求 `alpha>=2cbrt(eps)`；小于可分辨预测量须有真实可表示下降，其他情形至少实现原预测下降的1/4。逐个记录根、pair、方向、trial、进展门的实际结果。
 - **R0-P4 有限runtime迁移**：映射 `src/cones/runtime/nonsymmetric_api.jl`、`product.jl`、`src/hsd/predictor_corrector.jl`、`linesearch.jl` 及KKT消费者；禁止一个消费者保留因子而另一个重新物化旧Theta。先明确实验one-secant策略，strict double-secant的H(s)义务单独过门；原型审阅不自动授权默认政策改变。
 - **R0-E Exp**：纯Exp与mixed各冻结一个失败case，先T0对照；定位共轭重构、真实metric、third contraction、scalar closure、trial恢复中的第一处错误。给出精确点/协变/非有限负控、完整方向和真实solve回归，不能只修一个数值比值便称mixed成功。
