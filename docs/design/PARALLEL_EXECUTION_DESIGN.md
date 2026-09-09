@@ -147,18 +147,29 @@ all are still unattempted or that narrow tests close every obligation:
 
 ## 5. Follow-up design (no code yet)
 
-### 5.1 LP `random_large` flat curve: discriminate before redesigning
+### 5.1 LP `random_large`: answered with evidence (no redesign)
 
-Selection facts (`src/pipeline/plan.jl:315-320`): Float64 `:lp_primal_dual`
-selects `:parallel_blas_panels` only when `selected_threads > 1`,
-`cone_rows * variables^2 >= 2_000_000`, **and** `blas_threads() == 1`;
-otherwise `:blas_syrk`. For `random_large` (m=400, n=1200) the size gate
-passes (400·1200² ≫ 2M), so the branch hinges on the ambient BLAS setting:
-with default multithreaded BLAS the plan silently takes `:blas_syrk`, and
-the observed flat curve may be BLAS-threading overhead on a small Gram,
-not missing parallel arithmetic. Do not redesign until a run records
-`selected.gram_kernel` together with phase timing at matched BLAS settings.
-Prescription only; no code change in this tranche.
+Measured locally (fresh processes, BLAS=1, `/tmp/sdpx-lp-gram/t{1,8}.kv`):
+T1 solve 29.19 s vs T8 29.95 s, identical objective 887.0975136347557 and
+valid certificates. Diagnostics show why the curve is flat:
+
+- Executed route is `:bordered` + sparse `native_disconnected_ldlt`, with
+  `kkt_factorization_seconds` 2.3 ms (T1) / 17 ms (T8). There is no
+  parallel region on this path; factorization is three orders of magnitude
+  below total time.
+- `requested_threads=8` but `planned_threads=1`, `executed_threads=1`: the
+  stack serializes upstream of execution. The `:parallel_blas_panels`
+  branch (`plan.jl:318`) belongs to the `:lp_primal_dual` algorithm, which
+  this workload never selects (it runs native-HSD/bordered) — the earlier
+  “LP has a parallel path” reading was unreachable-code optimism.
+- `core` time (~14 s) is ~100× the sum of accounted phases (~0.13 s):
+  first-solve JIT in a fresh process dominates. Steady-state solve work is
+  milliseconds, so inner threading cannot win here by construction.
+
+Consequences: do not add threads to this LP shape; the persistent pool
+amortizes exactly the dominant cost (JIT/startup), consistent with its
+measured 3× win. No code change. Single-observation local probe, not a
+repeated campaign; cluster numbers stay as reported.
 
 ### 5.2 Conditional residual fusion (implement only on measured value)
 
