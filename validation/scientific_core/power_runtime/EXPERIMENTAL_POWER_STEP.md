@@ -5,9 +5,13 @@ widening, extra fallback, precision promotion, or rank/analytic-root tricks.
 
 ## Result (Float64, exact canonical Power problem from factor_affine_trial_17)
 
-Cold start -> certified terminal in 27 accepted steps. Every step is a genuine
-accepted trial with alpha in [0.026, 0.90] (useful-progress floor
-2cbrt(eps) ~ 1.21e-5), each trial carrying a FRESH full-gap polynomial root,
+Cold start -> certified terminal in 27 accepted steps. Acceptance uses the
+UNCHANGED progress gate: early/mid steps take genuine steps (alpha >= 0.026,
+far above the floor 2cbrt(eps) ~ 1.21e-5); late steps inside the arithmetic
+merit neighborhood may be accepted below the floor with real represented
+progress (observed alphas 4.9e-6, 3.1e-7, 1.6e-1 at iterations 24-27), exactly
+as the source progress predicate permits (linesearch.jl). Each trial carries a
+FRESH full-gap polynomial root,
 stored-shadow reconstruction, compensated half-Power factor, true-geometry/
 decrement/BFGS certificates, and atomic commit of (point, factor pair, warm
 lineage, epoch). Accepted pairs are certified with their retained warm probe;
