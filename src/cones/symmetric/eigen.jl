@@ -213,9 +213,9 @@ function _relative2_offdiag_gate(a::T, b::T, c::T, tau::T) where {T}
     if e > 0
         # rho >= mb * 2^e * f >= 0.5 * 2^e >= 1 > tau (tau ~ 20*eps)
         return :fail
-    elseif e < -1070
-        # rho <= 2 * 2^e <= 2^-1069 << tau ~ 20*eps; subnormal/underflow
-        # region cannot change the outcome, return the proven pass
+    elseif tau > zero(T) && T(e + 1) <= log2(tau)
+        # rho <= 2 * 2^e * f <= 2^(e+1) <= 2^log2(tau) = tau proven without
+        # relying on Float64 exp2 subnormal/underflow representation
         return :pass
     end
     twoe = exp2(T(e))

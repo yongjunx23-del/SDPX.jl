@@ -4,7 +4,7 @@ Path: `src/cones/symmetric/eigen.jl` (`_relative2_offdiag_gate`,
 `_relative2_jacobi_eigen!`), `src/cones/symmetric/psd.jl`
 (`_psd_eigen_route!` route `:experimental_relative2`),
 `src/cones/symmetric/types.jl` (constructor selection).
-Test: `validation/scientific_core/test_psd_relative2.jl`. 37 assertions pass.
+Test: `validation/scientific_core/test_psd_relative2.jl`. 42 assertions pass.
 
 ## Question
 

@@ -24,6 +24,11 @@ const tau_off = 10.0 * 2.0 * eps(Float64)
     @test SE._relative2_offdiag_gate(0.25, 2.0^-47, 0.5, tau_off) === :fail
     # extremely separated exponents stay provable (:pass for rho < tau)
     @test SE._relative2_offdiag_gate(1.0, 2.0^-600, 1.0, tau_off) === :pass
+    # explicit tiny tolerance must NOT be bypassed by the short-cut: with
+    # a=c=1, b=2^-1072 and tau=2^-1074 the correlation is 4*tau -> :fail
+    @test SE._relative2_offdiag_gate(1.0, 2.0^-1072, 1.0, 2.0^-1074) === :fail
+    # ...while the same short-cut region with a big enough tau passes
+    @test SE._relative2_offdiag_gate(1.0, 2.0^-1072, 1.0, tau_off) === :pass
     # tiny correlation -> skip
     @test SE._relative2_offdiag_gate(1.0, 1e-20, 1.0, tau_off) === :pass
     # exactly-at-threshold region stays unresolved (interval straddles)
@@ -50,6 +55,16 @@ end
     @test SE._relative2_offdiag_gate(2.0^1023, 2.0^-60, 2.0^-1074, tau_off) === :fail
     Ve = Matrix{Float64}(I, 2, 2); we = zeros(2)
     @test_throws ArgumentError SE._relative2_jacobi_eigen!(copy(Ae), Ve, we; tau_off)
+    # solver-level refusal of an unresolved gate (interval straddles tau)
+    Au = [0.25 2.0^-49; 2.0^-49 0.5]
+    Vu = Matrix{Float64}(I, 2, 2); wu = zeros(2)
+    @test SE._relative2_offdiag_gate(0.25, 2.0^-49, 0.5, tau_off) === :unresolved
+    @test_throws ArgumentError SE._relative2_jacobi_eigen!(copy(Au), Vu, wu; tau_off)
+    # nonpositive rotated diagonal refusal: non-SPD input whose rotation
+    # drives a diagonal nonpositive (a=1, c=1, b=2 -> app = -1)
+    An = [1.0 2.0; 2.0 1.0]
+    Vn = Matrix{Float64}(I, 2, 2); wn = zeros(2)
+    @test_throws ArgumentError SE._relative2_jacobi_eigen!(copy(An), Vn, wn; tau_off)
 end
 
 @testset "psd relative2 eigensolve" begin
@@ -117,8 +132,9 @@ end
     D0 = V * Hinv * V'
     resid = D0 * M * D0 - Matrix{Float64}(I, 2, 2)
     println("RELATIVE2_DOWNSTREAM norm(D0*M*D0 - I) = ", norm(resid, Inf))
-    # recorded measurement (not a gate): the dyadic data is exactly
-    # representable in powers of two, so the residual is near-exact.
+    # measured, not gated: dyadic data is power-of-two representable so the
+    # residual is near-exact; only positivity of the recovered eigenvalues
+    # is asserted.
     @test w[1] > 0.0 && w[2] > 0.0
 end
 
@@ -143,7 +159,7 @@ end
     @test w[1] > 0.0 && w[2] > 0.0
 end
 
-@testset "psd relative2 D0 advantage vs absolute route (recorded)" begin
+@testset "psd relative2 D0 advantage vs absolute route" begin
     # Production route (absolute-threshold Jacobi) on the dyadic case: the
     # rotation is skipped, D0 = diag(1, 1/sqrt(2*delta^2)) and the recovered
     # D0*M*D0 residual is catastrophic (~0.707 = rho, the relative
