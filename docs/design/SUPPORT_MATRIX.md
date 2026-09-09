@@ -15,8 +15,8 @@ research design).
 
 | Milestone | Commit | Status |
 |---|---|---|
-| R1 ownership, AccuracyContract, truthful certificates | `7920982` | done; `test/test_r1_full_qualification.jl` |
-| R2 lifecycle and session-local symbolic reuse | `a274011` | done; evidence `docs/evidence/R2_FULL_QUALIFICATION.md` |
+| R1 ownership, AccuracyContract, truthful certificates | `7920982` | narrow implementation + tests only; full R1 closure still open (R1-B object matrix, R1-C provider closure, R1-D matrix) |
+| R2 lifecycle and session-local symbolic reuse | `a274011` | narrow implementation + gate only; full R2 closure still open (multithread qualification, retained-live/peak bound) |
 | R0-P4 half-Power factor-pair public admission | `0ebf053` | opt-in experimental only; default Float64 Power remains known-failure |
 | R3 sparse core | LP-only, unadmitted | research only; memory admission stays unavailable until a complete peak bound exists |
 
@@ -38,7 +38,7 @@ admission.
 | Float64 Exp products | **unavailable (known failure)** | `:line_search_breakdown`; frozen in `validation/scientific_core/exp_runtime/`; E2E known-issue control |
 | Mixed Exp/Power/PSD products | unavailable (known failure follows the component) | same frozen controls |
 | Sparse KKT memory admission | unavailable (fail-closed) | R3-D: no complete peak bound; sparse routes remain research-only |
-| Cross-solve symbolic reuse | **not implemented** | R2-A counter: 100 same-structure updates → 100 CHOLMOD analyses (`validation/scientific_core/test_r2a_symbolic_numeric_separation.jl`) |
+| Cross-solve symbolic reuse | narrow: session-local CHOLMOD reuse only | R2-A gate: Warm100=0, Cold100=1 (`validation/scientific_core/test_r2a_symbolic_numeric_separation.jl`); Float64-only; full R2 closure still open |
 | Iteration history / trace | unavailable by design | `optimize: engine=:native_hsd does not publish iteration history` |
 
 ## Experimental opt-in routes (never default, fail-closed)
@@ -58,7 +58,7 @@ admission.
 | Default Float64 Exp breakdown | R0-E | same controls; flip only after an Exp repair is admitted |
 | `power_epigraph_small` / `mixed_orthant_exp_small` E2E | R0-P4 / R0-E | `test/runtests.jl` known-issue control with explicit flip-back note |
 | Expanded-route mixed-Exp ownership tests | R0-E | `test/native_structure_diagnostics.jl` known-issue solve control |
-| R2-A symbolic reuse gate | R2 | test encodes the truthful 100-update linear law; update when reuse lands |
+| R2-A symbolic reuse gate | R2 | implemented: Warm100=0 / Cold100=1 at the session lease; keep as the narrow gate until full R2 closure |
 | Sparse KKT peak memory | R3-D | admission stays unavailable until a complete bound exists |
 | N14 BigFloat512 certification | R6-C | open; finite-N14 correctness does not qualify all bootstrap families |
 | New-standard CSDR baseline | R6-C | open; old 101-iteration qualification/fingerprint must not be reused |

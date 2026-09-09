@@ -1,8 +1,11 @@
-# Full R2 qualification suite:
-# R2-A: True symbolic/numeric separation (Cold100=1, Warm100=0)
-# R2-B: Invalidation transactions (CSC, dimensions, precision, provider, threads, fail injection & recovery)
-# R2-C: Concurrent owner isolation (independent sessions, disjoint factors/buffers, no cross-session mutation)
-# R2-D: Resource accounting (lifecycle stages measured, no live object leakage)
+# R2 narrow qualification suite (NOT full R2 closure):
+# R2-A: symbolic/numeric separation gate is exercised in
+#       validation/scientific_core/test_r2a_symbolic_numeric_separation.jl
+#       (Warm100=0, Cold100=1).
+# R2-B: invalidation transactions (CSC/dimensions/precision/provider/threads,
+#       fail injection and recovery).
+# R2-C: sequential session owner isolation (NOT multithread qualification).
+# R2-D: allocation variation across repeated solves (NOT a retained-live/peak bound).
 
 using Test, SDPX, LinearAlgebra, SparseArrays
 
