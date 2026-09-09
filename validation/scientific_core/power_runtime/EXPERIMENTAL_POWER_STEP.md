@@ -23,9 +23,13 @@ coordinates, not the loop residual routine or cached vectors):
 - recovered primal residual 7.00e-10, dual residual 7.00e-10
 - complementarity s'y/tau^2 = 6.71e-9 ; cone membership true (1e-7 band)
 - recovered homogeneous gap c'x*+b'y*+kappa/tau = 2.80e-9, kappa/tau = 5.58e-10
+- invariant mu/tau^2 = 5.59e-10 and recovery scalar tau > 1e-8 asserted;
+  certificate thresholds are target-derived (100*1e-8 = 1e-6) per
+  src/certificates/certificates.jl, incl. complementarity s'y/tau^2,
+  recovered gap c'x*+b'y*, and finite positive scalars
 - objective 1.1242390972345995 vs exact 1.1242390986454483421 -> err 1.41e-9
 
-222 driver assertions pass at the frozen worktree HEAD; per-step next-epoch
+223 driver assertions pass at the frozen worktree HEAD; per-step next-epoch
 five-equation certification (2^-17), NC affine certification, ordinary terminal
 certificate inequalities (complementarity, recovered gap, kappa/tau, normalized
 mu, finite positive scalars), same-owner previous-generation stale-token
