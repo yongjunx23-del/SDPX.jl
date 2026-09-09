@@ -9,6 +9,10 @@ const RG=PowerHalfRootGeometry
 const CAP=HalfRootGeometryCapture
 const word=CAP.floatword
 const PHYSICAL_FORCING=0x1p-17 # existing Float64 512*sqrt(eps) Newton ceiling
+struct FactorSeamNumericalFailure <: Exception
+    message::String
+end
+Base.showerror(io::IO,e::FactorSeamNumericalFailure)=print(io,e.message)
 words(A::AbstractArray{Float64})=Tuple(reinterpret(UInt64,vec(A)))
 words(x::Float64)=(reinterpret(UInt64,x),)
 fingerprint(arrays...)=Tuple(Iterators.flatten(words(x) for x in arrays))
@@ -19,7 +23,7 @@ function lower_solve(L,b)
         for j in 1:i-1;v-=L[i,j]*x[j];end
         x[i]=v/L[i,i]
     end
-    all(isfinite,x) || error("nonfinite triangular action")
+    all(isfinite,x) || throw(FactorSeamNumericalFailure("nonfinite triangular action"))
     x
 end
 function upper_solve(L,b)
@@ -29,7 +33,7 @@ function upper_solve(L,b)
         for j in i+1:n;v-=L[j,i]*x[j];end
         x[i]=v/L[i,i]
     end
-    all(isfinite,x) || error("nonfinite adjoint triangular action")
+    all(isfinite,x) || throw(FactorSeamNumericalFailure("nonfinite adjoint triangular action"))
     x
 end
 function lower_multiply(L,v)
@@ -103,10 +107,6 @@ function SDPX.validate_cone_linearization(cone::FactorCone)
     expected==cone.dimension+1 || error("factor cone dimension drift")
     true
 end
-struct FactorSeamNumericalFailure <: Exception
-    message::String
-end
-Base.showerror(io::IO,e::FactorSeamNumericalFailure)=print(io,e.message)
 function transform(cone::FactorCone,v,kind::Symbol)
     SDPX.validate_cone_linearization(cone);length(v)==cone.dimension || throw(DimensionMismatch())
     kind in (:S,:St,:W,:Wt) || throw(ArgumentError("unknown transform"))
@@ -249,7 +249,7 @@ function solve(e::AffineEpoch,rhs::SDPX.HSDNewtonRHS{Float64}=affine_rhs(e))
     rp=transform(e.cone,rhs.primal_affine,:W);h=transform(e.cone,rhs.cone_corrector,:W)
     right=vcat(rhs.dual_affine,rp-h,rhs.homogeneous_gap,rhs.tau_kappa)
     solution=e.factor\right
-    all(isfinite,solution) || error("nonfinite affine solution")
+    all(isfinite,solution) || throw(FactorSeamNumericalFailure("nonfinite affine solution"))
     dx=copy(solution[1:n]);dyhat=copy(solution[n+1:n+m]);dshat=h-dyhat
     dy=transform(e.cone,dyhat,:Wt);ds=transform(e.cone,dshat,:S)
     direction=SDPX.NewtonDirection(dx,dy,ds,solution[end-1],solution[end])

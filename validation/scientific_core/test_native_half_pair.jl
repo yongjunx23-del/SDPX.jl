@@ -197,4 +197,12 @@ end
     overflow_A=sparse([1],[1],[floatmax(Float64)],1,1)
     overflowed=NP.epoch(orthant,overflow_A,[0.0],[0.0],[0.0],1.0,1.0)
     @test overflowed isa NP.PairRefusal && overflowed.stage===:epoch_factor
+    # P1 regression in the half-Power triangular path: a finite 3x1 CSC with
+    # floatmax overflows L'v inside the :W transform and must still refuse
+    # with the stage-typed result rather than escaping as ErrorException.
+    zero_third=NP.build([1.,1.,0.],[1.,1.,0.],1.0,NP.Layout(0,(0.5,));policy=NP.POLICY,settings=SETTINGS)
+    @test zero_third isa NP.PairReceipt
+    wide_A=sparse([1],[1],[floatmax(Float64)],3,1)
+    wide=NP.epoch(zero_third,wide_A,[0.0,0.0,0.0],[0.0],[0.0],1.0,1.0)
+    @test wide isa NP.PairRefusal && wide.stage===:epoch_factor
 end
