@@ -23,8 +23,8 @@ not evaluated or relabelled passed. Root work is not fully instrumented here;
 only explicit stage receipts/known subtotals are reported, never whole-call totals.
 
 A qualified receipt owns points, factors and diagnostic arrays. Integrity includes
-words, shapes, layout/alpha, policy/settings, global mu, generation and arithmetic
-context. Numerical certification freshly replays the root and reconstruction,
+words, shapes, layout/alpha, policy/settings, global mu, process-local owner
+identity, generation and arithmetic context. Numerical certification freshly replays the root and reconstruction,
 then independently rechecks actual factor-defined BFGS geometry; it never supplies
 replacement values. Original metric points/global mu and full layout coverage are
 checked separately from fingerprints.
@@ -36,7 +36,8 @@ policy and settings. Old duals may differ: warm values are starting probes only;
 every new dual gets a fresh full-bracket proof and actual stored-geometry checks.
 A c=1 receipt or zero new w takes an explicitly recorded cold/endpoint path, never
 clipping the probe. Bad/stale tokens refuse; rejected trial work leaves anchor and
-tokens unchanged. New trial receipts cannot become warm authority through this API.
+tokens unchanged. Trial construction requires the bound anchor, and new trial
+receipts cannot become warm authority through this API.
 
 The pair constructor does not build a KKT factor. A thin native-input epoch adapter
 validates canonical bounded Float64/Int CSC (n<=16,m<=32), copies all problem and

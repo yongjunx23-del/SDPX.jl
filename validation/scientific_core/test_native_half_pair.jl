@@ -39,6 +39,8 @@ function check_pair(p)
         @test !r.legacy_evaluated
     end
 end
+direction_fields(d)=(;dx=d.dx,dy=d.dy,ds=d.ds,dtau=d.dtau,dkappa=d.dkappa)
+rhs_fields(r)=(;primal=r.primal_affine,dual=r.dual_affine,gap=r.homogeneous_gap,h=r.cone_corrector,tau_kappa=r.tau_kappa)
 function refreeze_pair(p;mu=p.mu,reports=deepcopy(p.reports),layout=p.layout)
     q=NP.PairReceipt(p.status,copy(p.s),copy(p.y),mu,layout,p.settings,p.policy,p.owner,p.generation,deepcopy(p.cone),reports,(),false)
     NP.PairReceipt(q.status,q.s,q.y,q.mu,q.layout,q.settings,q.policy,q.owner,q.generation,q.cone,q.reports,NP.pair_key(q),false)
@@ -59,6 +61,9 @@ end
         @test NP.trial(pair,1.,1.,zeros(3),zeros(3),0.,0.,0.).reason===:anchor_lineage
         tokens=NP.anchor!(owner,pair)
         @test owner.anchor===pair
+        relabelled=NP.PairReceipt(pair.status,pair.s,pair.y,pair.mu,pair.layout,pair.settings,pair.policy,
+            NP.Owner(),pair.generation,pair.cone,pair.reports,pair.frozen,false)
+        @test_throws ErrorException NP.verify(relabelled)
         @test_throws ErrorException NP.anchor!(owner,pair)
         before=NP.pair_key(pair)
         warm=NP.build(copy(s),copy(y),mu,pair.layout;policy=NP.POLICY,settings=SETTINGS,owner,warm=tokens)
@@ -112,6 +117,7 @@ end
             check_pair(pair);tokens=NP.anchor!(owner,pair)
             warm=NP.build(s,y,mu,layout;policy=NP.POLICY,settings=SETTINGS,owner,warm=tokens)
             @test warm isa NP.PairReceipt
+            @test NP.build(s,y,mu,layout;policy=NP.POLICY,settings=SETTINGS,owner,warm=reverse(tokens)).stage===:warm
             m,n=row["A_shape"];A=SparseMatrixCSC(m,n,copy(row["A_colptr"]),copy(row["A_rowval"]),FA.word.(row["A_bits"]))
             b,c,x=(FA.word.(row[k*"_bits"]) for k in ("b","c","x"));tau=FA.word(row["tau_bits"]);kappa=FA.word(row["kappa_bits"])
             built=NP.epoch(pair,A,b,c,x,tau,kappa;source_record=id)
@@ -125,7 +131,9 @@ end
                 cc=FactorCombinedEpoch.certify(co,result)
                 @test cc.status===:certified
                 @test all(v->v<=Q(FA.PHYSICAL_FORCING),FAR.physical(e,result).errors)
-                push!(combined,(;sigma,certificate=cc,direction=(;dx=result.direction.dx,dy=result.direction.dy,ds=result.direction.ds,dtau=result.direction.dtau,dkappa=result.direction.dkappa)))
+                push!(combined,(;sigma,certificate=cc,direction=direction_fields(result.direction),rhs=rhs_fields(result.rhs),
+                    rho=co.rho,hhat=co.hhat,z=co.z,corrections=co.corrections,
+                    transformed_rhs=result.transformed_rhs,transformed_solution=result.transformed_solution))
                 for alpha in (0x1p-10,0.25)
                     trial=NP.trial(pair,tau,kappa,result.direction.ds,result.direction.dy,result.direction.dtau,result.direction.dkappa,alpha;warm=tokens)
                     @test trial.status in (:certified,:unsupported)
@@ -144,7 +152,7 @@ end
                     end
                     println("CAPTURE_NATIVE_TRIAL ",id," sigma=",sigma," alpha=",alpha," ",trial.status,
                         trial.pair isa NP.PairRefusal ? " $(trial.pair.stage)/$(trial.pair.reason)" : "")
-                    push!(NATIVE_PAIR_RESULTS,(;kind=:capture_trial,id,sigma,alpha,tau=trial.tau,kappa=trial.kappa,mu=trial.mu,pair=receipt_fields(trial.pair)))
+                    push!(NATIVE_PAIR_RESULTS,(;kind=:capture_trial,id,sigma,alpha,st=trial.st,yt=trial.yt,tau=trial.tau,kappa=trial.kappa,mu=trial.mu,pair=receipt_fields(trial.pair)))
                 end
             end
             oldA=copy(e.A.nzval);A.nzval[1]+=1.;b[1]+=1.;x[1]+=1.
@@ -154,7 +162,12 @@ end
             @test FA.verify(e)
             @test NP.build(s,y,mu,layout;policy=NP.POLICY,settings=SETTINGS,owner,warm=tokens).stage===:warm
             pair.s[1]=old
-            push!(NATIVE_PAIR_RESULTS,(;kind=:capture,id,pair=receipt_fields(pair),warm=receipt_fields(warm),affine_certificate=certificate,combined))
+            push!(NATIVE_PAIR_RESULTS,(;kind=:capture,id,pair=receipt_fields(pair),warm=receipt_fields(warm),
+                epoch=(;A=Matrix(e.A),b=e.b,c=e.c,x=e.x,s=e.s,y=e.y,tau=e.tau,kappa=e.kappa,mu=e.mu,
+                    Ahat=e.Ahat,bhat=e.bhat,core=e.core,lu=e.factor.factors,pivots=e.factor.ipiv),
+                affine=(;direction=direction_fields(affine.direction),rhs=rhs_fields(affine.rhs),
+                    transformed_rhs=affine.transformed_rhs,transformed_solution=affine.transformed_solution),
+                affine_certificate=certificate,combined))
         else
             @test pair.stage in (:root,:factor,:stored_geometry,:metric,:primal)
             @test all(r->!hasproperty(r,:exception),pair.reports)

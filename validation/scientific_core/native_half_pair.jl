@@ -76,7 +76,7 @@ key(x::Tuple)=map(key,x)
 key(x::NamedTuple)=(keys(x),map(key,values(x)))
 key(x::AbstractArray)=(size(x),Tuple(key(v) for v in x))
 function pair_key(p::PairReceipt)
-    (key(p.s),key(p.y),key(p.mu),layout_key(p.layout),settings_key(p.settings),p.policy,p.generation,
+    (key(p.s),key(p.y),key(p.mu),layout_key(p.layout),settings_key(p.settings),p.policy,objectid(p.owner),p.generation,
         key(p.cone.lp_scales),Tuple((b.offset,key(b.L),key(b.R),key(b.scale),key(b.mu),key(b.primal),key(b.dual),key(b.shadow)) for b in p.cone.blocks),
         key(p.reports),VERSION,Sys.ARCH,Sys.KERNEL)
 end
@@ -252,7 +252,10 @@ function trial(anchor::PairReceipt,tau,kappa,ds,dy,dtau,dkappa,alpha;warm=nothin
         all(isfinite,ds) && all(isfinite,dy) && 0<=alpha<=1 || return refuse(:trial_input,:domain,reports)
     st=[anchor.s[i]+alpha*ds[i] for i in 1:m];yt=[anchor.y[i]+alpha*dy[i] for i in 1:m]
     tt=tau+alpha*dtau;kt=kappa+alpha*dkappa
-    isfinite(tt)&&isfinite(kt)&&tt>0&&kt>0 || return refuse(:trial_scalar,:positive,reports)
+    if !(isfinite(tt)&&isfinite(kt)&&tt>0&&kt>0)
+        push!(reports,(;st,yt,tau=tt,kappa=kt,alpha))
+        return refuse(:trial_scalar,:positive,reports)
+    end
     mu=(dot(st,yt)+tt*kt)/(m+1) # nu=orthant+3*Power=m, same native arithmetic
     pair=build(st,yt,mu,anchor.layout;policy=anchor.policy,settings=anchor.settings,owner=anchor.owner,warm)
     (;status=pair.status,pair,st,yt,tau=tt,kappa=kt,mu,alpha,construction_only=true,production_admitted=false)
