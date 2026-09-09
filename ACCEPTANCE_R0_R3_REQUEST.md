@@ -16,7 +16,11 @@ The round-2 repairs (exception-safe checkout/finalization, claim reconciliation)
 
 ## Executed evidence at `175e31d`
 
-- Partitioned regression: parts 1 and 2 exit 0 (3736/3736, 196/196) at the prior HEAD; part 3 exit 0 (4615 + 1 pre-existing Broken / 4616) at `175e31d`, but 2m31s under concurrent load. A clean partition-3 receipt at `3588c43` is attached separately once the machine is quiet (the >175 s time is CPU contention from concurrent benchmark workers, not a test failure).
+- Partitioned regression at `1e57da2` (code identical to `3588c43`; only this document differs), quiet machine, all three parts completed inside the 175 s bound:
+  - part 1 = **3736/3736**, exit 0, 105.4 s wall
+  - part 2 = **196/196**, exit 0, 53.3 s wall
+  - part 3 = **4622 + 1 pre-existing Broken / 4623**, exit 0, 169.7 s wall, with `R2-A-GATE: WARM REUSE PASSED` and `COLD100 DELTA=1`
+  (part 3 grew from 4615 to 4622 assertions because the round-3 dual-failure regression was added).
 - R2-A gate: `WARM REUSE PASSED` (Warm100 = 0 new analyses) and `COLD100 DELTA=1`.
 - Prior round (unchanged code paths): R1 with `BigFloatLinearAlgebra` loaded = 52/52 (BigFloat 256/512 executed, no skip); provider-selection probe = `:native_disconnected_ldlt` for both direct bridge and prepared session; CI layout gate exit 0 (42 mounted / 8 allowlisted); experimental sparse identity/numerics/admission = 1088/1088.
 
