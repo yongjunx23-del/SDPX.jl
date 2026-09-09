@@ -306,7 +306,10 @@ function _bridge_sdp_solve(
 ) where {T<:AbstractFloat}
     model = _bridge_sdp_model(problem)
     settings = _bridge_settings(options)
-    result = optimize!(
+    # Internal seam: the public `optimize!` signature stays unchanged and
+    # lease-free; the prepared session threads the session-local symbolic
+    # lease through the common internal implementation only.
+    result = _optimize_impl(
         model;
         settings=settings,
         outputs=_bridge_outputs(settings.diagnostics !== :none),

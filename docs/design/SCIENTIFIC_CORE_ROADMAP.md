@@ -5,8 +5,8 @@
 ## 当前状态（2026-09-09）
 
 - 开发线：SDPX 0.6.1，分支 `development/scientific-core-20260907`。
-- **R2 已实现并提交**（`a274011`）：会话级 symbolic 复用（Cold100=1 / Warm100=0 门通过）、失效事务、并发隔离、有界分配。证据 `docs/evidence/R2_FULL_QUALIFICATION.md`。
-- **R1 已实现并提交**（`7920982`）：AccuracyContract、owned-result 隔离、原坐标证书真实性、类型化失败符号。`test/test_r1_full_qualification.jl`。
+- **R2 实现已提交**（`a274011`）：会话级 symbolic 复用（Cold100=1 / Warm100=0 门通过）。**窄范围测试已提交，但 R2 完整关闭尚未成立**：R2-C/D 的并发与资源边界仍为单线程/顺序窄测试，未建立多线程资格、retained-live 对象上界、RSS 或完整阶段记账。证据 `docs/evidence/R2_FULL_QUALIFICATION.md`（其中已标明窄范围）。
+- **R1 实现与窄测试已提交**（`7920982`）：AccuracyContract、owned-result 隔离、原坐标证书真实性、类型化失败符号。**窄范围测试不等于 R1 完整关闭**：R1-B BigFloat 256/512 需在加载 BFLA provider 后显式执行（oracle 发现默认 `Outputs` 未保留 primal 的缺陷已修复）；R1-C provider 闭包与 R1-D 完整矩阵仍待补。`test/test_r1_full_qualification.jl`。
 - **R0**：T0 跨求解器诊断完成（问题非 ill-defined，Float64 Power 缺陷已定位）；R0-P4 公开 opt-in 路由、R0-E 补偿 Exp 研究、R0-S PSD 相对谱实验均已集成；默认 Float64 Power/Exp 仍为 known-issue。
 - **R3**：实验稀疏 core 已集成（LP-only、UNADMITTED）；内存准入仍 unavailable（完整峰值上界未证）。
 - 完整 R0–R3 资格验收进行中（worker 子代理正在跑全量回归与分区套件）。
@@ -17,7 +17,7 @@
 | --- | --- | --- |
 | 1 | T0 跨求解器诊断 | 已完成首轮 |
 | 2 | R0-P/R0-E/R0-S | 真实 accepted-step 与原坐标证书；默认 Float64 Power/Exp 仍失败 |
-| 并行 | R1/R2 | 已完成并提交（见上） |
+| 并行 | R1/R2 | 实现+窄测试已提交；完整关闭仍待补（见下） |
 | 3 | R3 稀疏多精度 KKT | 原始 KKT 方向合格；完整峰值上界成立前内存准入继续拒绝 |
 | 4 | R4 结构化核 | 核正确性、provider 兼容、代表结构族、总认证时间可复现 |
 | 5 | R5 自适应精度与单节点并行 | 精度升级/拒绝正确、串并行同数值资格、真实资源归因可信 |
@@ -70,11 +70,15 @@
 
 ## R1 · 所有权、AccuracyContract 与算术有效域
 
-**状态：已完成**（`7920982`）。保留范围与实施包见 R1-A/B/C/D；交付门：声明的配置矩阵全部有执行证据；没有错误 positive certificate。
+**状态：实现与窄测试已提交（`7920982`），完整关闭未成立。** 已具备：AccuracyContract 字段对运行时核验、owned-result 隔离（Float64；BigFloat 256/512 在加载 BFLA provider 后执行）、原坐标证书摘要、类型化失败符号与 infeasibility 射线校验。
+
+**仍缺（不得据窄测试宣称关闭）**：R1-B 覆盖 BigFloat256/512/1024 的初始化/copy/view/共享槽/重复 solve/失败恢复/外层任务并发，逐实际 backing 存储检查，并验证 precision/rounding 改变不复用旧因子；R1-C 补齐 Julia 1.10/1.11/1.12 与 LinearSolve/QDLDL 扩展缺口（不得把一个 pin/ABI 的结论迁移）；R1-D 完整矩阵含极小 tau、scaled rays、source/result mutation 与 Unknown 返回。
 
 ## R2 · 单一 Prepared Native 与资源生命周期
 
-**状态：已完成**（`a274011`）。会话级 symbolic 复用（Cold100=1/Warm100=0）、失效事务、并发隔离、有界分配。下一步：验证真实 backend symbolic reuse 及完整生命周期（已由 R2-A 门覆盖）。
+**状态：实现与窄测试已提交（`a274011`），完整关闭未成立。** 已具备：会话级 symbolic 复用真实计数门（Warm100=0 / Cold100=1）、结构失效事务、checkout-before-validation 租约事务、顺序会话隔离、分配波动检查。
+
+**仍缺（不得据窄测试宣称关闭）**：多线程/任务级并发资格（当前 R2-C 为顺序会话 + 手动 busy）；retained-live 对象、actual capacity、MPFR/GMP scratch、线程 scratch 与 GC 重叠的完整上界（当前 R2-D 只测 10 次求解的分配波动）；完整阶段记账与 RSS 行为；真实 backend symbolic reuse 的规模资格。
 
 ## R3 · 稀疏多精度 KKT 与 cone-preserving scaling
 
@@ -106,7 +110,7 @@
 
 自动执行批次：
 1. 纠正证据口径与环境所有权，保留 R0 失败与反例。
-2. R1 舍入/所有权判别、R2 结构缓存锁、只读结构/资源诊断（已完成）。
+2. R1 舍入/所有权判别、R2 结构缓存锁、只读结构/资源诊断（窄测试已提交；完整矩阵待补）。
 3. 不改默认策略下建立 MFLA/BFLA/MFA 对照基线。
 4. 按依赖推进 R3/R4/R5，保留 sparse Ruiz、chordal/recovery、MOI、checkpoint、真实模型与独立证书事项。
 

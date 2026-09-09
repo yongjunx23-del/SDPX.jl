@@ -909,6 +909,16 @@ function _solve_prepared!(
         ))
     end
     state.busy = true
+    # Checkout happens BEFORE any validation (approved lease protocol):
+    # checkout advances the attempt generation (including failed attempts),
+    # moves any idle entry into the lease, and unconditionally revokes a
+    # healthy retained entry to Prepared with matrix epoch zero.  A failed
+    # update (NaN objective/RHS, structural mismatch, non-optimal solve) must
+    # therefore still revoke the retained entry and advance the attempt, so
+    # no stale factor can survive a failed update.  Validation runs after
+    # checkout and discards via finish_symbolic!(certified_optimal=false).
+    lease = state.symbolic_slot === nothing ? nothing : checkout_symbolic!(state.symbolic_slot)
+    result = nothing
     try
         # The no-argument solve uses the immutable structure owned by the
         # PreparedSolver itself. Rehashing every coefficient on each repeated
@@ -916,14 +926,7 @@ function _solve_prepared!(
         # An explicitly supplied external problem still receives the complete
         # structural fingerprint check.
         if validate_external_structure
-            try
-                _assert_prepared_structure!(prepared, problem)
-            catch err
-                if state.symbolic_slot !== nothing
-                    discard_symbolic!(state.symbolic_slot)
-                end
-                rethrow()
-            end
+            _assert_prepared_structure!(prepared, problem)
         end
         selected_objective = objective === nothing ? problem.c : objective
         selected_rhs = rhs === nothing ? problem.b : rhs
@@ -945,32 +948,27 @@ function _solve_prepared!(
         # native route performs its own canonical equality reduction.  No
         # interior_point solve! is reachable from a prepared session.
         _prepared_warm_start(prepared, warm_start)
-        lease = state.symbolic_slot === nothing ? nothing : checkout_symbolic!(state.symbolic_slot)
         fp_uint = UInt64(hash(prepared.structure.fingerprint))
         context = lease === nothing ? NativeExecutionContext() :
             NativeExecutionContext(lease, UInt64(state.numeric_generation), fp_uint)
-        result = nothing
-        try
-            result = _bridge_sdp_solve(solve_problem, prepared.options; execution_context=context)
-            state.previous = result
-            state.solve_count += 1
-            state.structure_reuses += 1
-            state.last_reuse = :structure_reused_numeric_state_fresh
-            state.last_reduced_objective = reduced_c
-            state.last_reduced_rhs = reduced_b
-            state.last_objective_offset = objective_offset
-            state.numeric_generation += 1
-            return result
-        finally
-            if lease !== nothing && lease.active
-                struct_gen = lock(_SYMMETRIC_CORE_STRUCTURE_LOCK) do
-                    _SYMMETRIC_CORE_STRUCTURE_CACHE.generation
-                end
-                is_opt = result !== nothing && result.status == Optimal
-                finish_symbolic!(lease; certified_optimal=is_opt, eligible=true, structure_generation=struct_gen)
-            end
-        end
+        result = _bridge_sdp_solve(solve_problem, prepared.options; execution_context=context)
+        state.previous = result
+        state.solve_count += 1
+        state.structure_reuses += 1
+        state.last_reuse = :structure_reused_numeric_state_fresh
+        state.last_reduced_objective = reduced_c
+        state.last_reduced_rhs = reduced_b
+        state.last_objective_offset = objective_offset
+        state.numeric_generation += 1
+        return result
     finally
+        if lease !== nothing && lease.active
+            struct_gen = lock(_SYMMETRIC_CORE_STRUCTURE_LOCK) do
+                _SYMMETRIC_CORE_STRUCTURE_CACHE.generation
+            end
+            is_opt = result !== nothing && result.status == Optimal
+            finish_symbolic!(lease; certified_optimal=is_opt, eligible=true, structure_generation=struct_gen)
+        end
         state.busy = false
         unlock(state.lock)
     end

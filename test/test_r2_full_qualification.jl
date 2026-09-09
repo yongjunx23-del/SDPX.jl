@@ -68,7 +68,7 @@ _test_options() = SDPX.SolverOptions{Float64}(; verbosity=0, timing=false, threa
     @test d_reuse2.delta == 0
 end
 
-@testset "R2-C: concurrent session owner isolation" begin
+@testset "R2-C: sequential session owner isolation (NOT multithread qualification)" begin
     prob = _test_lp()
     options = _test_options()
 
@@ -94,13 +94,17 @@ end
     r1.x[1] += 999.0
     @test r2.x == orig_p2
 
+    # NOTE: this testset runs sessions sequentially and flips `busy`
+    # manually. It verifies disjoint ownership and same-session rejection
+    # only; it does NOT establish multithread/task-level concurrency
+    # qualification (that remains an open R2 gate).
     # Concurrent solve on the same session is strictly forbidden
     s1.state.busy = true
     @test_throws ArgumentError SDPX.solve!(s1; objective=c0, rhs=b0)
     s1.state.busy = false
 end
 
-@testset "R2-D: lifecycle stage measurement and bounded allocation" begin
+@testset "R2-D: allocation variation across repeated solves (NOT a peak bound)" begin
     prob = _test_lp()
     options = SDPX.SolverOptions{Float64}(; verbosity=0, timing=true, threads=1)
     prep = SDPX.prepare(prob, options)
@@ -109,7 +113,9 @@ end
     b0 = Float64[1.5]
     SDPX.solve!(prep; objective=c0, rhs=b0)
 
-    # Track allocations over 10 repeated solves
+    # Track allocations over 10 repeated solves. This bounds allocation
+    # VARIATION only; it is not a retained-live-object/peak/RSS bound and
+    # does not establish a complete phase accounting.
     allocs = Int[]
     for k in 1:10
         c_k = Float64[1.0 + 0.01*k, 2.0, 3.0]

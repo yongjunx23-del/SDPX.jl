@@ -425,7 +425,6 @@ function optimize!(
     settings::Union{Nothing,Settings}=nothing,
     outputs::Outputs=Outputs(),
     warm_start=nothing,
-    execution_context::Union{Nothing,NativeExecutionContext}=nothing,
 ) where {T<:AbstractFloat}
     if T === BigFloat && Base.precision(BigFloat) != precision_bits(model)
         return setprecision(BigFloat, precision_bits(model)) do
@@ -434,7 +433,6 @@ function optimize!(
                 settings=settings,
                 outputs=outputs,
                 warm_start=warm_start,
-                execution_context=execution_context,
             )
         end
     end
@@ -443,7 +441,6 @@ function optimize!(
         settings=settings,
         outputs=outputs,
         warm_start=warm_start,
-        execution_context=execution_context,
     )
 end
 

@@ -11,8 +11,9 @@
 
 using Test, SDPX, LinearAlgebra, SparseArrays
 
-function _r1_lp_model(::Type{T}) where {T}
-    model = SDPX.Model(T)
+function _r1_lp_model(::Type{T}; precision_bits::Union{Nothing,Int}=nothing) where {T}
+    model = precision_bits === nothing ? SDPX.Model(T) :
+        SDPX.Model(T; precision_bits=precision_bits)
     x = SDPX.variable!(model, :x, 2; domain=SDPX.Nonnegative())
     SDPX.constraint!(model, :eq, x[1] + 2 * x[2] - T(4), SDPX.ZeroCone())
     SDPX.objective!(model, SDPX.Minimize(), T(3) * x[1] + x[2])
@@ -76,10 +77,13 @@ end
     @test SDPX.value(result)[1] != v[1]
     @test SDPX.value(result, x[1]) == SDPX.value(result)[1]
 
-    # Mutating the source model after the solve never changes the result.
+    # Mutating the source model after the solve never changes the result:
+    # snapshot the retained coordinates before the source mutation and
+    # compare against that snapshot afterwards (not a getter-vs-getter test).
+    before_mutation = copy(SDPX.value(result))
     y = SDPX.variable!(model, :y, 1; domain=SDPX.Nonnegative())
     SDPX.constraint!(model, :extra, y[1] - 0.5, SDPX.ZeroCone())
-    @test SDPX.value(result) == SDPX.value(result)
+    @test SDPX.value(result) == before_mutation
     @test SDPX.status(result) === :optimal
 end
 
@@ -89,14 +93,16 @@ end
     else
         for bits in (256, 512)
             setprecision(BigFloat, bits) do
-                model, x = _r1_lp_model(BigFloat)
+                model, x = _r1_lp_model(BigFloat; precision_bits=bits)
                 settings = SDPX.Settings(BigFloat;
                     verbosity=0,
                     tolerances=SDPX.Tolerances(BigFloat;
                         primal=BigFloat(1e-20), dual=BigFloat(1e-20),
                         gap=BigFloat(1e-20)),
                     limits=SDPX.Limits(iterations=200, time=120.0, threads=1))
-                r1 = SDPX.optimize!(model; settings=settings)
+                outputs = SDPX.Outputs(:all, :all, :all;
+                    objectives=true, certificate=:summary, diagnostics=:summary)
+                r1 = SDPX.optimize!(model; settings=settings, outputs=outputs)
                 @test SDPX.status(r1) === :optimal
                 @test SDPX.certificate(r1).valid
                 rc = SDPX.accuracy_contract(model, r1)
@@ -110,8 +116,8 @@ end
                 @test SDPX.value(r1) == snapshot
 
                 # A second solve returns a fresh, independent result.
-                model2, _ = _r1_lp_model(BigFloat)
-                r2 = SDPX.optimize!(model2; settings=settings)
+                model2, _ = _r1_lp_model(BigFloat; precision_bits=bits)
+                r2 = SDPX.optimize!(model2; settings=settings, outputs=outputs)
                 @test SDPX.status(r2) === :optimal
                 @test SDPX.value(r2) == snapshot
             end
@@ -148,10 +154,16 @@ end
     SDPX.objective!(model, SDPX.Minimize(), x[1])
     result = SDPX.optimize!(model; settings=SDPX.Settings(Float64; verbosity=0))
     s = SDPX.status(result)
-    @test s in (:primal_infeasible, :infeasible_certificate, :numerical_failure,
-        :stalled, :iteration_limit, :insufficient_precision)
-    # Whatever the outcome, the certificate must not claim a false optimal.
+    @test s === :primal_infeasible
+    # Independently validate the original-coordinate infeasibility certificate:
+    # it must be an available, valid primal-infeasibility ray whose reported
+    # dual residual is inside its own limit.  A bare "non-optimal" status
+    # cannot satisfy these checks.
     cert = SDPX.certificate(result)
-    @test cert.valid || s !== :optimal
-    @test s !== :optimal
+    @test cert.available
+    @test cert.valid
+    @test cert.method === :original_coordinate_primal_infeasibility_ray
+    @test cert.reason === :valid
+    @test cert.dual_residual <= cert.dual_limit
+    @test SDPX.termination(result).status === SDPX.PrimalInfeasible
 end
