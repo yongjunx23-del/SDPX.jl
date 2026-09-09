@@ -1,0 +1,63 @@
+name: Diagnose bordered LP x86
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diag:
+    name: ${{ matrix.os }} / ${{ matrix.threads }} threads
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            threads: '1'
+          - os: ubuntu-latest
+            threads: '4'
+          - os: windows-latest
+            threads: '4'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+      - uses: julia-actions/cache@v2
+        with:
+          cache-name: julia-depot
+      - uses: julia-actions/julia-buildpkg@v1
+      - name: Reproduce bordered LP fixture with diagnostics
+        shell: bash
+        run: |
+          cat > diag_border.jl <<'JLEOF'
+          using SDPX
+          model = SDPX.Model(Float64)
+          y = SDPX.variable!(model, :y, 2; domain=SDPX.Reals())
+          SDPX.constraint!(model, :b1, y[1], SDPX.Nonnegative())
+          SDPX.constraint!(model, :b2, y[2], SDPX.Nonnegative())
+          SDPX.constraint!(model, :b3, 5.0 - y[1], SDPX.Nonnegative())
+          SDPX.constraint!(model, :b4, 5.0 - y[2], SDPX.Nonnegative())
+          for i in 1:8
+              SDPX.constraint!(model, Symbol(:c, i), (10.0 + i) - y[1] - y[2],
+                  SDPX.Nonnegative())
+          end
+          SDPX.objective!(model, SDPX.Minimize(), y[1] + y[2])
+          result = SDPX.optimize!(model;
+              settings=SDPX.Settings(Float64; verbosity=1, kkt_route=:bordered))
+          println("FINAL_STATUS=", SDPX.status(result))
+          println("CERT_VALID=", SDPX.certificate(result).valid)
+          d = SDPX.diagnostics(result)
+          sa = d.selected_algorithms
+          println("executed_route=", sa.executed_kkt_route)
+          println("structure=", sa.structure)
+          for name in propertynames(d)
+              v = getfield(d, name)
+              s = repr(v)
+              length(s) > 400 && (s = s[1:400] * "...")
+              println("DIAG ", name, " = ", s)
+            end
+          JLEOF
+          julia --project=. --threads=${{ matrix.threads }} diag_border.jl
