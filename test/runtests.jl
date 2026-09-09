@@ -664,6 +664,7 @@ include(joinpath(@__DIR__, "factor_pair_public_qualification.jl"))
 include(joinpath(@__DIR__, "accuracy_contract.jl"))
 include(joinpath(@__DIR__, "..", "validation", "scientific_core",
     "test_r2a_symbolic_numeric_separation.jl"))
+include(joinpath(@__DIR__, "session_symbolic_lease.jl"))
 include(joinpath(@__DIR__, "..", "validation", "scientific_core", "exp_runtime",
     "test_compensated_exp_reference.jl"))
 include(joinpath(@__DIR__, "..", "benchmark", "optimization", "test_profile_catalog.jl"))
