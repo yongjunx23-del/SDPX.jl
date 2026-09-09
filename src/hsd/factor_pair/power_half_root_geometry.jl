@@ -1,5 +1,6 @@
 module PowerHalfRootGeometry
-# DISCONNECTED reference successor. No SDPX import or production routing.
+# Internal R0-P4 half-Power root geometry (ported from validation/).
+# Not exported and not reachable from the default dense-metric route.
 include("power_half_phi_reference.jl")
 const Phi=PowerHalfPhiReference
 const I=Phi.Interval

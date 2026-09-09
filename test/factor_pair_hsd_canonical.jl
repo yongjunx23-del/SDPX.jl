@@ -94,4 +94,31 @@
     end
     @test err isa FPH.FactorPairNumericalRefusal
     @test err.stage === :epoch
+
+    # Numerical-failure translation: an overflowing combined RHS must surface
+    # as the adapter's typed refusal, never as a raw FactorSeamNumericalFailure
+    # or a generic ErrorException.
+    overflow_err = try
+        FPH.step!(st; sigma_override = floatmax(Float64))
+        nothing
+    catch caught
+        caught
+    end
+    @test overflow_err isa FPH.FactorPairNumericalRefusal
+    @test overflow_err.stage in (:combined, :combined_solve, :combined_certificate)
+
+    # Direct FA typed refusal (declared delta from the validation reference):
+    # a nonfinite RHS is a typed stage refusal, not a generic error.
+    FA = SDPX.FactorPreservingAffine
+    e = SDPX.NativeHalfPair.epoch(st.pair, st.A, st.b, st.c, st.x, st.tau,
+        st.kappa).epoch
+    badrhs = SDPX.HSDNewtonRHS(fill(NaN, 12), zeros(3), 0.0, -copy(e.s), -1.0)
+    rhs_err = try
+        FA.solve(e, badrhs)
+        nothing
+    catch caught
+        caught
+    end
+    @test rhs_err isa FA.FactorPairStageRefusal
+    @test rhs_err.reason === :nonfinite_rhs
 end

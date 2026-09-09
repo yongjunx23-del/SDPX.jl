@@ -5,7 +5,9 @@ widening, extra fallback, precision promotion, or rank/analytic-root tricks.
 
 ## Result (Float64, exact canonical Power problem from factor_affine_trial_17)
 
-Cold start -> certified terminal in 27 accepted steps. Acceptance uses the
+Cold start -> certified terminal in 27 accepted steps (source-faithful
+boundary; the internal R0-P4 adapter stabilizes that boundary and reaches a
+certified terminal in 23 steps with the same unchanged acceptance gates). Acceptance uses the
 UNCHANGED progress gate: early/mid steps take genuine steps (alpha >= 0.026,
 far above the floor 2cbrt(eps) ~ 1.21e-5); late steps inside the arithmetic
 merit neighborhood may be accepted below the floor with real represented

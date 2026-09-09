@@ -13,6 +13,16 @@ struct FactorSeamNumericalFailure <: Exception
     message::String
 end
 Base.showerror(io::IO,e::FactorSeamNumericalFailure)=print(io,e.message)
+# DELIBERATE DELTA from validation/scientific_core/factor_preserving_affine.jl:
+# numerical input/solve refusals are typed so the production adapter can
+# translate them narrowly instead of catching arbitrary ErrorException.
+# Programming/state-drift errors remain generic `error(...)`.
+struct FactorPairStageRefusal <: Exception
+    stage::Symbol
+    reason::Symbol
+    detail::String
+end
+Base.showerror(io::IO,e::FactorPairStageRefusal)=print(io,"FactorPairStageRefusal(",e.stage,", ",e.reason,"): ",e.detail)
 words(A::AbstractArray{Float64})=Tuple(reinterpret(UInt64,vec(A)))
 words(x::Float64)=(reinterpret(UInt64,x),)
 fingerprint(arrays...)=Tuple(Iterators.flatten(words(x) for x in arrays))
@@ -240,10 +250,10 @@ function affine_rhs(e::AffineEpoch)
 end
 function solve(e::AffineEpoch,rhs::SDPX.HSDNewtonRHS{Float64}=affine_rhs(e))
     verify(e);m,n=size(e.A)
-    rhs.cone_corrector == -e.s || error("first experiment is affine-only; combined corrector unsupported")
+    rhs.cone_corrector == -e.s || throw(FactorPairStageRefusal(:affine_input,:unsupported_corrector,"first experiment is affine-only; combined corrector unsupported"))
     length(rhs.primal_affine)==m && length(rhs.dual_affine)==n || throw(DimensionMismatch())
     all(v->all(isfinite,v),(rhs.primal_affine,rhs.dual_affine,rhs.cone_corrector)) &&
-        isfinite(rhs.homogeneous_gap) && isfinite(rhs.tau_kappa) || error("nonfinite RHS")
+        isfinite(rhs.homogeneous_gap) && isfinite(rhs.tau_kappa) || throw(FactorPairStageRefusal(:affine_input,:nonfinite_rhs,"nonfinite RHS"))
     rhs=SDPX.HSDNewtonRHS(copy(rhs.primal_affine),copy(rhs.dual_affine),rhs.homogeneous_gap,
         copy(rhs.cone_corrector),rhs.tau_kappa)
     rp=transform(e.cone,rhs.primal_affine,:W);h=transform(e.cone,rhs.cone_corrector,:W)

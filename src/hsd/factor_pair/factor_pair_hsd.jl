@@ -38,6 +38,25 @@ struct FactorPairNumericalRefusal <: Exception
     detail::String
 end
 
+# Expected numerical exceptions are translated at their stage boundary.  Only
+# these narrow types are caught; programming errors (bounds, dispatch, state
+# drift) still propagate.
+function _translate(stage::Symbol, f)
+    try
+        return f()
+    catch err
+        if err isa FA.FactorPairStageRefusal
+            throw(FactorPairNumericalRefusal(stage, err.reason, err.detail))
+        elseif err isa FA.FactorSeamNumericalFailure ||
+               err isa SingularException || err isa PosDefException ||
+               err isa DomainError || err isa OverflowError
+            throw(FactorPairNumericalRefusal(stage, :numerical_exception,
+                sprint(showerror, err)))
+        end
+        rethrow()
+    end
+end
+
 function Base.showerror(io::IO, err::FactorPairNumericalRefusal)
     print(io, "FactorPairNumericalRefusal(stage=", err.stage,
         ", reason=", err.reason, "): ", err.detail)
@@ -257,8 +276,8 @@ end
 
 # ------------------------------------------------------------- epoch adapter
 function _admitted_epoch(pair, A, b, c, x, tau, kappa, source_record)
-    admitted = NP.epoch(pair, A, b, c, x, tau, kappa;
-        source_record = source_record)
+    admitted = _translate(:epoch, () -> NP.epoch(pair, A, b, c, x, tau, kappa;
+        source_record = source_record))
     admitted.status === :formed_epoch || throw(FactorPairNumericalRefusal(
         :epoch, admitted.reason,
         "NP.epoch refused the epoch: stage=$(admitted.stage) reason=$(admitted.reason)",
@@ -335,23 +354,21 @@ function step!(st::FactorPairState; sigma_override = nothing)
         _admitted_epoch(st.pair, st.A, st.b, st.c, st.x, st.tau, st.kappa,
             st.source_record + st.iterations)
     end
-    affine = FA.solve(e, FA.affine_rhs(e))
-    NC.certify(e, affine).status === :certified || throw(FactorPairNumericalRefusal(
-        :affine_certificate, :not_certified,
-        "affine direction failed the five-equation certificate",
-    ))
+    affine = _translate(:affine, () -> FA.solve(e, FA.affine_rhs(e)))
+    _translate(:affine_certificate, () -> NC.certify(e, affine)).status === :certified ||
+        throw(FactorPairNumericalRefusal(:affine_certificate, :not_certified,
+            "affine direction failed the five-equation certificate"))
     pred = predictor(e, affine.direction, st.pair, st.tau, st.kappa)
     pred.ok || throw(FactorPairNumericalRefusal(
         :predictor, :boundary_or_mu,
         "predictor boundary/mu_aff evaluation failed",
     ))
     sigma_mu = sigma_override === nothing ? pred.sigma_mu : sigma_override
-    combined = FC.build(e, affine; sigma_mu = sigma_mu)
-    csol = FC.solve(combined)
-    FC.certify(combined, csol).status === :certified || throw(FactorPairNumericalRefusal(
-        :combined_certificate, :not_certified,
-        "combined direction failed the combined certificate",
-    ))
+    combined = _translate(:combined, () -> FC.build(e, affine; sigma_mu = sigma_mu))
+    csol = _translate(:combined_solve, () -> FC.solve(combined))
+    _translate(:combined_certificate, () -> FC.certify(combined, csol)).status === :certified ||
+        throw(FactorPairNumericalRefusal(:combined_certificate, :not_certified,
+            "combined direction failed the combined certificate"))
     d = csol.direction
     m = size(e.A, 1)
     current_merit = max(maxinf(st.rP), maxinf(st.rD), abs(st.rG))
@@ -379,12 +396,14 @@ function step!(st::FactorPairState; sigma_override = nothing)
             if accepted
                 # Backend readiness: prepare and certify the next epoch from the
                 # trial pair BEFORE publishing any state.
-                next_epoch = NP.epoch(trial.pair, st.A, st.b, st.c, tr.xt, tr.tt,
-                    tr.kt; source_record = st.source_record + st.iterations + 1)
+                next_epoch = _translate(:next_epoch,
+                    () -> NP.epoch(trial.pair, st.A, st.b, st.c, tr.xt, tr.tt,
+                        tr.kt; source_record = st.source_record + st.iterations + 1))
                 if next_epoch.status === :formed_epoch
-                    next_affine = FA.solve(next_epoch.epoch,
-                        FA.affine_rhs(next_epoch.epoch))
-                    if NC.certify(next_epoch.epoch, next_affine).status === :certified
+                    next_affine = _translate(:next_epoch_affine,
+                        () -> FA.solve(next_epoch.epoch, FA.affine_rhs(next_epoch.epoch)))
+                    if _translate(:next_epoch_certificate,
+                        () -> NC.certify(next_epoch.epoch, next_affine)).status === :certified
                         gen = st.owner.generation + 1
                         tokens = Tuple(NP.WarmToken(st.owner, trial.pair, gen,
                             r.offset, r.root.candidate,
@@ -442,6 +461,11 @@ Evaluate the ordinary source certificate inequalities on the recovered
 original-scale coordinates with the source cone-membership predicates.
 """
 function cert_quantities(st::FactorPairState; tol::Float64 = st.cert_tol)
+    st.owner.anchor === st.pair || throw(FactorPairNumericalRefusal(
+        :terminal_audit, :anchor_lineage,
+        "state pair is not the owner anchor; refusing to certify drifted state",
+    ))
+    NP.verify(st.pair)
     A = Matrix(st.A)
     b = st.b
     c = st.c
@@ -487,8 +511,17 @@ function cert_quantities(st::FactorPairState; tol::Float64 = st.cert_tol)
     gap_resid = abs(obj + dual_pairing)
     gap_lim = tol * gap_scale
     cone_comp = abs(dot(sN, yN))
-    kappa_rec = kappa / tau
-    mu_norm = mu / (tau^2)
+    inv_tau = inv(tau)
+    kappa_rec = kappa * inv_tau
+    # Successive multiplication is the source's overflow-safe normalization
+    # (certificates.jl:499-501); mu/tau^2 is invariant under homogeneous
+    # rescaling.  Recompute the invariant from the stored recovered words and
+    # cross-check the retained pair.mu instead of trusting it alone.
+    mu_norm = mu * inv_tau * inv_tau
+    mu_norm_recomputed = (dot(sN, yN) + kappa_rec) / (Float64(length(sN)) + 1.0)
+    mu_consistent = isfinite(mu_norm_recomputed) &&
+                    abs(mu_norm - mu_norm_recomputed) <=
+                    tol * (1.0 + abs(mu_norm))
     nu = Float64(length(sN))
     mu_lim = tol * (1.0 + nu)
     finite_limits = isfinite(pr_lim) && isfinite(du_lim) && isfinite(gap_lim) &&
@@ -497,12 +530,13 @@ function cert_quantities(st::FactorPairState; tol::Float64 = st.cert_tol)
               norm_resid <= tol && membership &&
               rec_primal <= pr_lim && rec_dual <= du_lim &&
               gap_resid <= gap_lim && cone_comp <= gap_lim &&
-              kappa_rec <= gap_lim && mu_norm <= mu_lim
+              abs(kappa_rec) <= gap_lim && mu_norm <= mu_lim && mu_consistent
     return (m = mres, membership = membership, primal_feas = rec_primal,
         dual_feas = rec_dual, homo_gap = abs(rG), norm_resid = norm_resid,
         kappa_tau = kappa_rec, mu_norm = mu_norm, obj = obj, sNy = sNy,
         obj_gap = gap_resid, primal_scale = primal_scale, dual_scale = dual_scale,
-        gap_scale = gap_scale, cert_ok = cert_ok, tau = tau, kappa = kappa, mu = mu)
+        gap_scale = gap_scale, cert_ok = cert_ok, tau = tau, kappa = kappa, mu = mu,
+        mu_norm_recomputed = mu_norm_recomputed, mu_consistent = mu_consistent)
 end
 
 """Ownership-isolated terminal receipt (never returns the live mutable state)."""

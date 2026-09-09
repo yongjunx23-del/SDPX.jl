@@ -1,5 +1,6 @@
 module PowerHalfPhiReference
-# DISCONNECTED arithmetic qualification. Not loaded by SDPX; no root decisions.
+# Internal R0-P4 half-Power arithmetic qualification (ported from validation/).
+# Guards the verified Float64 arithmetic context; no production routing.
 export evaluate, Interval
 
 struct Interval

@@ -8,6 +8,12 @@
 # This test loads BOTH and compares every Float64 word of pair construction,
 # epoch assembly, affine direction, certification, combined RHS/solve and
 # combined certification on the same fixture input.
+#
+# DECLARED DELTA: the internal FA/FC copies additionally type a small number of
+# numerical input/solve refusals (FactorPairStageRefusal) that remain generic
+# `error(...)` in the validation reference.  That delta is on refusal paths
+# only; the successful arithmetic compared here is unchanged (negative controls
+# for the typed refusals live in test/factor_pair_hsd_canonical.jl).
 
 # Structural, bit-preserving fingerprint.  Module-specific struct types are
 # compared by type name + field values, so Main.FactorPreservingAffine.Epoch and

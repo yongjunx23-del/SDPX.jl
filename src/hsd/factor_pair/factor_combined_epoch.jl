@@ -52,7 +52,7 @@ function build(epoch,affine;sigma_mu::Float64)
     rhs_words(affine.rhs)==rhs_words(canonical) || error("noncanonical affine RHS")
     prerequisite=NC.certify(epoch,affine)
     prerequisite.status===:certified || error("uncertified affine prerequisite")
-    isfinite(sigma_mu) && sigma_mu>=0 || error("invalid frozen sigma_mu")
+    isfinite(sigma_mu) && sigma_mu>=0 || throw(FA.FactorPairStageRefusal(:combined_input,:invalid_sigma_mu,"invalid frozen sigma_mu"))
     d=copy_direction(affine.direction);m=length(epoch.s)
     h=zeros(m);hhat=zeros(m);rho=zeros(m);corrections=Any[]
     for i in eachindex(epoch.cone.lp_scales)
@@ -62,7 +62,7 @@ function build(epoch,affine;sigma_mu::Float64)
     for block in epoch.cone.blocks
         rows=block.offset:block.offset+2;point=copy(epoch.s[rows]);ds=copy(d.ds[rows]);dy=copy(d.dy[rows])
         data=HC.compute(point,ds,dy)
-        data.status===:certified || error("current-point corrector unsupported: $(data.reason)")
+        data.status===:certified || throw(FA.FactorPairStageRefusal(:combined_input,:corrector_unsupported,"current-point corrector unsupported: $(data.reason)"))
         push!(corrections,(;offset=block.offset,alpha=0.5,point,ds,dy,data))
         rho[rows]=sigma_mu.*data.ytilde-epoch.y[rows]-data.chi
         hhat[rows]=FA.transform(block,rho[rows],:St)
@@ -71,7 +71,7 @@ function build(epoch,affine;sigma_mu::Float64)
     rt=sigma_mu-epoch.tau*epoch.kappa-d.dtau*d.dkappa
     rhs=SDPX.HSDNewtonRHS(copy(canonical.primal_affine),copy(canonical.dual_affine),canonical.homogeneous_gap,h,rt)
     z=FA.inverse_action(epoch.cone,h)
-    all(A->all(isfinite,A),(rho,hhat,z,h)) && isfinite(rt) || error("nonfinite combined RHS")
+    all(A->all(isfinite,A),(rho,hhat,z,h)) && isfinite(rt) || throw(FA.FactorPairStageRefusal(:combined_input,:nonfinite_rhs,"nonfinite combined RHS"))
     provisional=CombinedEpoch(epoch,d,sigma_mu,corrections,rho,hhat,z,rhs,())
     result=CombinedEpoch(epoch,d,sigma_mu,corrections,rho,hhat,z,rhs,fingerprint(provisional))
     verify(result);result
@@ -80,7 +80,7 @@ function solve(c::CombinedEpoch)
     verify(c);e=c.epoch;m,n=size(e.A);rhs=copy_rhs(c.rhs)
     right=vcat(rhs.dual_affine,FA.transform(e.cone,rhs.primal_affine,:W)-c.hhat,rhs.homogeneous_gap,rhs.tau_kappa)
     solution=e.factor\right
-    all(isfinite,solution) || error("nonfinite combined direction")
+    all(isfinite,solution) || throw(FA.FactorPairStageRefusal(:combined_solve,:nonfinite_direction,"nonfinite combined direction"))
     dyhat=copy(solution[n+1:n+m]);dshat=c.hhat-dyhat
     direction=SDPX.NewtonDirection(copy(solution[1:n]),FA.transform(e.cone,dyhat,:Wt),
         FA.transform(e.cone,dshat,:S),solution[end-1],solution[end])
