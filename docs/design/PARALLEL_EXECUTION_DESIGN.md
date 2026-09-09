@@ -145,6 +145,42 @@ all are still unattempted or that narrow tests close every obligation:
    guaranteed gain. Do not implement or promote speculative fusion merely to
    mark a checkbox complete.
 
+## 5. Follow-up design (no code yet)
+
+### 5.1 LP `random_large` flat curve: discriminate before redesigning
+
+Selection facts (`src/pipeline/plan.jl:315-320`): Float64 `:lp_primal_dual`
+selects `:parallel_blas_panels` only when `selected_threads > 1`,
+`cone_rows * variables^2 >= 2_000_000`, **and** `blas_threads() == 1`;
+otherwise `:blas_syrk`. For `random_large` (m=400, n=1200) the size gate
+passes (400·1200² ≫ 2M), so the branch hinges on the ambient BLAS setting:
+with default multithreaded BLAS the plan silently takes `:blas_syrk`, and
+the observed flat curve may be BLAS-threading overhead on a small Gram,
+not missing parallel arithmetic. Do not redesign until a run records
+`selected.gram_kernel` together with phase timing at matched BLAS settings.
+Prescription only; no code change in this tranche.
+
+### 5.2 Conditional residual fusion (implement only on measured value)
+
+Current sites (`fixed_trace_q3.jl:1061-1200`): accepted-point refresh does
+panel-gemv → tail updates → rP combine → panel'-gemv → tail updates →
+c·τ pass → rDr copy, plus scalar gap/complementarity/μ reductions; trial
+residuals repeat the same shape per line-search step. Adjacent full-vector
+passes can merge **without changing statement order or parenthesization**:
+keep the two `rD` accumulation statements (`+= tail...` then `+= c*τ`) as
+two statements inside one per-block body; keep the single rP expression
+verbatim inside the producer loop. Explicit non-goals: no expression
+rewrites (`+= A+B` in one statement would re-parenthesize), no change to
+the non-structured fallback, the non-identity `rank_basis` path, free-variable
+border handling (free columns need a separate small c·τ loop since block
+updates cover only active variables), or shared `panel_action` lifetime.
+Acceptance: bit-identity at fixed workers across all limbs, all existing
+residual/line-search tests green, plus a measured total-time win on the
+α3 pair. Historical residual share (~7% of T1) bounds the prize at a few
+percent; trial-step multiplicity is the only upside beyond that bound.
+If the cluster attribution shows residual below that bound, close this item
+as investigated-and-rejected, not as shipped code.
+
 PBS campaigns use immutable releases and preserved evidence; never alter held
 job 210917, shared environments or provider pins. Full R1/R2 concurrency and
 memory qualification, native Power/Exp correctness, sparse MP admission and
