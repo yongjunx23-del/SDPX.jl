@@ -105,6 +105,12 @@ mutable struct FactorPairState
     pending_epoch::Any
     pending_generation::Int
     pending_pair::Any
+    # Simultaneous-live admission: the estimate covers the accepted problem,
+    # point, pair factors, the pending epoch core/LU and the certificate
+    # scratch.  `nothing` means no budget was declared (research use only).
+    memory_limit_bytes::Union{Nothing,Int}
+    memory_estimate_bytes::Int
+    max_time_seconds::Float64
 end
 
 # ---------------------------------------------------------------- boundaries
@@ -274,6 +280,33 @@ function current_residuals(e, x, s, y, tau, kappa)
     (rP, rD, rG)
 end
 
+# ------------------------------------------------------- resource admission
+# Conservative simultaneous-live estimate: CSC storage + dense vectors + the
+# factor blocks (9 Float64 per Power block) + `n_epochs` dense transformed cores
+# of the reviewed `(n+m+2)` bordered system and their LU factors.  It is an
+# admission estimate, not a measured RSS bound.
+function estimate_live_bytes(A::SparseMatrixCSC{Float64,Int},
+    b::Vector{Float64}, c::Vector{Float64}, layout::NP.Layout,
+    n_epochs::Int = 2)
+    n_epochs >= 1 || throw(ArgumentError("n_epochs must be >= 1"))
+    m, n = size(A)
+    csc = 8 * (length(A.nzval) + length(A.rowval) + length(A.colptr))
+    dense = 8 * (m + n + 3 * m)
+    factors = 9 * 8 * (length(layout.alphas) + 1)
+    core = (n + m + 2)
+    epoch = n_epochs * 8 * (core * core + 8 * core)
+    return csc + dense + factors + epoch
+end
+
+function _enforce_memory_admission(estimate::Int, limit::Union{Nothing,Int})
+    limit === nothing && return estimate
+    limit >= 0 || throw(ArgumentError("memory_limit_bytes must be nonnegative"))
+    estimate <= limit || throw(FactorPairNumericalRefusal(:memory,
+        :insufficient_budget,
+        "estimated simultaneous live bytes $(estimate) exceed the declared limit $(limit)"))
+    return estimate
+end
+
 # ------------------------------------------------------------- epoch adapter
 function _admitted_epoch(pair, A, b, c, x, tau, kappa, source_record)
     admitted = _translate(:epoch, () -> NP.epoch(pair, A, b, c, x, tau, kappa;
@@ -298,12 +331,18 @@ function cold_start(A::SparseMatrixCSC{Float64,Int}, b::Vector{Float64},
     settings::NP.RootSettings = NP.RootSettings(),
     target::Float64 = 1.0e-8,
     cert_tol::Float64 = SDPX.default_certificate_tol(Float64),
+    memory_limit_bytes::Union{Nothing,Int} = nothing,
+    max_time_seconds::Float64 = Inf,
 )
     m, n = size(A)
     length(b) == m && length(c) == n ||
         throw(ArgumentError("factor-pair cold start shape mismatch"))
     isfinite(target) && target > 0.0 || throw(ArgumentError("target must be positive"))
     isfinite(cert_tol) && cert_tol > 0.0 || throw(ArgumentError("cert_tol must be positive"))
+    (isinf(max_time_seconds) || (isfinite(max_time_seconds) && max_time_seconds > 0.0)) ||
+        throw(ArgumentError("max_time_seconds must be positive or Inf"))
+    estimate = _enforce_memory_admission(
+        estimate_live_bytes(A, b, c, layout, 2), memory_limit_bytes)
     # Own every input word: the state must never retain caller aliases.
     A = copy(A)
     b = copy(b)
@@ -331,7 +370,7 @@ function cold_start(A::SparseMatrixCSC{Float64,Int}, b::Vector{Float64},
     rP, rD, rG = current_residuals(e, x, s, y, tau, kappa)
     return FactorPairState(A, b, c, layout, settings, owner, pair, x, tau,
         kappa, rP, rD, rG, 0, AcceptedFactorPairStep[], target, cert_tol, 0,
-        e, 0, pair)
+        e, 0, pair, memory_limit_bytes, estimate, max_time_seconds)
 end
 
 # ---------------------------------------------------------------- one step
@@ -562,9 +601,17 @@ iteration limit.
 """
 function solve!(st::FactorPairState; max_iterations::Int = 200)
     max_iterations >= 1 || throw(ArgumentError("max_iterations must be >= 1"))
+    started = time_ns()
+    _elapsed() = Float64(time_ns() - started) * 1.0e-9
     while st.iterations < max_iterations
         receipt = _terminal_receipt(st)
         receipt === nothing || return receipt
+        _elapsed() >= st.max_time_seconds && return (; status = :time_limit,
+            iterations = st.iterations,
+            merit = max(maxinf(st.rP), maxinf(st.rD), abs(st.rG)),
+            audit = cert_quantities(st), x = copy(st.x), s = copy(st.pair.s),
+            y = copy(st.pair.y), tau = st.tau, kappa = st.kappa,
+            pair_generation = st.owner.generation, history = copy(st.history))
         step!(st)
     end
     receipt = _terminal_receipt(st)

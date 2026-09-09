@@ -73,6 +73,53 @@
     @test any(h -> h.alpha >= FPH.PROG_FLOOR, terminal.history)
     @test last(terminal.history).generation == 23
 
+    # Simultaneous-live memory admission: an undersized declared budget must
+    # refuse before any epoch/factor allocation, and the estimate must cover
+    # two live epochs (accepted + prepared next).
+    estimate = FPH.estimate_live_bytes(A, b, c, layout, 2)
+    @test estimate > 0
+    @test FPH.estimate_live_bytes(A, b, c, layout, 2) >
+          FPH.estimate_live_bytes(A, b, c, layout, 1)
+    mem_err = try
+        FPH.cold_start(A, b, c, layout; target = 1.0e-8,
+            memory_limit_bytes = estimate - 1)
+        nothing
+    catch caught
+        caught
+    end
+    @test mem_err isa FPH.FactorPairNumericalRefusal
+    @test mem_err.stage === :memory && mem_err.reason === :insufficient_budget
+    @test st.memory_estimate_bytes == estimate
+    @test st.memory_limit_bytes === nothing
+
+    # Time limit is honoured between accepted steps and never publishes a
+    # public Optimal status.
+    timed = FPH.cold_start(A, b, c, layout; target = 1.0e-8,
+        max_time_seconds = 1.0e-9)
+    timed_terminal = FPH.solve!(timed; max_iterations = 5)
+    @test timed_terminal.status === :time_limit
+    @test timed_terminal.iterations == 0
+
+    # Transaction atomicity: a refused step leaves anchor, generation, point
+    # and iteration count unchanged.
+    anchor_before = st.owner.anchor
+    gen_before = st.owner.generation
+    iters_before = st.iterations
+    pair_before = st.pair
+    x_before = copy(st.x)
+    refused = try
+        FPH.step!(st; sigma_override = floatmax(Float64))
+        nothing
+    catch caught
+        caught
+    end
+    @test refused isa FPH.FactorPairNumericalRefusal
+    @test st.owner.anchor === anchor_before
+    @test st.owner.generation == gen_before
+    @test st.iterations == iters_before
+    @test st.pair === pair_before
+    @test st.x == x_before
+
     # Boundary qualification (independent review counterexample): the source
     # quadratic formula returned Inf for a finite exit; the stabilized
     # positive root plus explicit coordinate positivity must not.
@@ -85,7 +132,7 @@
     bad = FPH.FactorPairState(st.A, st.b, st.c, st.layout, st.settings,
         st.owner, st.pair, st.x, 0.0, st.kappa, st.rP, st.rD, st.rG, 0,
         SDPX.FactorPairHSD.AcceptedFactorPairStep[], st.target, st.cert_tol, 0,
-        nothing, 0, nothing)
+        nothing, 0, nothing, nothing, 0, Inf)
     err = try
         FPH.step!(bad)
         nothing

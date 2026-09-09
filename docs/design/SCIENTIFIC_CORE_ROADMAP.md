@@ -35,7 +35,7 @@
 3. **step 4 内部命名空间移植**（`dd59a31`）：`src/hsd/factor_pair/*.jl`（FA/NC/HC/FC/NP + 支撑模块），与 validation 参考模块在 pair/epoch/affine/combined/证书上 **21/21 逐位一致**（唯一差异是 owner 绑定的 fingerprint）。
 4. **内部适配器核心（步骤 6–14 的数值/契约子集）**：`FactorPairHSD` 使用 `NP.epoch` 准入（非绕过）、typed `FactorPairNumericalRefusal` + 内部 FA/FC `FactorPairStageRefusal` 的窄翻译、未改动的接受门（分量 homotopy、raw max-inf merit+既有 scale、精确 useful-progress、0.9/0.5/64 回溯）、primal+dual+tau/kappa 边界与 `sigma=min(1,(mu_aff/mu)^3)`、**提交前准备并认证下一 epoch 并在下一步复用**、普通 terminal audit（源证书不等式 + 源 cone 谓词 + `mu/tau²` 与 `abs(kappa/tau)`、无 tau 再除）、A/b/c 所有权隔离与 terminal receipt 所有权隔离、NC 验证器改为块对角流式（**不再构造全局 m×m interval Theta/W**）。canonical power 12 行问题 32/32；内部适配器（稳定化边界）23 步 certified terminal（audit.m `2.9174020235019777e-9`、obj `1.124239097167378`、obj_gap `2.3358788237004546e-9`、norm_resid `7.293505058754944e-10`、mu/tau² `5.81949619632288e-10`）。源边界公式的消去反例 `(1,1,0,-1e16,-1e-16,0)` 已修复并有回归。
 
-**独立审阅（`05f41f59`）判定 BLOCKING（公开准入）**，已修复 P1：平台门控、A/b/c 所有权、边界消去、typed 数值拒绝、NC 全局稠密矩阵；仍开放：原问题/约化后准入与行置换、原坐标恢复、route-neutral 公开 terminal/result、完整内存准入、事务失败负控、资格矩阵。公开 opt-in 路由继续 `:not_implemented` 失败关闭。
+**独立审阅（`05f41f59`）判定 BLOCKING（公开准入）**，已修复：平台门控、A/b/c 所有权、边界消去、typed 数值拒绝、NC 全局稠密矩阵、同时存活内存准入（估计+拒绝）、时间限制、事务原子性负控、prepared-epoch 复用、selector 传播、typed 准入先于 legacy policy。仍开放：原问题/约化后准入与行置换、原坐标恢复、route-neutral 公开 terminal/result、资格矩阵。公开 opt-in 路由继续 `:not_implemented` 失败关闭。
 
 仍未完成（不得声称公开路由合格）：canonical/equality-reduction → factor-pair 映射与可逆行置换、原坐标恢复、route-neutral terminal/public result、完整内存准入、资格矩阵与独立审阅闭环。公开默认 Float64 Power dispatch **未修复**，opt-in 公开路由仍拒绝。
 
