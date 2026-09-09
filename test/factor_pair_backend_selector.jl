@@ -102,26 +102,19 @@ end
         nonsymmetric_backend=experimental); cones=(:nonnegative, :exp))
     @test !d.admitted && d.reason === :cones
 
-    # In-scope request: every declared capability check passes, but the
-    # execution fork is not admitted yet, so it fails closed.
+    # In-scope request: every declared capability check passes, so the opt-in
+    # backend is admitted for this exact scope.  Out-of-scope shapes are still
+    # refused (post-reduction cone/layout check at the fork).
     d = SDPX.factor_pair_admission(SDPX.Settings(Float64;
         nonsymmetric_backend=experimental); cones=(:nonnegative, :power))
-    @test !d.admitted
-    @test d.stage === :admission && d.reason === :not_implemented
-    err = try
-        SDPX.enforce_factor_pair_admission!(SDPX.Settings(Float64;
-            nonsymmetric_backend=experimental); cones=(:nonnegative, :power))
-        nothing
-    catch caught
-        caught
-    end
-    @test err isa SDPX.UnsupportedBackendError
-    @test err.stage === :admission && err.reason === :not_implemented
-    @test err.backend === SDPX.ExperimentalHalfPowerFactorPairBackend
-    @test occursin("no fallback", err.detail)
+    @test d.admitted
+    @test d.stage === :plan && d.reason === :experimental_factor_pair
+    @test d.backend === SDPX.ExperimentalHalfPowerFactorPairBackend
+    @test SDPX.enforce_factor_pair_admission!(SDPX.Settings(Float64;
+        nonsymmetric_backend=experimental); cones=(:nonnegative, :power)) === d
 end
 
-@testset "R0-P4 backend selector: public entry fails closed, default path unchanged" begin
+@testset "R0-P4 opt-in public route: genuine original-coordinate certificate" begin
     # A small Power model inside the declared experimental scope.
     model = SDPX.Model(Float64)
     a = (0.626678964309454, 0.3230223181314613, -0.7919401216799509)
@@ -135,11 +128,22 @@ end
     end
     SDPX.objective!(model, SDPX.Minimize(), t[1] + t[2] + t[3])
 
-    # Explicit experimental selection refuses before iteration; it must not
-    # silently run the default backend.
-    @test_throws SDPX.UnsupportedBackendError SDPX.optimize!(model;
-        settings=SDPX.Settings(Float64; verbosity=0,
-            nonsymmetric_backend=SDPX.ExperimentalHalfPowerFactorPairBackend))
+    # Explicit experimental selection executes the admitted factor-pair core
+    # and returns through the ORDINARY original-coordinate recovery and
+    # certificate authority.
+    result = SDPX.optimize!(model; settings=SDPX.Settings(Float64;
+        verbosity=0, limits=SDPX.Limits(iterations=200, time=120.0, threads=1),
+        nonsymmetric_backend=SDPX.ExperimentalHalfPowerFactorPairBackend))
+    @test SDPX.status(result) === :optimal
+    cert = SDPX.certificate(result)
+    @test cert.valid
+    exact = sum(Rational{BigInt}(v)^2 for v in a)
+    @test isapprox(SDPX.primal_objective(result), Float64(exact); atol=1e-8)
+    d = SDPX.diagnostics(result)
+    @test d.selected_algorithms.nonsymmetric_backend ===
+          SDPX.ExperimentalHalfPowerFactorPairBackend
+    @test d.selected_algorithms.executed_kkt_route === :factor_pair
+    @test d.selected_algorithms.planned_kkt_storage === :dense_factor_pair_core
 
     # The default path still executes and records the native backend choice.
     result = SDPX.optimize!(model; settings=SDPX.Settings(Float64;

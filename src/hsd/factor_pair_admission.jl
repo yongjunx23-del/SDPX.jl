@@ -192,11 +192,12 @@ function factor_pair_admission(
             checks,
         )
     end
-    # Every declared capability check passed, but the execution fork is not
-    # implemented yet.  Fail closed instead of running the legacy backend.
+    # Every declared capability check passed.  The execution fork is admitted
+    # for this exact scope; the post-reduction cone/layout check happens at the
+    # fork itself and refuses typed rather than falling back.
     return FactorPairAdmission(
-        false, :admission, :not_implemented, backend,
-        "experimental half-Power factor-pair backend is not yet admitted to execution (R0-P4 implementation in progress); no fallback to the default backend",
+        true, :plan, :experimental_factor_pair, backend,
+        "opt-in experimental half-Power factor-pair backend admitted within the declared Float64 orthant+half-Power scope",
         checks,
     )
 end

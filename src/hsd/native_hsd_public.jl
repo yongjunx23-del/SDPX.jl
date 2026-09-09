@@ -57,6 +57,14 @@ function _native_hsd_kkt_descriptor(
             :factor_once_predictor_corrector_refinement,
             :native_expanded_ldlt, :native_serial, (:bordered,),
         )
+    elseif route === :factor_pair
+        T === Float64 || throw(ArgumentError(
+            "factor_pair requires Float64 arithmetic",
+        ))
+        return NativeHSDKKTDescriptor(
+            route, :dense_factor_pair_lu, :dense_factor_pair_core, :native,
+            :lu_dense, :affine_combined_same_factor, :dense_lu, :dense_lu, (),
+        )
     elseif route === :bordered
         if T === Float64
             return NativeHSDKKTDescriptor(
@@ -1010,6 +1018,7 @@ function _native_hsd_diagnostics(
     executed_kkt_attempts::Tuple{Vararg{Symbol}}=(),
     state::Union{Nothing,ProductConeHSDState}=nothing,
     product::Union{Nothing,ProductHSDSolveResult{T}}=nothing,
+    factor_pair_terminal::Union{Nothing,NamedTuple}=nothing,
     equilibration::Symbol=:off,
     core_estimate_bytes::Integer=0,
     core_dimension::Integer=0,
@@ -1159,6 +1168,19 @@ function _native_hsd_diagnostics(
                 terminal_base.record.step_size
     backtracking = terminal_base === nothing ? -1 :
                    terminal_base.record.backtracking
+    if factor_pair_terminal !== nothing
+        terminal_tau = factor_pair_terminal.tau
+        terminal_kappa = factor_pair_terminal.kappa
+        terminal_mu = factor_pair_terminal.mu
+        p_residual = factor_pair_terminal.p_residual
+        d_residual = factor_pair_terminal.d_residual
+        gap_residual = factor_pair_terminal.gap_residual
+        normalized_residual = factor_pair_terminal.normalized_residual
+        last_step = :factor_pair
+        terminal_alpha = factor_pair_terminal.terminal_alpha
+        step_size = factor_pair_terminal.step_size
+        backtracking = factor_pair_terminal.backtracking
+    end
     termination = (
         reason=reason,
         stage=termination_stage,
@@ -1337,6 +1359,7 @@ function _native_hsd_core_result(
     executed_kkt_attempts::Tuple{Vararg{Symbol}}=(),
     state::Union{Nothing,ProductConeHSDState}=nothing,
     product::Union{Nothing,ProductHSDSolveResult{T}}=nothing,
+    factor_pair_terminal::Union{Nothing,NamedTuple}=nothing,
     equilibration::Symbol=:off,
     core_estimate_bytes::Integer=0,
     core_dimension::Integer=0,
@@ -1360,6 +1383,7 @@ function _native_hsd_core_result(
         executed_kkt_attempts,
         state,
         product,
+        factor_pair_terminal,
         equilibration,
         core_estimate_bytes,
         core_dimension,
@@ -1382,6 +1406,169 @@ function _native_hsd_core_result(
         x,
         s,
         y,
+    )
+end
+
+"""
+    _factor_pair_public_core(...)
+
+Opt-in R0-P4 route: run the certified half-Power factor-pair epoch on the
+admitted reduced problem, recover the full canonical coordinates through the
+existing equality-reduction lineage, and return the same
+`NativeHSDCoreResult` type the ordinary route returns.  The public
+original-coordinate recovery and certificate authority downstream are
+unchanged; this function never constructs a legacy dense-metric runtime.
+"""
+function _factor_pair_public_core(
+    model::Model{Float64},
+    program::NativeConeProgram{Float64},
+    canonical::CanonicalConicProgram{Float64},
+    reduction::HSDEqualityReduction{Float64},
+    route::NativeConeRoute,
+    settings::Settings{Float64},
+    setup_seconds::Float64,
+)
+    reduced = reduction.reduced
+    layout = FactorPairHSD.reduced_layout(reduced)
+    layout === nothing && throw(UnsupportedBackendError(
+        :admission, :cones, settings.nonsymmetric_backend,
+        "post-reduction cone layout is not the admitted contiguous orthant + half-Power shape",
+    ))
+    A, b, c = FactorPairHSD.canonical_problem(reduced)
+    automatic = auto_tolerance(Float64, precision_bits(model))
+    tp = settings.tolerances.primal === nothing ? automatic : settings.tolerances.primal
+    td = settings.tolerances.dual === nothing ? automatic : settings.tolerances.dual
+    tg = settings.tolerances.gap === nothing ? automatic : settings.tolerances.gap
+    cert_tol = min(tp, td, tg)
+    target = max(tp, td, tg)
+    core_started = time_ns()
+    state = FactorPairHSD.cold_start(A, b, c, layout;
+        settings=NativeHalfPair.RootSettings(),
+        target=target,
+        cert_tol=cert_tol,
+        max_time_seconds=Float64(settings.limits.time),
+    )
+    terminal = FactorPairHSD.solve!(state;
+        max_iterations=_native_hsd_max_iterations(settings))
+    core_seconds = Float64(time_ns() - core_started) * 1.0e-9
+
+    n = canonical_num_variables(canonical)
+    m = canonical_num_slack(canonical)
+    x_full = alloc_zeros(Float64, n)
+    s_full = alloc_zeros(Float64, m)
+    y_full = alloc_zeros(Float64, m)
+    status = NumericalFailure
+    reason = :factor_pair_not_certified
+    recovery_valid = false
+    recovery_started = time_ns()
+    if terminal.status === :certified_terminal
+        inv_tau = inv(terminal.tau)
+        recovery_valid = hsd_recover_optimal_source!(x_full, s_full, y_full,
+            reduction, terminal.x .* inv_tau, terminal.s .* inv_tau,
+            terminal.y .* inv_tau; tol=cert_tol)
+        if recovery_valid
+            status = Optimal
+            reason = :factor_pair_certified
+        else
+            reason = :full_canonical_recovery_failed
+        end
+    elseif terminal.status === :time_limit
+        status = TimeLimit
+        reason = :time_limit
+    elseif terminal.status === :iteration_limit
+        status = IterLimit
+        reason = :iteration_limit
+    end
+    recovery_seconds = Float64(time_ns() - recovery_started) * 1.0e-9
+
+    base_exec = _native_hsd_plan(program, canonical, reduction, route, settings)
+    base_plan = base_exec.payload
+    kkt = NativeHSDKKTDescriptor(:factor_pair, :dense_factor_pair_lu,
+        :dense_factor_pair_core, :native, :lu_dense,
+        :affine_combined_same_factor, :dense_lu, :dense_lu, ())
+    core_dim = canonical_num_variables(reduced) + canonical_num_slack(reduced) + 2
+    payload = NativeHSDPlan(
+        base_plan.formulation,
+        :dense_factor_pair_core,
+        :lu_dense,
+        :affine_combined_same_factor,
+        :serial,
+        :dense_lu,
+        (),
+        base_plan.original_variables,
+        base_plan.reduced_variables,
+        base_plan.original_rows,
+        base_plan.equality_rows,
+        base_plan.active_rows,
+        base_plan.equality_rank,
+        base_plan.product_rank,
+        base_plan.product_rank_reason,
+        base_plan.zero_blocks,
+        base_plan.active_blocks,
+        base_plan.cones,
+        base_plan.equality_status,
+        base_plan.product_rank_ambiguous,
+        base_plan.product_rank_incompatible,
+        :factor_pair,
+        kkt,
+        base_plan.structure,
+        settings.nonsymmetric_backend,
+    )
+    plan = ExecutionPlan(
+        base_exec.classification,
+        base_exec.algorithm,
+        base_exec.scaling,
+        base_exec.backend_config,
+        base_exec.formulation_plan,
+        base_exec.la_config,
+        base_exec.storage_plan,
+        base_exec.gram_kernel,
+        base_exec.schedule,
+        base_exec.threads,
+        base_exec.parameter_profile,
+        base_exec.memory_budget_bytes,
+        base_exec.parameters,
+        payload,
+    )
+    return canonical, reduction, _native_hsd_core_result(
+        Float64,
+        status,
+        reason,
+        plan,
+        reduction,
+        terminal.iterations,
+        terminal.iterations + 1,
+        nothing,
+        recovery_valid,
+        x_full,
+        s_full,
+        y_full,
+        setup_seconds,
+        core_seconds,
+        recovery_seconds;
+        executed_kkt_route=:factor_pair,
+        executed_kkt_attempts=(:factor_pair,),
+        factor_pair_terminal=(
+            tau=terminal.tau,
+            kappa=terminal.kappa,
+            mu=terminal.audit.mu,
+            p_residual=terminal.audit.primal_feas,
+            d_residual=terminal.audit.dual_feas,
+            gap_residual=terminal.audit.homo_gap,
+            normalized_residual=terminal.audit.norm_resid,
+            terminal_alpha=isempty(terminal.history) ? 0.0 :
+                           last(terminal.history).alpha,
+            step_size=isempty(terminal.history) ? 0.0 :
+                      last(terminal.history).alpha,
+            backtracking=isempty(terminal.history) ? -1 :
+                         last(terminal.history).backtracking,
+        ),
+        core_dimension=core_dim,
+        owner_prepared_dimension=core_dim,
+        owner_executed_dimension=status === Optimal ? core_dim : 0,
+        factor_owner=:factor_pair_session,
+        owner_current=status === Optimal,
+        owner_unused=(),
     )
 end
 
@@ -1410,6 +1597,13 @@ function _public_native_hsd_core(
     x_full = alloc_zeros(T, n)
     s_full = alloc_zeros(T, m)
     y_full = alloc_zeros(T, m)
+
+    if settings.nonsymmetric_backend === ExperimentalHalfPowerFactorPairBackend &&
+       reduction.status !== HSDEqualityInconsistent
+        return _factor_pair_public_core(
+            model, program, canonical, reduction, route, settings, setup_seconds,
+        )
+    end
 
     if reduction.status === HSDEqualityInconsistent
         copy_owned!(y_full, reduction.primal_infeasibility_ray)
@@ -2416,7 +2610,8 @@ function _public_optimize_native_hsd(
         warm_start,
     )
     canonical, _, core = _public_native_hsd_core(model, program, route, settings)
-    if _native_hsd_should_restart_bordered(
+    if settings.nonsymmetric_backend === NativeNonsymmetricBackend &&
+       _native_hsd_should_restart_bordered(
         settings.kkt_route,core.status,core.reason,core.iterations,
     )
         fallback_settings = _native_hsd_route_settings(settings, :expanded)
