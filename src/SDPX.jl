@@ -136,6 +136,17 @@ include("spectrum.jl")
 include("frontend/high_level_solve.jl")
 include("performance_trace.jl")
 include("public/result.jl")
+# R0-P4 opt-in half-Power factor-pair backend: reviewed arithmetic ported into
+# an internal package namespace (design step 4).  These modules are internal
+# implementation details; they are not exported and they do not change the
+# default dense-metric route.  Independent research oracles stay in
+# validation/scientific_core/.
+include("hsd/factor_pair/factor_preserving_affine.jl")
+include("hsd/factor_pair/native_factor_affine_certificate.jl")
+include("hsd/factor_pair/half_power_native_corrector.jl")
+include("hsd/factor_pair/factor_combined_epoch.jl")
+include("hsd/factor_pair/native_half_pair.jl")
+
 include("hsd/native_hsd_public.jl")
 include("public/optimize.jl")
 include("entrypoint_bridge.jl")
