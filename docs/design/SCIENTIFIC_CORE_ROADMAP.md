@@ -24,6 +24,19 @@
 
 每包遵循：冻结输入/来源 → 基线与负控 → 单一可证伪改动 → 相关检查 → 独立审阅 → 开发分支整合 → 同HEAD复测。包内失败不自动停止无依赖的其他包；没有过门的路线不得被默认启用。
 
+### R0-P4 最新进度（2026-09-09，dev HEAD 44bdc32）
+
+设计权威：`docs/design/R0P4_FACTOR_PAIR_BOUNDARY.md`（oracle 设计，含 consumer map、refusal 语义、16 步实施计划、验收标准；**不授权默认 dispatch 变更**）。
+
+已完成切片：
+
+1. **step 1 证据台账**（`508566f`）：修正 accepted-alpha 声明——晚期 below-floor 步是**未改动的 progress 门**在算术邻域内的真实表示进展，不是“所有 alpha ≥ 0.026”。
+2. **step 3 类型化选择器 + fail-closed 准入**（`bc38f72`）：`NonsymmetricBackendChoice`（默认 `NativeNonsymmetricBackend` 行为不变；`ExperimentalHalfPowerFactorPairBackend` opt-in），`src/hsd/factor_pair_admission.jl` 对 arithmetic/engine/kkt_route/provider/formulation/sparse/scaling/threads/iteration_policy/cones 逐项 typed 拒绝，在 `_public_native_hsd_core` 数值设置前强制；in-scope 请求当前以 `:not_implemented` 失败关闭，**绝不回退默认路径**。39 项选择器/拒绝测试。
+3. **step 4 内部命名空间移植**（`dd59a31`）：`src/hsd/factor_pair/*.jl`（FA/NC/HC/FC/NP + 支撑模块），与 validation 参考模块在 pair/epoch/affine/combined/证书上 **21/21 逐位一致**（唯一差异是 owner 绑定的 fingerprint）。
+4. **step 6–14 内部生产适配器**（`44bdc32`）：`FactorPairHSD` 使用 `NP.epoch` 准入（非绕过）、typed `FactorPairNumericalRefusal`、未改动的接受门（分量 homotopy、raw max-inf merit+既有 scale、精确 useful-progress、0.9/0.5/64 回溯）、primal+dual+tau/kappa 边界与 `sigma=min(1,(mu_aff/mu)^3)`、**提交前准备并认证下一 epoch**、普通 terminal audit（源证书不等式 + 源 cone 谓词 + `mu/tau²`，无 tau 再除）。canonical power 12 行问题 **28/28**，27 步 terminal 与已认证 loop 逐量一致（audit.m `2.8017973855476926e-9`、obj `1.1242390972345995`、obj_gap `2.243317531736011e-9`、norm_resid `7.004493463869232e-10`、mu/tau² `5.588893961926076e-10`）。
+
+仍未完成（不得声称公开路由合格）：canonical/equality-reduction → factor-pair 映射与可逆行置换、原坐标恢复、route-neutral terminal/public result、完整内存准入、资格矩阵与独立审阅闭环。公开默认 Float64 Power dispatch **未修复**，opt-in 公开路由仍拒绝。
+
 ## T0 · 跨求解器、精度与问题适定性诊断（立即执行）
 
 ### T0.1 冻结真正的原问题，不把迭代点当问题
