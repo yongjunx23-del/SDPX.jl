@@ -376,8 +376,8 @@ function cold_start(A::SparseMatrixCSC{Float64,Int}, b::Vector{Float64},
         throw(ArgumentError("factor-pair cold start shape mismatch"))
     isfinite(target) && target > 0.0 || throw(ArgumentError("target must be positive"))
     isfinite(cert_tol) && cert_tol > 0.0 || throw(ArgumentError("cert_tol must be positive"))
-    (isinf(max_time_seconds) || (isfinite(max_time_seconds) && max_time_seconds > 0.0)) ||
-        throw(ArgumentError("max_time_seconds must be positive or Inf"))
+    (max_time_seconds == Inf || (isfinite(max_time_seconds) && max_time_seconds >= 0.0)) ||
+        throw(ArgumentError("max_time_seconds must be nonnegative or Inf"))
     estimate = _enforce_memory_admission(
         estimate_live_bytes(A, b, c, layout, 2), memory_limit_bytes)
     # Own every input word: the state must never retain caller aliases.

@@ -149,6 +149,14 @@ end
     @test d.termination.factor_pair_execution.accepted_steps == d.termination.iterations
     @test d.termination.factor_pair_execution.factorization_attempts >= d.termination.factorizations > 0
 
+    # Zero is a valid public time limit: no ArgumentError and no success claim.
+    zero_time = SDPX.optimize!(model; settings=SDPX.Settings(Float64;
+        verbosity=0, limits=SDPX.Limits(iterations=200, time=0.0, threads=1),
+        nonsymmetric_backend=SDPX.ExperimentalHalfPowerFactorPairBackend))
+    @test SDPX.status(zero_time) === :time_limit
+    @test !SDPX.certificate(zero_time).valid
+    @test SDPX.diagnostics(zero_time).termination.iterations == 0
+
     # The default path still executes and records the native backend choice.
     result = SDPX.optimize!(model; settings=SDPX.Settings(Float64;
         verbosity=0, limits=SDPX.Limits(iterations=200, time=60.0, threads=1)))

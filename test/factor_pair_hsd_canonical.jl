@@ -95,7 +95,7 @@
     # Time limit is honoured between accepted steps and never publishes a
     # public Optimal status.
     timed = FPH.cold_start(A, b, c, layout; target = 1.0e-8,
-        max_time_seconds = 1.0e-9)
+        max_time_seconds = 0.0) # deterministic; a 1 ns budget depends on clock resolution
     timed_terminal = FPH.solve!(timed; max_iterations = 5)
     @test timed_terminal.status === :time_limit
     @test timed_terminal.iterations == 0
@@ -174,7 +174,7 @@
     bad = FPH.FactorPairState(st.A, st.b, st.c, st.layout, st.settings,
         st.owner, st.pair, st.x, 0.0, st.kappa, st.rP, st.rD, st.rG, 0,
         SDPX.FactorPairHSD.AcceptedFactorPairStep[], st.target, st.cert_tol, 0,
-        nothing, 0, nothing, nothing, 0, Inf)
+        nothing, 0, nothing, nothing, 0, Inf, SDPX.FactorPreservingAffine.FactorizationLedger())
     err = try
         FPH.step!(bad)
         nothing
