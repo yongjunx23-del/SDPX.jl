@@ -8,7 +8,9 @@
 
 本文是唯一的科学内核执行计划。旧 `HANDOVER.md` 及 `docs/HANDOVER.md` 镜像已由本计划取代；从活跃工作树移除，历史内容仍由 Git 和退休文档归档保存。`docs/evidence/`、原始日志、失败候选、数学规范和独立物理模型的来源计划不在删除范围。
 
-**当前仍在 R0；R0–R6 没有任何完整阶段关闭。** 最近已集成冻结 combined Newton 切片 `72627a8`，整合复测1042项通过。原生 half-Power pair/trial 候选 `44bd368` 在隔离分支通过362项：两个保留输入的cold/warm构造及六个新epoch的combined检查通过，12个固定trial中8个构造成功、4个拒绝。这些是**构造/方向证据，不是line-search accepted progress或生产修复**；该候选尚待独立审阅，最后一轮完整兼容性总回执亦待补齐。
+**R0–R6 没有任何完整阶段关闭。** 当前开发线为 SDPX 0.6.1；Power opt-in 已接通普通原坐标证书管线，但完整公开资格尚未通过，默认 Float64 Power/Exp 仍有已知失败。最近修复为 Exp replay 界（`e2322de`，507 项定向断言）及 Power 失败记录/LU 调用计数（`24bacde`、`e87154f`，见证据文件）；最后完整套件结果仍是旧 HEAD `f74a465` 的 6825 项，不得当作当前 HEAD 的回归结果。R1-A AccuracyContract 与 R2-A 真实 symbolic 计数已集成；100 次更新仍触发 100 次分析，symbolic reuse 未实现。
+
+早期 `72627a8` / `44bd368` 的构造与方向记录是历史证据，后续完整步、公开 opt-in 和拒绝路径状态以下述进度及 `docs/evidence/` 为准。
 
 用户最新要求调整实施顺序：**先用其他求解器和精度阶梯给失败分类，再决定修什么；不继续只围绕一个内部失败点反复构造实验。**
 
@@ -24,24 +26,24 @@
 
 每包遵循：冻结输入/来源 → 基线与负控 → 单一可证伪改动 → 相关检查 → 独立审阅 → 开发分支整合 → 同HEAD复测。包内失败不自动停止无依赖的其他包；没有过门的路线不得被默认启用。
 
-### R0-P4 最新进度（2026-09-09，dev HEAD 44bdc32）
+### R0-P4 进度与历史切片（2026-09-09）
 
 设计权威：`docs/design/R0P4_FACTOR_PAIR_BOUNDARY.md`（oracle 设计，含 consumer map、refusal 语义、16 步实施计划、验收标准；**不授权默认 dispatch 变更**）。
 
 已完成切片：
 
 1. **step 1 证据台账**（`508566f`）：修正 accepted-alpha 声明——晚期 below-floor 步是**未改动的 progress 门**在算术邻域内的真实表示进展，不是“所有 alpha ≥ 0.026”。
-2. **step 3 类型化选择器 + fail-closed 准入**（`bc38f72`）：`NonsymmetricBackendChoice`（默认 `NativeNonsymmetricBackend` 行为不变；`ExperimentalHalfPowerFactorPairBackend` opt-in），`src/hsd/factor_pair_admission.jl` 对 arithmetic/engine/kkt_route/provider/formulation/sparse/scaling/threads/iteration_policy/cones 逐项 typed 拒绝，在 `_public_native_hsd_core` 数值设置前强制；in-scope 请求当前以 `:not_implemented` 失败关闭，**绝不回退默认路径**。39 项选择器/拒绝测试。
+2. **step 3 类型化选择器 + fail-closed 准入**（`bc38f72`）：`NonsymmetricBackendChoice`（默认 `NativeNonsymmetricBackend` 行为不变；`ExperimentalHalfPowerFactorPairBackend` opt-in），`src/hsd/factor_pair_admission.jl` 对 arithmetic/engine/kkt_route/provider/formulation/sparse/scaling/threads/iteration_policy/cones 逐项 typed 拒绝，在 `_public_native_hsd_core` 数值设置前强制；该提交时 in-scope 请求以 `:not_implemented` 失败关闭（后续 `0ebf053` 接通 opt-in），**绝不回退默认路径**。39 项选择器/拒绝测试。
 3. **step 4 内部命名空间移植**（`dd59a31`）：`src/hsd/factor_pair/*.jl`（FA/NC/HC/FC/NP + 支撑模块），与 validation 参考模块在 pair/epoch/affine/combined/证书上 **21/21 逐位一致**（唯一差异是 owner 绑定的 fingerprint）。
 4. **内部适配器核心（步骤 6–14 的数值/契约子集）**：`FactorPairHSD` 使用 `NP.epoch` 准入（非绕过）、typed `FactorPairNumericalRefusal` + 内部 FA/FC `FactorPairStageRefusal` 的窄翻译、未改动的接受门（分量 homotopy、raw max-inf merit+既有 scale、精确 useful-progress、0.9/0.5/64 回溯）、primal+dual+tau/kappa 边界与 `sigma=min(1,(mu_aff/mu)^3)`、**提交前准备并认证下一 epoch 并在下一步复用**、普通 terminal audit（源证书不等式 + 源 cone 谓词 + `mu/tau²` 与 `abs(kappa/tau)`、无 tau 再除）、A/b/c 所有权隔离与 terminal receipt 所有权隔离、NC 验证器改为块对角流式（**不再构造全局 m×m interval Theta/W**）。canonical power 12 行问题 32/32；内部适配器（稳定化边界）23 步 certified terminal（audit.m `2.9174020235019777e-9`、obj `1.124239097167378`、obj_gap `2.3358788237004546e-9`、norm_resid `7.293505058754944e-10`、mu/tau² `5.81949619632288e-10`）。源边界公式的消去反例 `(1,1,0,-1e16,-1e-16,0)` 已修复并有回归。
 
-**独立审阅（`05f41f59`）判定 BLOCKING（公开准入）**，已修复：平台门控、A/b/c 所有权、边界消去、typed 数值拒绝、NC 全局稠密矩阵、同时存活内存准入（估计+拒绝）、时间限制、事务原子性负控、prepared-epoch 复用、selector 传播、typed 准入先于 legacy policy。仍开放：原问题/约化后准入与行置换、原坐标恢复、route-neutral 公开 terminal/result、资格矩阵。公开 opt-in 路由继续 `:not_implemented` 失败关闭。
+**独立审阅（`05f41f59`）判定 BLOCKING（公开准入）**，已修复：平台门控、A/b/c 所有权、边界消去、typed 数值拒绝、NC 全局稠密矩阵、同时存活内存准入（估计+拒绝）、时间限制、事务原子性负控、prepared-epoch 复用、selector 传播、typed 准入先于 legacy policy。仍开放：原问题/约化后准入与行置换、原坐标恢复、route-neutral 公开 terminal/result、资格矩阵。上述是该轮审阅时的状态；后续 `0ebf053` 接通公开 opt-in，但不代表完整资格闭环。
 
 5. **公开 opt-in 路由接通**（`0ebf053`）：`_public_native_hsd_core` 在约化后、legacy 运行前分叉到 `FactorPairHSD`；经既有 `hsd_recover_optimal_source!` 恢复全 canonical 坐标，再由**未改动的**普通 original-coordinate 恢复与证书管线出结果。E2E：`optimize!` + `ExperimentalHalfPowerFactorPairBackend` → `:optimal`、`certificate.valid=true`、obj `1.1242390971673781`（精确值误差 `1.48e-9`）；诊断诚实披露 `factor_pair`/`dense_factor_pair_core`/`lu_dense`/`dense_lu` 与真实 termination 量（tau `2.99`、kappa `1.74e-9`、mu `5.20e-9`、residuals 有限、last_step `:factor_pair`）。
 
-6. **R0-E 研究切片**（`1308d5e`）：按 oracle 设计实现补偿 Exp 评估器/共轭（精确指数归约 + atanh 级数 39 项、outward q、余项界；EFT 两分量；`log1p` 经 `t=ρ/(2+ρ)`；未改动 `16eps`/64 上限；类型化拒绝；范围/上下文守卫），独立 MPFR 审计，6/6 冻结记录、177 断言。结果：log 半径 ~1e-33（目标 2^-90）；**B 不是 "root unrepresentable"**——补偿根可认证（Rmax ~1e-23 vs 阈值 ~5.7e-21），旧 margin 台账才是失败点；A7 旧 shadow 仍被未改动的 exact identity 拒绝（defect -4.88e-11），改进 shadow 过 m12（-3.27e-12）但 rounded current-primal gradient 仍失败 m21（-6.27e-11），两者都如实报告。**不声称公开 Float64 Exp 状态变化。**
+6. **R0-E 研究切片**（`1308d5e`）：按 oracle 设计实现补偿 Exp 评估器/共轭（精确指数归约 + atanh 级数 39 项、outward q、余项界；EFT 两分量；`log1p` 经 `t=ρ/(2+ρ)`；未改动 `16eps`/64 上限；类型化拒绝；范围/上下文守卫），独立 MPFR 审计，6/6 冻结记录、177 断言。结果：log 半径 ~1e-33（目标 2^-90）；**B 不是 "root unrepresentable"**——补偿根可认证（Rmax ~1e-23 vs 阈值 ~5.7e-21），旧 margin 台账才是失败点；A7 旧 shadow 仍被未改动的 exact identity 拒绝（defect -4.88e-11），改进 shadow 过 m12（-3.27e-12）但 rounded current-primal gradient 仍失败 m21（-6.27e-11），两者都如实报告。**不声称公开 Float64 Exp 状态变化。** 后续审阅发现原 replay 界漏计坐标偏移/倒数舍入，配对判据区间方向也有缺陷；已由 `1429496`、`e6587a8`、`e2322de` 修复并通过 507 项定向断言。旧 TOML 回执仅作历史记录，不能用于修复后资格；细节见 `docs/evidence/EXP_REPLAY_BOUND_REPAIR.md`。
 
-7. **公开路由资格控制 + 审阅初检修复**：`24bacde` 已将 cold_start 与迭代纳入窄 typed 拒绝边界，并保留真实已接受状态及 LU 调用计数；165 项定向断言通过，独立复核与完整拒绝语义资格仍待闭环（见 `docs/evidence/FACTOR_PAIR_REFUSAL_REPAIR.md`）；诚实 ExecutionPlan 组件（formulation reason/provenance、dense LU LA 配置、`factor_pair_dense_core` 存储计划）；64 MiB 估算门槛已强制（估算不完整，不能证明实际峰值上界）；新增公开资格控制（非 half 指数/SOC/Exp/LP 形状 typed 拒绝、非有限数据、目标符号/常数/缩放、源与结果 mutation 隔离、默认路由 unchanged）。
+7. **公开路由资格控制 + 审阅初检修复**：`24bacde` 已将 cold_start 与迭代纳入窄 typed 拒绝边界，并保留真实已接受状态及 LU 调用计数；165 项定向断言通过；独立复核 `3462579f` 发现的一处失败 LU 路由记录问题已由 `e87154f` 修复（95 项定向断言），完整拒绝语义资格仍待闭环（见 `docs/evidence/FACTOR_PAIR_REFUSAL_REPAIR.md`）；ExecutionPlan 已改 dense LU LA 配置和存储标签，但 formulation descriptor 仍继承旧路线，尚待修正；64 MiB 估算门槛已强制（估算不完整，不能证明实际峰值上界）；新增公开资格控制（非 half 指数/SOC/Exp/LP 形状 typed 拒绝、非有限数据、目标符号/常数/缩放、源与结果 mutation 隔离、默认路由 unchanged）。
 
 **独立审阅（`42dc47e3`）在 Codex usage limit 处中断（基础设施阻塞，不构成通过）**；其初检项仅部分处理，尚未独立验证闭环。仍未完成：该审阅的完整闭环、完整资格矩阵、完整内存上界、Exp whole-epoch 迁移决策。公开默认 Float64 Power/Exp dispatch **未修复**（默认仍 breakdown，known-issue control 保留）。
 
@@ -80,7 +82,7 @@
 1. **原生Power形式**：相同12×3 canonical问题，prefix3 orthants + 三个Power块。
 2. **明确等价的SOC对照**：`(t,1,a)` 映射为 `(t+1,t-1,2a)`，一般块映射为 `(s1+s2,s1-s2,2s3)`。只用整数/二进制精确系数；保存线性映射并用其转置恢复原Power对偶量。也可单列MOSEK rotated-SOC形式 `(t,1/2,a)`，但不能把转换后成功计作“原生Power路径成功”。
 
-初轮不扩成性能campaign：每个必要单元一次有界独立进程；差异、异常或声称改进时再做至少一次独立复现。MOSEK 11.1.3 的Python包、Clarabel.jl 0.11.1及本地许可证文件已经发现，**这只是可用性线索，MOSEK实际许可/求解与高精度求解结果尚未取得**。不得把安装失败或许可证失败计为数学失败。
+初轮不扩成性能campaign：每个必要单元一次有界独立进程；差异、异常或声称改进时再做至少一次独立复现。MOSEK 11.1.3 的Python包、Clarabel.jl 0.11.1及本地许可证文件已经发现，**这只是可用性线索，当时 MOSEK 实际许可/求解与高精度结果尚未取得；当前首轮结果见上方 T0 台账**。不得把安装失败或许可证失败计为数学失败。
 
 ### T0.3 高精度设置与独立审计
 
