@@ -65,6 +65,15 @@ bicenter(lo, hi) = (BigFloat(lo) + BigFloat(hi)) / 2
         @test r.context.fast_math == 0
     end
 
+    @testset "gradient requires strictly positive signed margin" begin
+        for x in (0.0, 1.0, nextfloat(0.0))
+            r = CER.compensated_gradient_words(x, 1.0, 1.0)
+            @test r.status === :refused
+            @test r.reason in (:margin_guard, :exponent_range)
+        end
+        @test CER.compensated_gradient_words(-1.0, 1.0, 1.0).status === :ok
+    end
+
     # Evaluate all six frozen records once; reuse receipts below.
     RC = Dict{String, Any}()
     for nm in ("A4", "A7", "A10", "B4", "B7", "B10")

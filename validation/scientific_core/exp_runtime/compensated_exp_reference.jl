@@ -620,7 +620,8 @@ function evaluate_conjugate(
         Pcb = _cb_sub!(L, YL, _exact(X))
         Pc = Pcb.h + Pcb.l
         P = Pcb.h + Pcb.l
-        Pmin_lo = _abs_lo(Pcb)
+        # The barrier requires positive P, not merely |P| bounded away from zero.
+        Pmin_lo = _clo(Pcb)
         if !(Pmin_lo > 0.0) || !isfinite(Pmin_lo)
             return _refuse(:margin_guard, :replay_P, (P, Pcb.E))
         end
@@ -899,7 +900,7 @@ function compensated_gradient_words(x::Float64, y::Float64, z::Float64)
         Lr = _comp_log_ratio!(L, z, y)
         YL = _cb_mul!(L, _exact(y), Lr.value)
         Pcb = _cb_sub!(L, YL, _exact(x))
-        if !(_abs_lo(Pcb) > 0.0)
+        if !(_clo(Pcb) > 0.0)
             return _refuse(:margin_guard, :primal_gradient, nothing)
         end
         ip = _cb_div!(L, _exact(1.0), Pcb)
