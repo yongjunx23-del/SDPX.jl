@@ -134,6 +134,72 @@ using Test, SDPX, SparseArrays, LinearAlgebra
     end
     @test !slot.active && slot.entry === nothing && c.factor === nothing
 
+    # Factory failures and wrong-state/pattern registrations always release
+    # ownership through the caller's finally, preserving the original error.
+    l = SDPX.checkout_symbolic!(slot)
+    @test_throws ErrorException try
+        SDPX.lease_symbolic_cache!(l,key,()->error("factory failure"))
+    finally
+        SDPX.finish_symbolic!(l)
+    end
+    @test !slot.active && slot.entry === nothing
+    for wrong in (makecache(), SDPX.prepare!(SDPX.SparseSymbolicNumericCache{Float64}(),changedreq))
+        if SDPX._cache_matches_key(wrong,key)
+            SDPX.factorize!(wrong,K,1) # factory must return Prepared, not Fresh
+        end
+        l = SDPX.checkout_symbolic!(slot)
+        @test_throws ArgumentError try
+            SDPX.lease_symbolic_cache!(l,key,()->wrong)
+        finally
+            SDPX.finish_symbolic!(l)
+        end
+        @test wrong.status === SDPX.Invalid && wrong.factor === nothing
+        @test !slot.active && slot.entry === nothing
+    end
+    l = SDPX.checkout_symbolic!(slot)
+    for operation in (() -> SDPX.lease_symbolic_cache!(l,key,makecache),
+                      () -> SDPX.finish_symbolic!(l))
+        foreign = @async try
+            operation()
+        catch e
+            e
+        end
+        @test fetch(foreign) isa ArgumentError
+        @test l.active && slot.active
+    end
+    attempt = l.attempt
+    l.attempt = attempt-UInt64(1)
+    @test_throws ArgumentError SDPX.finish_symbolic!(l)
+    @test slot.active && l.active
+    l.attempt = attempt
+    @test !SDPX.finish_symbolic!(l)
+    slot.attempt = typemax(UInt64)
+    @test_throws OverflowError SDPX.checkout_symbolic!(slot)
+    @test !slot.active && slot.entry === nothing
+    SDPX.discard_symbolic!(slot) # failed checkout did not strand the lock
+    slot.attempt = UInt64(0)
+
+    # Actual provider numeric failure detaches; idle entry drift is not reused.
+    l = SDPX.checkout_symbolic!(slot)
+    c = SDPX.lease_symbolic_cache!(l,key,makecache)
+    SDPX.factorize!(c,K,1)
+    @test SDPX.finish_symbolic!(l; certified_optimal=true,eligible=true,structure_generation=UInt64(7))
+    l = SDPX.checkout_symbolic!(slot)
+    c = SDPX.lease_symbolic_cache!(l,key,makecache)
+    zeroK = copy(K); fill!(zeroK.nzval,0.0)
+    @test_throws ArgumentError SDPX.factorize!(c,zeroK,1)
+    @test c.factor === nothing
+    @test !SDPX.finish_symbolic!(l)
+    l = SDPX.checkout_symbolic!(slot)
+    old = SDPX.lease_symbolic_cache!(l,key,makecache)
+    SDPX.factorize!(old,K,1)
+    @test SDPX.finish_symbolic!(l; certified_optimal=true,eligible=true,structure_generation=UInt64(7))
+    old.rowval[1] = 2
+    l = SDPX.checkout_symbolic!(slot)
+    c = SDPX.lease_symbolic_cache!(l,key,makecache)
+    @test c !== old && old.status === SDPX.Invalid
+    @test !SDPX.finish_symbolic!(l)
+
     # Independent sessions do not share mutable factor storage.
     a,b = SDPX.SessionSymbolicSlot(),SDPX.SessionSymbolicSlot()
     la,lb = SDPX.checkout_symbolic!(a),SDPX.checkout_symbolic!(b)

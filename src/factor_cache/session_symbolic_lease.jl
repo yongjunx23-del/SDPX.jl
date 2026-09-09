@@ -79,10 +79,13 @@ function checkout_symbolic!(slot::SessionSymbolicSlot)
                 entry = nothing
             end
         end
+        # Allocate before publishing ownership. If construction fails, the
+        # idle slot still owns its (revoked) entry and remains retryable.
+        lease = SessionSymbolicLease(slot,entry,attempt,current_task(),true,false)
         slot.entry = nothing
         slot.attempt = attempt
         slot.active = true
-        return SessionSymbolicLease(slot,entry,attempt,current_task(),true,false)
+        return lease
     catch
         unlock(slot.lock)
         rethrow()
@@ -90,7 +93,8 @@ function checkout_symbolic!(slot::SessionSymbolicSlot)
 end
 
 """After ordinary provider selection, attach one compatible cache to a fresh workspace.
-The factory must return an already prepared Float64 sparse cache; it does not
+The trusted factory must create a newly owned, already prepared Float64 sparse
+cache, never one retained by another session or caller; it does not
 select a provider or create a workspace. Call once per lease, not per epoch.
 """
 function lease_symbolic_cache!(lease::SessionSymbolicLease, key::SessionSymbolicKey, factory)
@@ -137,6 +141,13 @@ function finish_symbolic!(lease::SessionSymbolicLease;
             invalidate!(entry.cache)
         end
         return keep
+    catch
+        # Validation may allocate (exact CSC comparisons). Failed check-in
+        # must detach even if a caller/workspace still references the cache.
+        # invalidate! here only assigns concrete fields; preserve the error.
+        slot.entry = nothing
+        entry === nothing || invalidate!(entry.cache)
+        rethrow()
     finally
         lease.entry = nothing
         lease.slot = nothing
