@@ -200,7 +200,7 @@ end
     # P1 regression in the half-Power triangular path: a finite 3x1 CSC with
     # floatmax overflows L'v inside the :W transform and must still refuse
     # with the stage-typed result rather than escaping as ErrorException.
-    zero_third=NP.build([1.,1.,0.],[1.,1.,0.],1.0,NP.Layout(0,(0.5,));policy=NP.POLICY,settings=SETTINGS)
+    zero_third=NP.build([2.,3.,0.25],[2.,1.,0.],2.0,NP.Layout(0,(0.5,));policy=NP.POLICY,settings=SETTINGS)
     @test zero_third isa NP.PairReceipt
     wide_A=sparse([1],[1],[floatmax(Float64)],3,1)
     wide=NP.epoch(zero_third,wide_A,[0.0,0.0,0.0],[0.0],[0.0],1.0,1.0)
