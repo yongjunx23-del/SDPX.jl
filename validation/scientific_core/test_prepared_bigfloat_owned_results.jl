@@ -1,4 +1,9 @@
 using Test, SDPX, LinearAlgebra
+# The BigFloat dense symmetric-core provider lives in the BFLA extension;
+# loading it here makes this file runnable standalone (the
+# run_constraint_contractions.jl driver also imports BFLA before including
+# this file, where this import is a no-op).
+using BigFloatLinearAlgebra
 @testset "prepared BigFloat result ownership after contraction restoration" begin
     for (bits,tolbits) in ((256,60),(512,120))
         setprecision(BigFloat,bits) do
