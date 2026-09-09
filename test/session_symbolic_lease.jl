@@ -91,6 +91,29 @@ using Test, SDPX, SparseArrays, LinearAlgebra
     @test !SDPX.finish_symbolic!(l; certified_optimal=true,eligible=true,structure_generation=UInt64(8))
     @test measured.entry === nothing && c.status === SDPX.Invalid
 
+    # Exact CSC/sign compatibility, not merely dimensions/nnz or a hash.
+    structural = SDPX.SessionSymbolicSlot()
+    l = SDPX.checkout_symbolic!(structural)
+    old = SDPX.lease_symbolic_cache!(l,key,makecache)
+    SDPX.factorize!(old,K,1)
+    @test SDPX.finish_symbolic!(l; certified_optimal=true,eligible=true,structure_generation=UInt64(7))
+    changed = copy(K); changed[2,1] = 0.0; dropzeros!(changed); changed[3,1] = 0.25
+    @test size(changed)==size(K) && nnz(changed)==nnz(K)
+    changedreq = SDPX.SparseSymbolicRequirements(changed; dsigns=ones(Int,5))
+    changedkey = SDPX.SessionSymbolicKey(context,changedreq,UInt64(7))
+    @test !SDPX._same_symbolic_key(key,changedkey)
+    l = SDPX.checkout_symbolic!(structural)
+    fresh = SDPX.lease_symbolic_cache!(l,changedkey,
+        () -> SDPX.prepare!(SDPX.SparseSymbolicNumericCache{Float64}(),changedreq))
+    @test fresh !== old && old.factor === nothing
+    SDPX.factorize!(fresh,changed,1)
+    # An otherwise successful solve on an ineligible/fallback route discards.
+    @test !SDPX.finish_symbolic!(l; certified_optimal=true,eligible=false,structure_generation=UInt64(7))
+    signreq = SDPX.SparseSymbolicRequirements(K; dsigns=[-1,1,1,1,1])
+    @test !SDPX._same_symbolic_key(key,SDPX.SessionSymbolicKey(context,signreq,UInt64(7)))
+    @test !SDPX._cache_matches_key(makecache(),SDPX.SessionSymbolicKey(context,signreq,UInt64(7)))
+    @test_throws ArgumentError SDPX.SessionSymbolicKey((provider=:cholmod,),req,UInt64(7))
+
     # Failure after factorization, failed certificate, and explicit fallback
     # all discard. finally releases the slot without masking the primary error.
     l = SDPX.checkout_symbolic!(slot)
