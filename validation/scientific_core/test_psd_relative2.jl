@@ -33,6 +33,12 @@ const tau_off = 10.0 * 2.0 * eps(Float64)
     # b=tau=2^-1074 the correlation is sqrt(2)*tau > tau, and a naively
     # rounded hi could collapse to tau -> refuse, never pass
     @test SE._relative2_offdiag_gate(0.5, 2.0^-1074, 1.0, 2.0^-1074) === :unresolved
+    # boundary exponent regression: e=-1022 with parity mantissa rounding -
+    # a=0.5, c=1.0, b=2^-1023, tau=(1/sqrt2)*2^-1022; the true correlation
+    # 2^-1022/sqrt2 is strictly greater than tau, and a naive hi*1/sqrt2
+    # product rounds down to tau => refuse, never pass
+    @test SE._relative2_offdiag_gate(0.5, 2.0^-1023, 1.0,
+        (1.0/sqrt(2.0))*2.0^-1022) === :unresolved
     # ...while the same short-cut region with a big enough tau passes
     @test SE._relative2_offdiag_gate(1.0, 2.0^-1072, 1.0, tau_off) === :pass
     # tiny correlation -> skip
@@ -183,6 +189,6 @@ end
     resid_rel = Drel * M * Drel - Matrix{Float64}(I, 2, 2)
     println("D0_RESID production=", norm(resid_prod, Inf), " relative=",
         norm(resid_rel, Inf))
-    @test norm(resid_prod, Inf) > 0.1               # ~0.707: destroyed
+    @test norm(resid_prod, Inf) > 0.1               # ~0.707: full relative contraction
     @test norm(resid_rel, Inf) < 1e-12              # relative-route D0
 end

@@ -217,11 +217,13 @@ function _relative2_offdiag_gate(a::T, b::T, c::T, tau::T) where {T}
         # rho <= 2 * 2^e * f <= 2^(e+1) <= 2^log2(tau) = tau proven purely in
         # exponent space, without relying on Float64 exp2 representation
         return :pass
-    elseif e <= -1023
-        # In the subnormal-bound region the Float64 products mb*2^e,
-        # (2mb)*2^e are not outward-rounded (a subnormal product can round
-        # DOWN to tau even when the true rho exceeds tau), so without the
-        # exponent-space pass above we refuse instead of concluding.
+    elseif e <= -1021
+        # For e <= -1021 at least one of the interval endpoints
+        # mb*2^e*f, (2mb)*2^e*f falls below the normal range (min endpoint
+        # 0.5*(1/sqrt2)*2^e ~= 2^(e-1.5) < 2^-1022), where Float64 products
+        # are not outward-rounded and can round DOWN to tau even when the
+        # true rho exceeds tau. Without the exponent-space pass above we
+        # refuse instead of concluding.
         return :unresolved
     end
     twoe = exp2(T(e))
