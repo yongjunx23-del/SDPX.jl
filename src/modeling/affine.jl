@@ -171,16 +171,21 @@ function push_affine!(builder::_AffineBuilder{T}, expression::ScalarAffine{T}) w
     expression.precision_bits == builder.precision_bits || throw(ArgumentError(
         "affine expression precision does not match builder precision",
     ))
+    length(expression.indices) == length(expression.coefficients) ||
+        throw(DimensionMismatch("affine indices and coefficients must have equal length"))
     for position in eachindex(expression.indices)
+        coefficient = _owned_affine_scalar(
+            T, builder.precision_bits, expression.coefficients[position],
+        )
         push!(builder.indices, expression.indices[position])
-        push!(builder.coefficients, expression.coefficients[position])
+        push!(builder.coefficients, coefficient)
     end
     add_constant!(builder, expression.constant)
     return builder
 end
 
-"""Materialize the accumulated expression, moving the buffers into the result
-and sealing the builder (further mutation throws)."""
+"""Materialize an owned expression and seal the builder.
+Mutable scalar storage is copied, including the retained builder constant."""
 function materialize(builder::_AffineBuilder{T}) where {T<:AbstractFloat}
     _check_builder_open(builder)
     indices = builder.indices
@@ -203,7 +208,7 @@ function materialize(builder::_AffineBuilder{T}) where {T<:AbstractFloat}
             end
         elseif !iszero(coefficient)
             push!(out_indices, index)
-            push!(out_coefficients, coefficient)
+            push!(out_coefficients, _owned_affine_scalar(T, builder.precision_bits, coefficient))
         end
     end
     result = ScalarAffine{T}(
@@ -211,7 +216,7 @@ function materialize(builder::_AffineBuilder{T}) where {T<:AbstractFloat}
         builder.precision_bits,
         out_indices,
         out_coefficients,
-        builder.constant,
+        _owned_affine_scalar(T, builder.precision_bits, builder.constant),
     )
     builder.sealed = true
     empty!(builder.indices)
@@ -219,9 +224,9 @@ function materialize(builder::_AffineBuilder{T}) where {T<:AbstractFloat}
     return result
 end
 
-"""Bulk left-fold sum of affine terms into one expression (single sort/merge).
-Matches `foldl(+, terms)` bit-for-bit: terms are accumulated in order and each
-index group's duplicates keep term-encounter order."""
+"""Bulk model-owned, zero-initialized ordered sum (single sort/merge).
+Duplicate coefficients accumulate in encounter order. This is not Julia's
+pairwise `sum`, nor an unseeded `foldl` contract for signed-zero constants."""
 function _affine_sum(model::Model{T}, terms) where {T<:AbstractFloat}
     builder = _affine_builder(model, length(terms))
     for term in terms
