@@ -135,9 +135,11 @@ end
 end
 
 @testset "psd relative2 downstream rounding (recorded, not gated)" begin
-    # D0 = V H^{-1/2} V' : the local spectral advantage is real, but Float64
-    # root assembly at 2^50 scale destroys D0*M*D0 - I. This is the documented
-    # rounding barrier the experiment measures; it is reported, not asserted.
+    # D0 = V H^{-1/2} V' : for the dyadic (power-of-two-representable) data
+    # the reconstructed D0*M*D0 - I is near-exact (7.9e-31); for non-power-of-
+    # two small eigenvalues Float64 root assembly leaves eps-level rounding
+    # (1.1e-16, recorded below). This is the documented barrier; it is
+    # reported, not asserted.
     A = copy(M); V = Matrix{Float64}(I, 2, 2); w = zeros(2)
     SE._relative2_jacobi_eigen!(A, V, w; tau_off)
     Hinv = diagm(1.0 ./ sqrt.(w))
