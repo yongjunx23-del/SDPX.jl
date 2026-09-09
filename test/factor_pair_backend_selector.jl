@@ -182,6 +182,7 @@ end
     @test d.selected_algorithms.planned_kkt_formulation === :dense_factor_pair_lu
     @test d.selected_algorithms.matrix_structure === :general_nonsymmetric
     @test d.selected_algorithms.border_dimension == 2
+    @test d.memory.symmetric_core_actual_provider === :not_applicable
     @test d.termination.factor_pair_execution.refusal_stage === :none
     @test d.termination.factor_pair_execution.accepted_state_available
     @test d.termination.factor_pair_execution.accepted_steps == d.termination.iterations

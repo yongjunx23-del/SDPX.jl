@@ -1364,7 +1364,8 @@ function _native_hsd_diagnostics(
         memory_budget_bytes=plan.memory_budget_bytes,
         symmetric_core_dimension=descriptor isa DenseFactorPairHSD ? 0 : core_dimension,
         symmetric_core_estimate_bytes=descriptor isa DenseFactorPairHSD ? 0 : core_estimate_bytes,
-        symmetric_core_actual_provider=executed_provider_fact,
+        symmetric_core_actual_provider=descriptor isa DenseFactorPairHSD ?
+            :not_applicable : executed_provider_fact,
         symmetric_core_actual_precision=executed_precision_fact,
         symmetric_core_actual_regularization=executed_regularization_fact,
         symmetric_core_actual_factor_epoch=executed_reuse_fact,

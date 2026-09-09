@@ -88,6 +88,13 @@ end
     @test plan.payload.product_rank_reason === :not_computed_factor_pair
     @test !plan.la_config.capability_model.iterative_refinement
     @test !plan.la_config.capability_model.sparse_factorization
+    default_plan = SDPX._native_hsd_plan(program, canonical, reduction,
+        SDPX.NativeConeRoute(:bordered), SDPX.Settings(Float64))
+    @test default_plan.payload.formulation isa SDPX.SymmetricAugmentedHSD
+    @test default_plan.kkt_formulation === :symmetric_augmented_hsd_core
+    @test default_plan.la_config.provider === :cholmod
+    @test default_plan.storage_plan.storage === :sparse
+    @test default_plan.payload.kkt_route === :bordered
     for receipt in (r, singular)
         d = SDPX._native_hsd_diagnostics(plan, reduction, SDPX.NumericalFailure,
             receipt.refusal_reason, receipt.iterations, receipt.factorizations,
@@ -105,6 +112,10 @@ end
         @test s.structure.planned_core_dimension == 17
         @test s.matrix_structure === :general_nonsymmetric
         @test s.border_dimension == 2
+        @test d.rank.rank === nothing
+        @test d.rank.reason === :not_computed_factor_pair
+        @test d.rank.basis === :not_applicable
+        @test d.memory.symmetric_core_actual_provider === :not_applicable
     end
 
     ledger = FA.FactorizationLedger()
