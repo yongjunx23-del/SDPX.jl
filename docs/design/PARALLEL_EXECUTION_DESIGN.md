@@ -154,6 +154,14 @@ hypotheses. Ranked changes from the review:
 | 2 | **Exclusive phase timing + truthful receipts** (`performance_trace.jl:158-205`, `phase_timings.jl:39-51`, Q3 factor body `:1385-1407`) | No direct speedup; stops optimizing the wrong component | Instrumentation overhead; keep inclusive `direction_seconds`, add exclusive children/remainder |
 | 3 | **One budgeted coarse-range executor** for Q3 + provider (`product_cone_hsd.jl:234,258-267,546-548`; `fixed_trace_q3.jl:949-950`) | Enforces limits, removes atomic claiming, composable scheduling | Nested oversubscription, migrated-task scratch, cancellation; test admitted budgets inside larger pools |
 | 4 | **Make the existing HKM SIMD usable for equality-prefixed layouts** (`ext/SDPXMultiFloatLinearAlgebraExt.jl:1425-1433,1475-1487`) | Accelerates a currently scalar fallback; benefits T1 as well as threaded runs | Gather actual offsets, preserve per-lane arithmetic, count real SIMD batches |
+
+**Implemented (2026-09-09, merged `15c281f`):** the vec4 metric is now
+offset-aware; bit-identical to the scalar kernel on equality-first offsets.
+Measured kernel gain **2.75×** (0.0044 s → 0.0016 s per 4200-block pass). The
+metric is only ~4% of the α3 factor bucket (4.4 ms vs 117 ms per iteration), so
+the bounded solver-level impact is ~0.7% — correct and positive, but not the
+main lever. The fix also exposed a latent bug in the never-executed path
+(`all(isfinite, ::Vec4)` has no method), now fixed with a lane-wise check.
 | 5 | **Fuse narrowly adjacent residual operations** (`fixed_trace_q3.jl:1070-1092,1106-1115,1150-1158`) | Removes barriers/dispatch/writes; residual is 7% of T1, so the bound is ~1.076× | Free variables, generic-layout fallback, aliases; verify all paths and fixed-worker parity |
 
 **First change to implement:** persistent warmed one-thread process workers (not
