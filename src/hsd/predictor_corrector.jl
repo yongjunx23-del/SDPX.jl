@@ -972,6 +972,17 @@ function _product_hsd_symmetric_core_direction!(
     )
     timings.kkt_factorization_seconds +=
         Float64(time_ns() - t0) * 1.0e-9
+    if core isa FixedTraceQ3CoreWorkspace
+        # Exclusive Q3 sub-buckets (children of kkt_factorization_seconds),
+        # accumulated in the workspace across epochs.  Assign cumulative
+        # values and keep the widest effective worker count seen.
+        q3 = core.epoch_timing
+        timings.q3_metric_seconds = q3.metric_seconds
+        timings.q3_factor_seconds = q3.factor_seconds
+        timings.q3_homogeneous_seconds = q3.homogeneous_seconds
+        timings.q3_epochs = q3.epochs
+        timings.q3_workers = max(timings.q3_workers, q3.workers)
+    end
     t0 = time_ns()
     refinement_wall0 = timings.refinement_seconds
     predictor_candidate, predictor_residual, _ = fixed_trace ?

@@ -831,6 +831,21 @@ end
 # with the ordinary symmetric core.
 # ---------------------------------------------------------------------------
 
+# Exclusive sub-phase timing for one fixed-trace Q3 factor epoch.  Written by
+# `factor_symmetric_core_epoch!` and accumulated by the HSD loop so the
+# inclusive `kkt_factorization_seconds` bucket can be split into metric
+# preparation, numeric factorization and the homogeneous solve.  `workers`
+# records the effective worker count used by the Q3 loops (currently the
+# Julia pool; a budget enforcement change makes it the admitted budget).
+mutable struct Q3EpochTimings
+    metric_seconds::Float64
+    factor_seconds::Float64
+    homogeneous_seconds::Float64
+    workers::Int
+    epochs::Int
+end
+Q3EpochTimings() = Q3EpochTimings(0.0, 0.0, 0.0, 0, 0)
+
 mutable struct FixedTraceQ3CoreWorkspace{T,S,C,E,P}
     plan::P
     equality::E
@@ -874,6 +889,7 @@ mutable struct FixedTraceQ3CoreWorkspace{T,S,C,E,P}
     receipt_build_count::Int
     panel_action::Vector{T}       # scratch for structured A*v (equality rows)
     structured_A::Bool            # zero rows precede every soc block row
+    epoch_timing::Q3EpochTimings  # exclusive sub-phase timing, zero-allocation
 end
 
 function fixed_trace_q3_core_prepare_bytes(::Type{T}, plan) where {T<:AbstractFloat}
@@ -977,6 +993,7 @@ function prepare_fixed_trace_q3_core_state(
         nothing, 0,
         alloc_zeros(T, length(plan.zero_rows)),
         _fixed_trace_structured_A_eligible(T, plan),
+        Q3EpochTimings(),
     )
 end
 
@@ -1382,12 +1399,19 @@ function factor_symmetric_core_epoch!(
     workspace.linearization_epoch == Int(matrix_epoch) || throw(ArgumentError(
         "fixed-trace HKM linearization epoch is stale",
     ))
+    epoch_timing = workspace.epoch_timing
+    epoch_timing.workers = Threads.nthreads()
+    epoch_timing.epochs += 1
+    t0 = time_ns()
     _fixed_trace_core_prepare_metric!(workspace, system)
+    epoch_timing.metric_seconds += Float64(time_ns() - t0) * 1.0e-9
     nfree = length(workspace.equality.free_ids)
+    t0 = time_ns()
     factorize!(workspace.cache,
                nfree == 0 ? workspace.equality.schur :
                             workspace.equality.bordered,
                Int(matrix_epoch))
+    epoch_timing.factor_seconds += Float64(time_ns() - t0) * 1.0e-9
     workspace.matrix_epoch = Int(matrix_epoch)
     workspace.factor_epoch = factor_epoch(workspace.cache)
     workspace.system = system
@@ -1404,7 +1428,9 @@ function factor_symmetric_core_epoch!(
         zero(T), false, 0, 0,
     )
     workspace.receipt_build_count += 1
+    t0 = time_ns()
     solve_core_homogeneous!(workspace, system)
+    epoch_timing.homogeneous_seconds += Float64(time_ns() - t0) * 1.0e-9
     return workspace
 end
 

@@ -50,6 +50,13 @@ Base.@kwdef mutable struct ProductHSDPhaseTimings
     accepted_update_seconds::Float64 = 0.0
     certification_seconds::Float64 = 0.0
     refinement_iterations::Int = 0
+    # Exclusive fixed-trace Q3 sub-buckets (children of
+    # `kkt_factorization_seconds`; add them, do not add both parent and child).
+    q3_metric_seconds::Float64 = 0.0
+    q3_factor_seconds::Float64 = 0.0
+    q3_homogeneous_seconds::Float64 = 0.0
+    q3_epochs::Int = 0
+    q3_workers::Int = 0
 end
 
 """Reset every phase accumulator to zero (used at solve start)."""
@@ -67,6 +74,11 @@ function reset_phase_timings!(timings::ProductHSDPhaseTimings)
     timings.accepted_update_seconds = 0.0
     timings.certification_seconds = 0.0
     timings.refinement_iterations = 0
+    timings.q3_metric_seconds = 0.0
+    timings.q3_factor_seconds = 0.0
+    timings.q3_homogeneous_seconds = 0.0
+    timings.q3_epochs = 0
+    timings.q3_workers = 0
     return timings
 end
 
@@ -86,5 +98,10 @@ function phase_timings_snapshot(timings::ProductHSDPhaseTimings)
         accepted_update_seconds=timings.accepted_update_seconds,
         certification_seconds=timings.certification_seconds,
         refinement_iterations=timings.refinement_iterations,
+        q3_metric_seconds=timings.q3_metric_seconds,
+        q3_factor_seconds=timings.q3_factor_seconds,
+        q3_homogeneous_seconds=timings.q3_homogeneous_seconds,
+        q3_epochs=timings.q3_epochs,
+        q3_workers=timings.q3_workers,
     )
 end
