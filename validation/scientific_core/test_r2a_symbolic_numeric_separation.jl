@@ -393,16 +393,16 @@ end
     # Precision change is invalidation-by-construction: the fingerprint
     # mixes the arithmetic type, and a Float64 session cannot consume a
     # BigFloat problem (method-level type separation, no silent reuse).
-    c_big = BigFloat.(_C0)
-    @test SDPX.structure_fingerprint(
-        _r2a_problem(),
-        SDPX.SolverOptions{BigFloat}(; verbosity=0, timing=false, threads=1),
-    ) != fp_auto
-    prepared = SDPX.prepare(problem, _r2a_options())
     big_problem = SDPX.linear_program(
-        c_big, BigFloat.(_G0), BigFloat.(_H0);
+        BigFloat.(_C0), BigFloat.(_G0), BigFloat.(_H0);
         Aeq=BigFloat.(_AEQ0), beq=BigFloat.(_BEQ0),
     )
+    fp_big = SDPX.structure_fingerprint(
+        big_problem,
+        SDPX.SolverOptions{BigFloat}(; verbosity=0, timing=false, threads=1),
+    )
+    @test fp_big != fp_auto
+    prepared = SDPX.prepare(problem, _r2a_options())
     @test_throws MethodError SDPX.solve!(prepared, big_problem)
 
     println("R2-A-invalidation: threads/provider/precision all change the",
