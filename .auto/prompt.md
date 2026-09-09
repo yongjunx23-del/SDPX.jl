@@ -42,3 +42,12 @@ numerical drift fails the run. Secondary: Float64 LP/SOCP general catalog.
 
 ## What's Been Tried
 - (baseline session start)
+
+## Known platform divergence (from CI diagnosis 2026-09-10)
+- bordered compact-Schur LP (12 rows, full=14, compact=3) breaks down at
+  iteration 6 with :direction_breakdown on x86 (CI ubuntu/windows, Julia 1.10
+  and 1.x) while ARM macOS passes. mu=9.6e-6, tau=0.104, kappa=1.8e-4.
+- power_epigraph_small E2E: x86 reaches certified optimum, ARM breaks down.
+  Both are FP-arithmetic divergence in direction construction / residual
+  acceptance gates. Fixing these robustness gaps IS part of the optimization
+  goal (a solver that breaks down is not high-performance).
