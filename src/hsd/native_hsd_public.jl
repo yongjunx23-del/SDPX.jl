@@ -1438,10 +1438,9 @@ function _factor_pair_public_core(
         "post-reduction cone layout is not the admitted contiguous orthant + half-Power shape",
     ))
     A, b, c = FactorPairHSD.canonical_problem(reduced)
-    # Simultaneous-live admission: the estimate is a conservative subtotal of
-    # the admitted scope (problem + point + pair factors + two epochs + LU +
-    # verifier scratch + recovery vectors).  It is enforced against a declared
-    # ceiling, so an admitted solve can never exceed the experimental budget.
+    # Experimental estimate gate only. The subtotal is incomplete; checking
+    # it against this threshold does NOT bound actual simultaneous-live memory.
+    # Full peak-memory qualification remains open (R0-P4 / R3-D).
     live_estimate = FactorPairHSD.estimate_live_bytes(A, b, c, layout, 2)
     live_estimate <= FACTOR_PAIR_MAX_LIVE_BYTES || throw(UnsupportedBackendError(
         :admission, :memory, settings.nonsymmetric_backend,

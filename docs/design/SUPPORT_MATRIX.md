@@ -32,7 +32,7 @@ research design).
 
 | Route | Selector | Scope | Status |
 |---|---|---|---|
-| Half-Power factor-pair HSD | `nonsymmetric_backend=ExperimentalHalfPowerFactorPairBackend` | Float64, orthant + exactly half-Power blocks (>=1), contiguous layout, `kkt_route=:bordered`, `provider=:auto`, `formulation=:auto`, `sparse=:auto`, no equilibration, threads=1, classic knobs | **qualified within scope**: public `optimize!` → `:optimal`, `certificate.valid=true`, obj err `1.48e-9` on `power_epigraph_small`; typed refusals for every excluded shape; 64 MiB live ceiling; ordinary original-coordinate certificate authority |
+| Half-Power factor-pair HSD | `nonsymmetric_backend=ExperimentalHalfPowerFactorPairBackend` | Float64, orthant + exactly half-Power blocks (>=1), contiguous layout, `kkt_route=:bordered`, `provider=:auto`, `formulation=:auto`, `sparse=:auto`, no equilibration, threads=1, classic knobs | **experimental; qualification incomplete**: public `optimize!` → `:optimal`, `certificate.valid=true`, obj err `1.48e-9` on `power_epigraph_small`; tested excluded shapes refuse typed; a 64 MiB estimate threshold is enforced, but the estimate is incomplete and does not bound actual peak memory; ordinary original-coordinate certificate authority |
 | PSD relative-2 spectral route | `PSDNTScaling(; eigen_route=:experimental_relative2)` | Float64, n=2, explicit only | research; dyadic residual `7.9e-31` vs production `0.707`; no fallback |
 | Experimental sparse core | route-specific opt-in | research only | memory bound incomplete (R3-D); not a public sparse claim |
 | Compensated Exp evaluator | none (validation-only) | frozen records | research: 6/6 records, log radii ~1e-33; **no production dispatch change** |
