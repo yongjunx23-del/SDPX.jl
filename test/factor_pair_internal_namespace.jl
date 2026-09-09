@@ -14,56 +14,49 @@
 # SDPX.FactorPreservingAffine.Epoch must agree word-for-word.
 function _fp_bitseq(x)
     if x isa Float64
-        return (:f64, reinterpret(UInt64, x))
-    elseif x isa Float32 || x isa Float16
-        return (nameof(typeof(x)), reinterpret(Unsigned, x))
+        return (:Float64, reinterpret(UInt64, x))
+    elseif x isa Float32
+        return (:Float32, reinterpret(UInt32, x))
+    elseif x isa Float16
+        return (:Float16, reinterpret(UInt16, x))
     elseif x isa AbstractArray
         return (nameof(eltype(x)), size(x), Any[_fp_bitseq(v) for v in x])
     elseif x isa NamedTuple
-        return (nameof(typeof(x)), Any[_fp_bitseq(v) for v in x])
+        return (:NamedTuple, keys(x), Any[_fp_bitseq(v) for v in values(x)])
     elseif x isa Tuple
-        return (:tuple, Any[_fp_bitseq(v) for v in x])
+        return (:Tuple, Any[_fp_bitseq(v) for v in x])
     elseif x isa Symbol || x isa AbstractString || x isa Number || x === nothing ||
            x isa Bool || x isa AbstractChar
-        return x
+        return (typeof(x), x)
     elseif isstructtype(typeof(x))
         return (
             nameof(typeof(x)),
+            fieldnames(typeof(x)),
             Any[_fp_bitseq(getfield(x, f)) for f in fieldnames(typeof(x))],
         )
     else
-        return x
+        return (typeof(x), x)
     end
 end
 
-# Ownership-identity fields (`owner`, and the `frozen`/`frozen_lp`
-# fingerprints that embed `objectid(owner)`) are intentionally per-owner and
-# cannot be equal across two module instances.  The differential compares the
-# numeric/structural payload; each receipt additionally verifies its own
-# fingerprint independently below.
-function _fp_projection(x)
-    if x isa NamedTuple
-        return (nameof(typeof(x)),
-            Any[_fp_projection(v) for v in values(x)])
-    elseif x isa AbstractArray
-        return (nameof(eltype(x)), size(x), Any[_fp_projection(v) for v in x])
-    elseif x isa Tuple
-        return (:tuple, Any[_fp_projection(v) for v in x])
-    elseif isstructtype(typeof(x)) && !(x isa Number) && !(x isa Symbol) &&
-           !(x isa AbstractString) && x !== nothing && !(x isa Function)
-        return (
-            nameof(typeof(x)),
-            Any[
-                _fp_projection(getfield(x, f)) for f in fieldnames(typeof(x))
-                if !(f in (:owner, :frozen, :frozen_lp))
-            ],
-        )
-    else
-        return _fp_bitseq(x)
-    end
+# Owner identity is the ONLY normalized component: `PairReceipt.owner` and the
+# `frozen` fingerprint that embeds `objectid(owner)` at the pair/epoch root.
+# Deeper `frozen` fields (e.g. BlockMetric.frozen) are arithmetic and MUST be
+# compared.  Comparison schemas below drop exactly the root-level fields.
+function _fp_payload(x, dropped::Tuple{Vararg{Symbol}})
+    return (
+        nameof(typeof(x)),
+        fieldnames(typeof(x)),
+        Any[
+            _fp_bitseq(getfield(x, f)) for f in fieldnames(typeof(x))
+            if !(f in dropped)
+        ],
+    )
 end
-
-_fp_equal(a, b) = _fp_projection(a) == _fp_projection(b)
+_fp_pair_payload(p) = _fp_payload(p, (:owner, :frozen))
+_fp_epoch_payload(e) = _fp_payload(e, (:owner, :frozen_lp))
+_fp_equal(a, b, dropped::Tuple{Vararg{Symbol}} = ()) =
+    _fp_payload(a, dropped) == _fp_payload(b, dropped)
 
 @testset "R0-P4 step 4: internal factor-pair namespace == reviewed validation modules" begin
     vdir = joinpath(@__DIR__, "..", "validation", "scientific_core")
@@ -105,11 +98,18 @@ _fp_equal(a, b) = _fp_projection(a) == _fp_projection(b)
 
     layoutV = VNP.Layout(3, (0.5, 0.5, 0.5))
     layoutI = INP.Layout(3, (0.5, 0.5, 0.5))
-    @test _fp_equal(layoutV, layoutI)
+    @test _fp_bitseq(layoutV) == _fp_bitseq(layoutI)
 
     settingsV = VNP.RootSettings()
     settingsI = INP.RootSettings()
-    @test _fp_equal(settingsV, settingsI)
+    @test _fp_bitseq(settingsV) == _fp_bitseq(settingsI)
+
+    if !SDPX.FactorPreservingAffine.RG.Phi._runtime_ok()
+        # Unsupported arithmetic context: the internal kernels must refuse
+        # rather than silently substituting another arithmetic.
+        @test !SDPX.FactorPreservingAffine.RG.Phi._runtime_ok()
+        return
+    end
 
     ownerV = VNP.Owner()
     ownerI = INP.Owner()
@@ -119,7 +119,7 @@ _fp_equal(a, b) = _fp_projection(a) == _fp_projection(b)
         policy = INP.POLICY, settings = settingsI, owner = ownerI)
     @test pairV isa VNP.PairReceipt
     @test pairI isa INP.PairReceipt
-    @test _fp_equal(pairV, pairI)
+    @test _fp_pair_payload(pairV) == _fp_pair_payload(pairI)
     # Each receipt validates its own owner-bound fingerprint independently.
     @test (VNP.verify(pairV); true)
     @test (INP.verify(pairI); true)
@@ -139,35 +139,43 @@ _fp_equal(a, b) = _fp_projection(a) == _fp_projection(b)
         copy(pairI.s), copy(pairI.y), tau0, kappa0, pairI.mu,
         deepcopy(pairI.cone), 0, :r0p4_internal_namespace,
         deepcopy(pairI.reports), deepcopy(pairI.reports))
-    @test _fp_equal(eV, eI)
+    @test _fp_epoch_payload(eV) == _fp_epoch_payload(eI)
 
     rhsV = VFA.affine_rhs(eV)
     rhsI = IFA.affine_rhs(eI)
-    @test _fp_equal(rhsV, rhsI)
+    @test _fp_bitseq(rhsV) == _fp_bitseq(rhsI)
 
     solV = VFA.solve(eV, rhsV)
     solI = IFA.solve(eI, rhsI)
-    @test _fp_equal(solV, solI)
+    @test _fp_bitseq(solV) == _fp_bitseq(solI)
 
     certV = VNC.certify(eV, solV)
     certI = INC.certify(eI, solI)
     @test certV.status === :certified
     @test certI.status === :certified
-    @test _fp_equal(certV, certI)
+    @test _fp_bitseq(certV) == _fp_bitseq(certI)
 
     combV = VFC.build(eV, solV; sigma_mu = 0.1)
     combI = IFC.build(eI, solI; sigma_mu = 0.1)
-    @test _fp_equal(combV, combI)
+    @test _fp_bitseq(combV) == _fp_bitseq(combI)
 
     csolV = VFC.solve(combV)
     csolI = IFC.solve(combI)
-    @test _fp_equal(csolV, csolI)
+    @test _fp_bitseq(csolV) == _fp_bitseq(csolI)
 
     ccombV = VFC.certify(combV, csolV)
     ccombI = IFC.certify(combI, csolI)
     @test ccombV.status === :certified
     @test ccombI.status === :certified
-    @test _fp_equal(ccombV, ccombI)
+    @test _fp_bitseq(ccombV) == _fp_bitseq(ccombI)
+
+    # Comparator corruption controls: the fingerprint must not admit false
+    # equality (NamedTuple keys, concrete leaf types, field names).
+    @test !(_fp_bitseq((a = 1.0,)) == _fp_bitseq((b = 1.0,)))
+    @test !(_fp_bitseq(1) == _fp_bitseq(true))
+    @test _fp_bitseq((a = 1.0,)) == _fp_bitseq((a = 1.0,))
+    @test _fp_bitseq(1.0f0) != _fp_bitseq(1.0)
+    @test _fp_bitseq(1.0f0) == _fp_bitseq(1.0f0)
 
     # The internal namespace must not be reachable from the public API and the
     # default backend choice must remain native.

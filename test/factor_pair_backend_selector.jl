@@ -61,6 +61,11 @@ end
     d = SDPX.factor_pair_admission(SDPX.Settings(Float64;
         nonsymmetric_backend=experimental, provider=:bfla))
     @test !d.admitted && d.reason === :provider
+    # The design requires automatic provider selection; explicit :standard is
+    # rejected too (it is not the same as :auto).
+    d = SDPX.factor_pair_admission(SDPX.Settings(Float64;
+        nonsymmetric_backend=experimental, provider=:standard))
+    @test !d.admitted && d.reason === :provider
 
     d = SDPX.factor_pair_admission(SDPX.Settings(Float64;
         nonsymmetric_backend=experimental, formulation=:dense_augmented_kkt))
@@ -85,8 +90,9 @@ end
             predictor=:sdpb)))
     @test !d.admitted && d.reason === :iteration_policy
 
-    # Cone composition is the post-reduction admission fact.
-    @test SDPX.factor_pair_cones_admitted((:zero, :nonnegative, :power))
+    # Cone composition is the post-reduction admission fact.  `:zero` is
+    # excluded: the factor state has no ZeroCone representation.
+    @test !SDPX.factor_pair_cones_admitted((:zero, :nonnegative, :power))
     @test SDPX.factor_pair_cones_admitted((:nonnegative, :power))
     @test !SDPX.factor_pair_cones_admitted((:nonnegative, :power, :exp))
     @test !SDPX.factor_pair_cones_admitted((:nonnegative, :soc))

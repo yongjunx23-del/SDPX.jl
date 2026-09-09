@@ -4,10 +4,14 @@
 # validation/scientific_core/power_runtime/run_benchmark_power_loop.jl
 # (orthant rows 1:3 + three power blocks; A = sparse([1,4,2,7,3,10],[1,1,2,2,3,3],-1,12,3),
 # b[3i+2]=1, b[3i+3]=a_i, layout=Layout(3,(0.5,0.5,0.5))).  The expected
-# terminal quantities are the recorded certified-loop results (27 accepted
-# steps).  This test asserts the adapter reproduces them through `NP.epoch`
-# admission, typed refusals, next-epoch readiness and the ordinary terminal
-# audit -- no dense metric, no fallback, no tolerance change.
+# terminal quantities are recorded from this adapter (23 accepted steps).  The
+# predictor boundary is a deliberately stabilized (algebraically equivalent,
+# numerically different) implementation of the reviewed policy: the source
+# quadratic formula loses its small root under cancellation, so the internal
+# adapter adds a cancellation-safe positive root and explicit primal/dual
+# coordinate positivity.  The validation modules keep the source-faithful
+# formula; the namespace differential test still proves the ported arithmetic is
+# bit-identical.
 
 @testset "R0-P4 factor-pair HSD adapter: canonical power terminal" begin
     FPH = SDPX.FactorPairHSD
@@ -22,6 +26,13 @@
     c = ones(3)
     layout = SDPX.NativeHalfPair.Layout(3, (0.5, 0.5, 0.5))
 
+    if !SDPX.FactorPreservingAffine.RG.Phi._runtime_ok()
+        # Unsupported arithmetic context: the reviewed kernels must refuse the
+        # cold point (truthful behavior), never silently substitute arithmetic.
+        @test_throws FPH.FactorPairNumericalRefusal FPH.cold_start(A, b, c,
+            layout; settings = SDPX.NativeHalfPair.RootSettings(), target = 1.0e-8)
+        return
+    end
     st = FPH.cold_start(A, b, c, layout;
         settings = SDPX.NativeHalfPair.RootSettings(), target = 1.0e-8)
     @test st.iterations == 0
@@ -31,7 +42,7 @@
 
     terminal = FPH.solve!(st; max_iterations = 80)
     @test terminal.status === :certified_terminal
-    @test terminal.iterations == 27
+    @test terminal.iterations == 23
     aud = terminal.audit
     @test aud.cert_ok
     @test aud.membership
@@ -40,30 +51,41 @@
     @test aud.obj_gap <= st.cert_tol * aud.gap_scale
     @test aud.mu_norm <= st.cert_tol * (1.0 + 12.0)
     @test aud.kappa_tau <= st.cert_tol * aud.gap_scale
-    @test aud.obj ≈ 1.1242390972345995 rtol = 0.0 atol = 1.0e-12
-    exact_obj = sum(big(0.0) + big(v)^2 for v in a)
+    @test aud.obj ≈ 1.124239097167378 rtol = 0.0 atol = 1.0e-12
+    # Exact dyadic-rational reference of the stored Float64 inputs (not an
+    # ambient-precision big() square).
+    exact_obj = sum(Rational{BigInt}(v)^2 for v in a)
     @test abs(aud.obj - Float64(exact_obj)) <= 1.0e-8
     # Recorded certified-loop terminal quantities (R0-P3 closure-5).  The
     # reported merit 2.8017973855476926e-9 is the audit residual on recovered
     # original-scale coordinates (`aud.m`), which is the invariant quantity;
     # the raw homogeneous trial merit is <= the 1e-8 arithmetic target.
-    @test aud.m ≈ 2.8017973855476926e-9 rtol = 1.0e-6
-    @test aud.homo_gap ≈ 2.8017973855476926e-9 rtol = 1.0e-6
-    @test aud.obj_gap ≈ 2.243317531736011e-9 rtol = 1.0e-4
-    @test aud.mu_norm ≈ 5.588893961926076e-10 rtol = 1.0e-4
-    @test aud.norm_resid ≈ 7.004493463869232e-10 rtol = 1.0e-4
-    @test aud.kappa_tau ≈ 5.584798538116816e-10 rtol = 1.0e-4
-    @test aud.sNy ≈ 6.707082406966896e-9 rtol = 1.0e-4
+    @test aud.m ≈ 2.9174020235019777e-9 rtol = 1.0e-6
+    @test aud.homo_gap ≈ 2.9174020235019777e-9 rtol = 1.0e-6
+    @test aud.obj_gap ≈ 2.3358788237004546e-9 rtol = 1.0e-4
+    @test aud.mu_norm ≈ 5.81949619632288e-10 rtol = 1.0e-4
+    @test aud.norm_resid ≈ 7.293505058754944e-10 rtol = 1.0e-4
+    @test aud.kappa_tau ≈ 5.815231998015231e-10 rtol = 1.0e-4
+    @test aud.sNy ≈ 6.98382190908772e-9 rtol = 1.0e-4
     # Every committed step carries the unchanged progress gate.
-    @test length(terminal.history) == 27
+    @test length(terminal.history) == 23
     @test all(h -> isfinite(h.alpha) && h.alpha > 0.0, terminal.history)
     @test any(h -> h.alpha >= FPH.PROG_FLOOR, terminal.history)
-    @test last(terminal.history).generation == 27
+    @test last(terminal.history).generation == 23
+
+    # Boundary qualification (independent review counterexample): the source
+    # quadratic formula returned Inf for a finite exit; the stabilized
+    # positive root plus explicit coordinate positivity must not.
+    @test FPH._min_positive_root(1.0, -1.0e16, 1.0) <= 1.0e-16
+    @test FPH._power_boundary(1.0, 1.0, 0.0, -1.0e16, -1.0e-16, 0.0) <= 1.0e-16
+    @test isfinite(FPH._dual_power_boundary(1.0, 1.0, 0.0, -1.0e16, -1.0e-16, 0.0))
+    @test FPH._power_boundary(1.0, 1.0, 0.0, -1.0, -1.0, 0.0) ≈ 1.0 rtol = 1.0e-12  # (1-alpha)^2
 
     # Typed refusal, not a silent fallback: an out-of-domain epoch input.
     bad = FPH.FactorPairState(st.A, st.b, st.c, st.layout, st.settings,
         st.owner, st.pair, st.x, 0.0, st.kappa, st.rP, st.rD, st.rG, 0,
-        SDPX.FactorPairHSD.AcceptedFactorPairStep[], st.target, st.cert_tol, 0)
+        SDPX.FactorPairHSD.AcceptedFactorPairStep[], st.target, st.cert_tol, 0,
+        nothing, 0, nothing)
     err = try
         FPH.step!(bad)
         nothing

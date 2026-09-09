@@ -2254,6 +2254,7 @@ function _native_hsd_route_settings(settings::Settings{T}, route::Symbol) where 
         certification=settings.certification,
         blas_threads=settings.blas_threads,
         iteration_knobs=settings.iteration_knobs,
+        nonsymmetric_backend=settings.nonsymmetric_backend,
     )
 end
 
@@ -2402,6 +2403,10 @@ function _public_optimize_native_hsd(
     outputs::Outputs,
     warm_start,
 ) where {T<:AbstractFloat}
+    # R0-P4 typed admission runs before the legacy policy validation so an
+    # explicit experimental request receives UnsupportedBackendError rather
+    # than a legacy PublicOptimizeError.
+    enforce_factor_pair_admission!(settings)
     _public_validate_native_hsd_policy(
         model,
         program,

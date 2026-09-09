@@ -80,55 +80,48 @@ mutable struct FactorPairState
     target::Float64
     cert_tol::Float64
     source_record::Int
+    # Prepared + admitted next epoch from the last commit, reused exactly once
+    # by the following step (avoids a second factorization of identical data).
+    # The generation/pair identities guard against stale reuse.
+    pending_epoch::Any
+    pending_generation::Int
+    pending_pair::Any
 end
 
 # ---------------------------------------------------------------- boundaries
-function _power_boundary(x, y, z, dx, dy, dz)
-    c0 = x * y - z * z
-    b = dy * x + dx * y - 2.0 * z * dz
-    c2 = dx * dy - dz * dz
-    if c2 > 0.0
-        disc = b * b - 4.0 * c2 * c0
-        disc < 0.0 && return Inf
-        r = (-b - sqrt(disc)) / (2.0 * c2)
-        return (r > 0.0 && isfinite(r)) ? r : Inf
-    elseif c2 == 0.0
+# Cancellation-safe positive-root evaluation.  The naive quadratic formula
+# loses its small root when |b| >> |c0|,|c2| (independent counterexample:
+# (x,y,z,dx,dy,dz) = (1,1,0,-1e16,-1e-16,0) returns Inf although coordinate
+# positivity limits alpha to 1e-16).  This is an algebraically equivalent but
+# numerically different implementation of the reviewed boundary policy; it is
+# not claimed to be bit-identical to the source predictor.
+function _min_positive_root(c0, b, c2)
+    if c2 == 0.0
         return (b < 0.0 && c0 > 0.0) ? max(0.0, -c0 / b) : Inf
-    else
-        disc = b * b - 4.0 * c2 * c0
-        disc < 0.0 && return Inf
-        r1 = (-b - sqrt(disc)) / (2.0 * c2)
-        r2 = (-b + sqrt(disc)) / (2.0 * c2)
-        best = Inf
-        for r in (r1, r2)
-            r > 0.0 && r < best && (best = r)
-        end
-        return best
     end
+    disc = b * b - 4.0 * c2 * c0
+    (isfinite(disc) && disc >= 0.0) || return Inf
+    root = sqrt(disc)
+    q = -0.5 * (b + copysign(root, b))
+    best = Inf
+    if q != 0.0 && isfinite(q)
+        for r in (q / c2, c0 / q)
+            (isfinite(r) && r > 0.0) && (best = min(best, r))
+        end
+    end
+    return best
+end
+
+function _power_boundary(x, y, z, dx, dy, dz)
+    # primal POW3^{1/2}: x*y - z^2 > 0 along the ray
+    return _min_positive_root(x * y - z * z, dy * x + dx * y - 2.0 * z * dz,
+        dx * dy - dz * dz)
 end
 
 function _dual_power_boundary(u, v, w, du, dv, dw)
-    c0 = 4.0 * u * v - w * w
-    b = 4.0 * (dv * u + du * v) - 2.0 * w * dw
-    c2 = 4.0 * du * dv - dw * dw
-    if c2 > 0.0
-        disc = b * b - 4.0 * c2 * c0
-        disc < 0.0 && return Inf
-        r = (-b - sqrt(disc)) / (2.0 * c2)
-        return (r > 0.0 && isfinite(r)) ? r : Inf
-    elseif c2 == 0.0
-        return (b < 0.0 && c0 > 0.0) ? max(0.0, -c0 / b) : Inf
-    else
-        disc = b * b - 4.0 * c2 * c0
-        disc < 0.0 && return Inf
-        r1 = (-b - sqrt(disc)) / (2.0 * c2)
-        r2 = (-b + sqrt(disc)) / (2.0 * c2)
-        best = Inf
-        for r in (r1, r2)
-            r > 0.0 && r < best && (best = r)
-        end
-        return best
-    end
+    # dual of POW3^{1/2}: 4uv - w^2 > 0 along the ray
+    return _min_positive_root(4.0 * u * v - w * w,
+        4.0 * (dv * u + du * v) - 2.0 * w * dw, 4.0 * du * dv - dw * dw)
 end
 
 function boundary_alpha(pair, s, ds, y, dy, tau, dtau, kappa, dkappa)
@@ -139,6 +132,13 @@ function boundary_alpha(pair, s, ds, y, dy, tau, dtau, kappa, dkappa)
     end
     for block in pair.cone.blocks
         rows = block.offset:block.offset + 2
+        # Explicit primal/dual coordinate positivity: the power and dual-power
+        # cones imply x,y >= 0 and u,v >= 0, so these are valid bounds that do
+        # not depend on the quadratic root conditioning.
+        for (value, delta) in ((s[rows[1]], ds[rows[1]]), (s[rows[2]], ds[rows[2]]),
+                               (y[rows[1]], dy[rows[1]]), (y[rows[2]], dy[rows[2]]))
+            delta < 0.0 && (best = min(best, -value / delta))
+        end
         best = min(best, _power_boundary(s[rows]..., ds[rows]...))
         best = min(best, _dual_power_boundary(y[rows]..., dy[rows]...))
     end
@@ -285,6 +285,10 @@ function cold_start(A::SparseMatrixCSC{Float64,Int}, b::Vector{Float64},
         throw(ArgumentError("factor-pair cold start shape mismatch"))
     isfinite(target) && target > 0.0 || throw(ArgumentError("target must be positive"))
     isfinite(cert_tol) && cert_tol > 0.0 || throw(ArgumentError("cert_tol must be positive"))
+    # Own every input word: the state must never retain caller aliases.
+    A = copy(A)
+    b = copy(b)
+    c = copy(c)
     s = ones(Float64, m)
     y = ones(Float64, m)
     for blk in 0:(length(layout.alphas) - 1)
@@ -307,7 +311,8 @@ function cold_start(A::SparseMatrixCSC{Float64,Int}, b::Vector{Float64},
     e = _admitted_epoch(pair, A, b, c, x, tau, kappa, 0)
     rP, rD, rG = current_residuals(e, x, s, y, tau, kappa)
     return FactorPairState(A, b, c, layout, settings, owner, pair, x, tau,
-        kappa, rP, rD, rG, 0, AcceptedFactorPairStep[], target, cert_tol, 0)
+        kappa, rP, rD, rG, 0, AcceptedFactorPairStep[], target, cert_tol, 0,
+        e, 0, pair)
 end
 
 # ---------------------------------------------------------------- one step
@@ -320,8 +325,16 @@ the fixed backtracking budget keeps the old anchor and continues backtracking.
 Throws `FactorPairNumericalRefusal` when the step cannot be completed.
 """
 function step!(st::FactorPairState; sigma_override = nothing)
-    e = _admitted_epoch(st.pair, st.A, st.b, st.c, st.x, st.tau, st.kappa,
-        st.source_record + st.iterations)
+    e = if st.pending_epoch !== nothing &&
+           st.pending_generation == st.owner.generation &&
+           st.pending_pair === st.pair
+        pending = st.pending_epoch
+        st.pending_epoch = nothing
+        pending
+    else
+        _admitted_epoch(st.pair, st.A, st.b, st.c, st.x, st.tau, st.kappa,
+            st.source_record + st.iterations)
+    end
     affine = FA.solve(e, FA.affine_rhs(e))
     NC.certify(e, affine).status === :certified || throw(FactorPairNumericalRefusal(
         :affine_certificate, :not_certified,
@@ -388,6 +401,9 @@ function step!(st::FactorPairState; sigma_override = nothing)
                         st.rD = tr.rDt
                         st.rG = tr.gap2
                         st.iterations += 1
+                        st.pending_epoch = next_epoch.epoch
+                        st.pending_generation = gen
+                        st.pending_pair = trial.pair
                         receipt = AcceptedFactorPairStep(st.iterations, alpha,
                             backtracking, trial_merit, pred.sigma, sigma_mu,
                             pred.mu_aff, gen)
@@ -489,30 +505,41 @@ function cert_quantities(st::FactorPairState; tol::Float64 = st.cert_tol)
         gap_scale = gap_scale, cert_ok = cert_ok, tau = tau, kappa = kappa, mu = mu)
 end
 
+"""Ownership-isolated terminal receipt (never returns the live mutable state)."""
+function _terminal_receipt(st::FactorPairState)
+    merit = max(maxinf(st.rP), maxinf(st.rD), abs(st.rG))
+    merit <= st.target || return nothing
+    audit = cert_quantities(st)
+    audit.cert_ok || return nothing
+    return (; status = :certified_terminal, iterations = st.iterations,
+        merit = merit, audit = audit, x = copy(st.x), s = copy(st.pair.s),
+        y = copy(st.pair.y), tau = st.tau, kappa = st.kappa,
+        pair_generation = st.owner.generation, history = copy(st.history))
+end
+
 """
     solve!(state; max_iterations) -> NamedTuple
 
 Run the unchanged acceptance loop until the arithmetic merit target is reached
-and the ordinary certificate audit passes.  Returns a terminal receipt; it does
-not publish a public `Optimal` status.
+and the ordinary certificate audit passes.  The returned receipt owns its
+vectors; it does not expose the live mutable state and does not publish a public
+`Optimal` status.  The final allowed step is checked before reporting an
+iteration limit.
 """
 function solve!(st::FactorPairState; max_iterations::Int = 200)
     max_iterations >= 1 || throw(ArgumentError("max_iterations must be >= 1"))
     while st.iterations < max_iterations
-        merit = max(maxinf(st.rP), maxinf(st.rD), abs(st.rG))
-        if merit <= st.target
-            audit = cert_quantities(st)
-            if audit.cert_ok
-                return (; status = :certified_terminal, iterations = st.iterations,
-                    merit = merit, audit = audit, state = st,
-                    history = copy(st.history))
-            end
-        end
+        receipt = _terminal_receipt(st)
+        receipt === nothing || return receipt
         step!(st)
     end
+    receipt = _terminal_receipt(st)
+    receipt === nothing || return receipt
     return (; status = :iteration_limit, iterations = st.iterations,
         merit = max(maxinf(st.rP), maxinf(st.rD), abs(st.rG)),
-        audit = cert_quantities(st), state = st, history = copy(st.history))
+        audit = cert_quantities(st), x = copy(st.x), s = copy(st.pair.s),
+        y = copy(st.pair.y), tau = st.tau, kappa = st.kappa,
+        pair_generation = st.owner.generation, history = copy(st.history))
 end
 
 end # module FactorPairHSD

@@ -57,8 +57,14 @@ function Base.showerror(io::IO, err::UnsupportedBackendError)
     )
 end
 
-"""Cone symbols the first experimental admission accepts (orthant + Power)."""
-const FACTOR_PAIR_ADMITTED_CONES = (:zero, :nonnegative, :power)
+"""Cone symbols the first experimental admission accepts (orthant + Power).
+
+`:zero` is deliberately excluded: the factor state has no ZeroCone
+representation, so equality rows must be handled by the ordinary
+canonical/equality-reduction lineage and admitted explicitly, never by
+pretending a zero row is an orthant row.
+"""
+const FACTOR_PAIR_ADMITTED_CONES = (:nonnegative, :power)
 
 """
     factor_pair_cones_admitted(cones) -> Bool
@@ -137,7 +143,7 @@ function factor_pair_admission(
             checks,
         )
     end
-    if !(settings.provider in (:auto, :standard))
+    if settings.provider !== :auto
         return FactorPairAdmission(
             false, :plan, :provider, backend,
             "experimental factor-pair backend resolves its own provider and rejects provider=$(settings.provider)",
