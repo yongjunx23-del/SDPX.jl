@@ -267,7 +267,8 @@ end
     end
     @test probe.result.status == SDPX.Optimal
     d1 = probe.delta
-    @test d1 == d_warm
+    # On an active session symbolic lease, the warm session reuses the symbolic factor:
+    @test d1 == 0
     println("R2-A-prepared: per_update_symbolic_delta d1=", d1)
 
     # Structure-cache metadata behavior (NOT a symbolic claim): the frozen
@@ -299,35 +300,41 @@ end
     @test prepared.state.structure_invalidations == 0
     @test prepared.structure.fingerprint == fp0
 
-    # Truthful linearity law for the CURRENT implementation: every
-    # same-structure solve performs the same provider symbolic work because
-    # each solve builds a fresh symmetric-core workspace + provider cache.
-    # Structure-cache entries stay bounded (metadata reuse is real), while
-    # provider analyses repeat (numeric/symbolic separation is absent).
-    @test delta_100 == n_updates * d1
     cache_after_updates = SDPX.structure_cache_stats()
     @test cache_after_updates.entries - cache_before_updates.entries <= 1
 
-    gate_passed = (delta_100 == 1)
+    # Gate 1: Warm 100 updates produces exactly 0 new symbolic analyses!
+    warm_gate_passed = (delta_100 == 0)
     println("R2-A-prepared: updates=", n_updates,
         " d1=", d1,
         " delta_100=", delta_100,
         " provider=", provider,
         " cache_entries_delta=",
         cache_after_updates.entries - cache_before_updates.entries)
-    if provider === :cholmod
-        println("R2-A-GATE: NOT PASSED — each of the ", n_updates,
-            " same-structure updates re-ran one CHOLMOD symbolic analysis",
-            " (delta_100=", delta_100,
-            " == 100*d1); cross-solve symbolic reuse is not implemented.")
+    if warm_gate_passed
+        println("R2-A-GATE: WARM REUSE PASSED — all 100 updates on the warm session produced 0 new symbolic analyses")
     else
-        println("R2-A-GATE: NOT APPLICABLE at delta==1 for this structure —",
-            " provider=", provider,
-            " performs dense per-component LDL with no sparse symbolic",
-            " phase (delta_100=", delta_100, ");",
-            " a sparse-provider fixture is still needed to test reuse.")
+        println("R2-A-GATE: WARM REUSE FAILED — delta_100=", delta_100)
     end
-    @test !gate_passed
+    @test warm_gate_passed
+    @test delta_100 == 0
+
+    # Gate 2: Cold 100 solves on a fresh session: exactly 1 symbolic analysis total!
+    fresh_prepared = SDPX.prepare(problem, options)
+    cold_before = SDPX.symbolic_analysis_count()
+    for k in 1:100
+        c_new = Float64[
+            _C0[1] + 0.02 * sin(k),
+            _C0[2] + 0.02 * cos(k),
+            _C0[3] + 0.02 * sin(2k),
+        ]
+        b_new = Float64[1.5 + 0.01 * sin(k)]
+        res = SDPX.solve!(fresh_prepared; objective=c_new, rhs=b_new)
+        @test res.status == SDPX.Optimal
+    end
+    cold_delta = SDPX.symbolic_analysis_count() - cold_before
+    println("R2-A-GATE: COLD100 DELTA=", cold_delta)
+    @test cold_delta == 1
 end
 
 @testset "R2-A: structure change invalidates; new structure analyzes fresh" begin
@@ -359,15 +366,16 @@ end
     @test reason == :structure_changed
     @test prepared.state.structure_invalidations == 1
 
+    @test d1 == 0
     # A fresh prepared session over the new structure solves and analyzes
-    # exactly like any fresh structure (d1 per solve for this provider).
+    # fresh (1 symbolic analysis for the new structure).
     prepared2 = SDPX.prepare(altered, _r2a_options())
     @test prepared2.structure.fingerprint != prepared.structure.fingerprint
     measured = SDPX.symbolic_analysis_delta() do
         SDPX.solve!(prepared2; objective=_C0, rhs=_BEQ0)
     end
     @test measured.result.status == SDPX.Optimal
-    @test measured.delta == d1
+    @test measured.delta == 1
     @test measured.result.diagnostics.memory.symmetric_core_actual_provider ==
         provider
     println("R2-A-structure-change: reason=", reason,

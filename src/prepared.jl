@@ -97,6 +97,7 @@ mutable struct SolveState{T}
     last_reduced_rhs::Vector{T}
     last_objective_offset::T
     numeric_generation::Int
+    symbolic_slot::Union{Nothing,SessionSymbolicSlot}
 end
 
 """
@@ -443,6 +444,7 @@ function prepare(
         T[],
         zero(T),
         0,
+        T === Float64 ? SessionSymbolicSlot() : nothing,
     )
     return PreparedSolver{T}(structure, state, options)
 end
@@ -913,8 +915,16 @@ function _solve_prepared!(
         # objective/RHS solve proves nothing new and can dominate small solves.
         # An explicitly supplied external problem still receives the complete
         # structural fingerprint check.
-        validate_external_structure &&
-            _assert_prepared_structure!(prepared, problem)
+        if validate_external_structure
+            try
+                _assert_prepared_structure!(prepared, problem)
+            catch err
+                if state.symbolic_slot !== nothing
+                    discard_symbolic!(state.symbolic_slot)
+                end
+                rethrow()
+            end
+        end
         selected_objective = objective === nothing ? problem.c : objective
         selected_rhs = rhs === nothing ? problem.b : rhs
         solve_problem, prepared_data, reduced_c, reduced_b, objective_offset =
@@ -935,16 +945,31 @@ function _solve_prepared!(
         # native route performs its own canonical equality reduction.  No
         # interior_point solve! is reachable from a prepared session.
         _prepared_warm_start(prepared, warm_start)
-        result = _bridge_sdp_solve(solve_problem, prepared.options)
-        state.previous = result
-        state.solve_count += 1
-        state.structure_reuses += 1
-        state.last_reuse = :structure_reused_numeric_state_fresh
-        state.last_reduced_objective = reduced_c
-        state.last_reduced_rhs = reduced_b
-        state.last_objective_offset = objective_offset
-        state.numeric_generation += 1
-        return result
+        lease = state.symbolic_slot === nothing ? nothing : checkout_symbolic!(state.symbolic_slot)
+        fp_uint = UInt64(hash(prepared.structure.fingerprint))
+        context = lease === nothing ? NativeExecutionContext() :
+            NativeExecutionContext(lease, UInt64(state.numeric_generation), fp_uint)
+        result = nothing
+        try
+            result = _bridge_sdp_solve(solve_problem, prepared.options; execution_context=context)
+            state.previous = result
+            state.solve_count += 1
+            state.structure_reuses += 1
+            state.last_reuse = :structure_reused_numeric_state_fresh
+            state.last_reduced_objective = reduced_c
+            state.last_reduced_rhs = reduced_b
+            state.last_objective_offset = objective_offset
+            state.numeric_generation += 1
+            return result
+        finally
+            if lease !== nothing && lease.active
+                struct_gen = lock(_SYMMETRIC_CORE_STRUCTURE_LOCK) do
+                    _SYMMETRIC_CORE_STRUCTURE_CACHE.generation
+                end
+                is_opt = result !== nothing && result.status == Optimal
+                finish_symbolic!(lease; certified_optimal=is_opt, eligible=true, structure_generation=struct_gen)
+            end
+        end
     finally
         state.busy = false
         unlock(state.lock)

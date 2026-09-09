@@ -2136,20 +2136,36 @@ end
 
 function _build_float64_core_cache(
     pattern::SymmetricCorePattern{Float64},
-    symbolic_epoch::Integer, regularization::Real,
+    symbolic_epoch::Integer, regularization::Real;
+    execution_context::Union{Nothing,NativeExecutionContext}=nothing,
+    prepared_key_context::Union{Nothing,NamedTuple}=nothing,
 )
     isfinite(regularization) && regularization>=0 || throw(ArgumentError(
         "symmetric core Float64 regularization must be finite and nonnegative",
     ))
     k=symmetric_core_lower_sparse(pattern)
     dsigns=symmetric_core_dsigns(pattern)
-    disconnected=DisconnectedLDLTCache(
-        k,dsigns;symbolic_epoch,regularization,max_size=4,
-    )
-    disconnected===nothing || return disconnected
+    lease = execution_context === nothing ? nothing : execution_context.symbolic_lease
+    if lease === nothing
+        disconnected=DisconnectedLDLTCache(
+            k,dsigns;symbolic_epoch,regularization,max_size=4,
+        )
+        disconnected===nothing || return disconnected
+    end
     requirements=SparseSymbolicRequirements(k;
         symbolic_epoch=Int(symbolic_epoch),dsigns,
         regularization=Float64(regularization))
+    if lease !== nothing && prepared_key_context !== nothing
+        struct_gen = lock(_SYMMETRIC_CORE_STRUCTURE_LOCK) do
+            _SYMMETRIC_CORE_STRUCTURE_CACHE.generation
+        end
+        key = SessionSymbolicKey(prepared_key_context, requirements, struct_gen)
+        return lease_symbolic_cache!(lease, key, () -> begin
+            c = SparseSymbolicNumericCache{Float64}()
+            _prepare_owned_requirements!(c, requirements)
+            return c
+        end)
+    end
     cache=SparseSymbolicNumericCache{Float64}()
     _prepare_owned_requirements!(cache,requirements)
     return cache
@@ -2176,6 +2192,8 @@ function prepare_symmetric_core_state(
     regularization::Real;
     symbolic_epoch::Integer=0,
     take_cone_ownership::Bool=false,
+    execution_context::Union{Nothing,NativeExecutionContext}=nothing,
+    prepared_key_context::Union{Nothing,NamedTuple}=nothing,
 ) where {T<:AbstractFloat}
     length(block_ranges) == length(block_sizes) || throw(ArgumentError(
         "symmetric core state block ranges/sizes counts disagree",
@@ -2228,7 +2246,11 @@ function prepare_symmetric_core_state(
         "symmetric core state block ranges drifted after pattern build",
     ))
     cache = if T === Float64
-        _build_float64_core_cache(pattern,symbolic_epoch,regularization)
+        _build_float64_core_cache(
+            pattern, symbolic_epoch, regularization;
+            execution_context=execution_context,
+            prepared_key_context=prepared_key_context,
+        )
     else
         # QDLDL-backed sparse signed-LDL provider is NOT used for the
         # symmetric augmented core: K = [0 Ar'; Ar -Theta] stores a structural

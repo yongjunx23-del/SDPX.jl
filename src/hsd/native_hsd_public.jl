@@ -1602,6 +1602,7 @@ function _public_native_hsd_core(
     route::NativeConeRoute,
     settings::Settings{T};
     allow_expanded_bordered_fallback::Bool=true,
+    execution_context::Union{Nothing,NativeExecutionContext}=nothing,
 ) where {T<:AbstractFloat}
     # R0-P4: typed fail-closed backend admission happens before any numerical
     # setup.  The default backend returns immediately; an explicit experimental
@@ -2019,6 +2020,30 @@ function _public_native_hsd_core(
             schur_threads=settings.limits.threads,
             iteration_knobs=settings.iteration_knobs,
             allow_expanded_bordered_fallback=allow_expanded_bordered_fallback,
+            execution_context=execution_context,
+            prepared_key_context=(
+                execution_context === nothing || execution_context.symbolic_lease === nothing || settings.kkt_route !== :bordered || T !== Float64 ?
+                nothing : begin
+                    blocks = layout_blocks(canonical.cone_layout)
+                    pure_orthant = all(b -> b.cone in (:nonnegative, :nonpositive), blocks)
+                    cone_tuple = pure_orthant ?
+                        Tuple((:nonnegative, sum(b.length for b in blocks; init=0))) :
+                        Tuple((b.cone, b.length) for b in blocks)
+                    red_rows = Tuple(reduction.reduced_to_full)
+                    (
+                        prepared_fingerprint=(execution_context.prepared_fingerprint,),
+                        arithmetic=:float64,
+                        precision_bits=53,
+                        provider=:cholmod,
+                        route=:bordered,
+                        core_owner=:generic,
+                        threads=(requested=settings.limits.threads, executed=1),
+                        reduction=(rank=reduction.rank, rows=red_rows),
+                        cone_layout=cone_tuple,
+                        ordering=:default,
+                    )
+                end
+            ),
         )
     else
         state = ProductConeHSDState(
@@ -2618,7 +2643,8 @@ function _public_optimize_native_hsd(
     route::NativeConeRoute,
     settings::Settings{T},
     outputs::Outputs,
-    warm_start,
+    warm_start;
+    execution_context::Union{Nothing,NativeExecutionContext}=nothing,
 ) where {T<:AbstractFloat}
     # R0-P4 typed admission runs before the legacy policy validation so an
     # explicit experimental request receives UnsupportedBackendError rather
@@ -2632,11 +2658,18 @@ function _public_optimize_native_hsd(
         outputs,
         warm_start,
     )
-    canonical, _, core = _public_native_hsd_core(model, program, route, settings)
+    canonical, _, core = _public_native_hsd_core(
+        model, program, route, settings;
+        allow_expanded_bordered_fallback=true,
+        execution_context=execution_context,
+    )
     if settings.nonsymmetric_backend === NativeNonsymmetricBackend &&
        _native_hsd_should_restart_bordered(
         settings.kkt_route,core.status,core.reason,core.iterations,
     )
+        if execution_context !== nothing && execution_context.symbolic_lease !== nothing
+            finish_symbolic!(execution_context.symbolic_lease; certified_optimal=false, eligible=false)
+        end
         fallback_settings = _native_hsd_route_settings(settings, :expanded)
         fallback_route = NativeConeRoute(:expanded)
         _public_validate_native_hsd_policy(
@@ -2645,6 +2678,7 @@ function _public_optimize_native_hsd(
         fallback_canonical, _, fallback_core = _public_native_hsd_core(
             model, program, fallback_route, fallback_settings;
             allow_expanded_bordered_fallback=false,
+            execution_context=nothing,
         )
         core = _native_hsd_restarted_core(core, fallback_core)
         canonical = fallback_canonical

@@ -236,6 +236,8 @@ function _product_cone_hsd_state(
         sigma=nothing, beta=nothing, gamma=nothing, predictor=:classic,
     ),
     allow_expanded_bordered_fallback::Bool=true,
+    execution_context::Union{Nothing,NativeExecutionContext}=nothing,
+    prepared_key_context::Union{Nothing,NamedTuple}=nothing,
 ) where {T<:AbstractFloat,R<:AbstractFactorCache{T}}
     if kkt_route === :sparse_augmented
         prepare_symmetric_core = true
@@ -260,6 +262,8 @@ function _product_cone_hsd_state(
             memory_limit_bytes=symmetric_core_memory_limit,
             current_rss_bytes=symmetric_core_current_rss,
             regularization=symmetric_core_regularization,
+            execution_context=execution_context,
+            prepared_key_context=prepared_key_context,
         )
         # Review slice 1: attach the timing accumulator to the generic core
         # workspace so `_core_refine!` writes its wall bucket without any
@@ -473,6 +477,8 @@ function _prepare_product_hsd_symmetric_core(
     current_rss_bytes::Union{Nothing,Integer}=nothing,
     regularization::Real=0.0,
     symbolic_epoch::Integer=0,
+    execution_context::Union{Nothing,NativeExecutionContext}=nothing,
+    prepared_key_context::Union{Nothing,NamedTuple}=nothing,
 ) where {T<:AbstractFloat,R<:AbstractFactorCache{T}}
     m = base.m
     n = base.n
@@ -551,6 +557,8 @@ function _prepare_product_hsd_symmetric_core(
         regularization;
         symbolic_epoch=symbolic_epoch,
         take_cone_ownership=true,
+        execution_context=execution_context,
+        prepared_key_context=prepared_key_context,
     )
 end
 
