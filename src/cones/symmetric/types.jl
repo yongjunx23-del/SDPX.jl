@@ -169,9 +169,10 @@ end
 
 function PSDNTScaling{T}(dim::Int; eigen_route::Symbol=:setup_jacobi) where {T}
     dim >= 1 || throw(ArgumentError("PSD dimension must be >= 1"))
-    eigen_route === :setup_jacobi || throw(ArgumentError(
-        "unsupported PSD NT eigensolver route $(repr(eigen_route)); no fallback is permitted",
-    ))
+    (eigen_route === :setup_jacobi || eigen_route === :experimental_relative2) ||
+        throw(ArgumentError(
+            "unsupported PSD NT eigensolver route $(repr(eigen_route)); no fallback is permitted",
+        ))
     len = packed_len(dim)
     sqrt2 = sqrt(one(T) + one(T))
     invsqrt2 = one(T) / sqrt2

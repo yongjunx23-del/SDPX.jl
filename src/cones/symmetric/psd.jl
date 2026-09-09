@@ -153,10 +153,16 @@ end
     values::AbstractVector,
     route::Symbol,
 )
-    route === :setup_jacobi || throw(ArgumentError(
+    if route === :setup_jacobi
+        return _jacobi_eigen!(A, V, values)
+    elseif route === :experimental_relative2
+        # experimental dimension-two Float64-only SPD-relative route; all
+        # other shapes/types refuse below (no fallback is permitted).
+        return _relative2_jacobi_eigen!(A, V, values)
+    end
+    throw(ArgumentError(
         "PSD NT eigensolver route $(repr(route)) is unavailable; no fallback is permitted",
     ))
-    return _jacobi_eigen!(A, V, values)
 end
 
 @inline function _psd_nt_close(A::AbstractMatrix{T}, B::AbstractMatrix, n::Int) where {T}
