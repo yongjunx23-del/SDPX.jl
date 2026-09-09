@@ -206,7 +206,10 @@ function SparseQDLDLCache{T}(
     ))
     # Provider construction performs the one symbolic analysis for this
     # frozen pattern, so a successfully constructed cache owns exactly one
-    # symbolic build.
+    # symbolic build.  R2-A: this is the real QDLDL symbolic-analysis entry;
+    # count it in the process-local provider counter (numeric `factorize!`
+    # refactors never re-analyze and must not count).
+    _record_symbolic_analysis!(:qdldl)
     return SparseQDLDLCache{T,typeof(provider)}(
         size(pattern, 1), size(pattern),
         copy(pattern.colptr), copy(pattern.rowval),

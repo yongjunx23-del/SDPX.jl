@@ -67,6 +67,7 @@ include("blas_backend.jl")
 include("factor_cache/state.jl")
 include("factor_cache/requirements.jl")
 include("factor_cache/api.jl")
+include("factor_cache/symbolic_analysis_counter.jl")
 include("factor_cache/routes.jl")
 include("kkt_route.jl")
 include("kkt/system.jl")
@@ -162,6 +163,7 @@ export primal_objective, dual_objective
 export certificate, diagnostics, iteration_history, performance_trace
 export Optimizer
 export clear_structure_cache!, set_structure_cache_enabled!
+export symbolic_analysis_count, symbolic_analysis_counts, symbolic_analysis_delta
 export NonsymmetricBackendChoice, NativeNonsymmetricBackend
 export ExperimentalHalfPowerFactorPairBackend, UnsupportedBackendError
 
