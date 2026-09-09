@@ -21,19 +21,20 @@ computed independently (fresh dense residual evaluation from recovered
 coordinates, not the loop residual routine or cached vectors):
 - merit (homogeneous residuals) 8.39e-9 <= 1e-8 target
 - recovered primal residual 7.00e-10, dual residual 7.00e-10
-- complementarity s'y/tau^2 = 6.71e-9 ; cone membership true (1e-7 band)
+- complementarity s'y/tau^2 = 6.71e-9 ; cone membership true (cert_tol = 1e-6 predicates)
 - recovered homogeneous gap c'x*+b'y*+kappa/tau = 2.80e-9, kappa/tau = 5.58e-10
 - THE TERMINAL POINT PASSES THE ORDINARY CERTIFICATE INEQUALITIES of
   src/certificates/certificates.jl:438-502 at the source-default Float64
   tolerance 1e-6, evaluated on RECOVERED coordinates with no tau redivision:
-  normalized homogeneous residual max|rP|,|rD|,|rG|/(||A||+||b||+||c||+1)
-  = 1.2e-9 <= 1e-6; recovered primal = 7.0e-10 <= 1e-6*primal_scale and
-  dual = 7.0e-10 <= 1e-6*dual_scale; st in K and yt in K* via the source
-  power_membership / power_dual_membership predicates at tolerance 1e-6;
-  recovered gap |c'xt + b'yt| = 5.6e-10 <= 1e-6*gap_scale; cone
-  complementarity |st'yt| = 6.7e-9 <= gap_lim; kappa/tau = 5.58e-10 <=
-  gap_lim; invariant mu/tau^2 = 5.59e-10 <= 1e-6*(1+nu); tau > 1e-6; all
-  scalars finite. A homogeneous-rescaling regression (rho=2) verifies the
+  normalized homogeneous residual m/(||A||+||b||+||c||+1)
+  = 7.00e-10 <= 1e-6 (m = 2.80e-9, data_norm = 4); recovered primal
+  = 7.00e-10 <= 1e-6*primal_scale and dual = 7.00e-10 <= 1e-6*dual_scale;
+  st in K and yt in K* via the source power_membership /
+  power_dual_membership predicates at tolerance 1e-6 (= cert_tol);
+  recovered gap |c'xt + b'yt| = 2.24e-9 = |rG - kappa/tau|
+  = |2.80e-9 - 5.58e-10| <= 1e-6*gap_scale; cone complementarity
+  |st'yt| = 6.7e-9 <= gap_lim; kappa/tau = 5.58e-10 <= gap_lim; invariant
+  mu/tau^2 = 5.59e-10 <= 1e-6*(1+nu); tau > 1e-6; all scalars finite. A homogeneous-rescaling regression (rho=2) verifies the
   acceptance quantities are scaling-invariant. Independently re-evaluated
   from stored recovered coordinates by a separate dense implementation.
 - experimental merit target 1e-8: merit = 2.80e-9 <= 1e-8

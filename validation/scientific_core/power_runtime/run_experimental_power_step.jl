@@ -196,6 +196,7 @@ end
         " pr=", terminal.primal_feas, " dr=", terminal.dual_feas,
         " sNy=", terminal.sNy, " homo_gap=", terminal.homo_gap,
         " kappa/tau=", terminal.kappa_tau, " mu/tau^2=", terminal.mu_norm,
+        " norm_resid=", terminal.norm_resid, " obj_gap=", terminal.obj_gap,
         " obj=", terminal.obj, " obj_err=", terminal.obj_err)
     @test terminal.membership
     @test terminal.cert_ok
