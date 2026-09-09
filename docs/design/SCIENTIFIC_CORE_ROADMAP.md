@@ -4,6 +4,76 @@
 
 目标：以 Julia 为主体，提高 MultiFloat、BigFloat 和大规模多核计算能力；优化对象最终是**获得原坐标认证解的总时间与内存**，不是单个算术峰值。用户已授权按本计划自动实施、检查和交付；推送、合并主分支和发布仍不在授权内。
 
+## 当前状态、优先顺序与唯一计划入口
+
+本文是唯一的科学内核执行计划。旧 `HANDOVER.md` 及 `docs/HANDOVER.md` 镜像已由本计划取代；从活跃工作树移除，历史内容仍由 Git 和退休文档归档保存。`docs/evidence/`、原始日志、失败候选、数学规范和独立物理模型的来源计划不在删除范围。
+
+**当前仍在 R0；R0–R6 没有任何完整阶段关闭。** 最近已集成冻结 combined Newton 切片 `72627a8`，整合复测1042项通过。原生 half-Power pair/trial 候选 `44bd368` 在隔离分支通过362项：两个保留输入的cold/warm构造及六个新epoch的combined检查通过，12个固定trial中8个构造成功、4个拒绝。这些是**构造/方向证据，不是line-search accepted progress或生产修复**；该候选尚待独立审阅，最后一轮完整兼容性总回执亦待补齐。
+
+用户最新要求调整实施顺序：**先用其他求解器和精度阶梯给失败分类，再决定修什么；不继续只围绕一个内部失败点反复构造实验。**
+
+| 顺序 | 工作包 | 现在的出口条件 |
+| --- | --- | --- |
+| 1 | T0：MOSEK / Clarabel.jl / 等价锥形式交叉诊断 | 同一原问题、真实精度、原坐标审计及明确失败分类；安装/许可证问题另记 |
+| 2 | R0-P：Power原生pair、完整步与有限生产接线 | 根据T0结论选算法；通过真实accepted-step及原五方程，而非只看局部证书 |
+| 并行 | R0-E / R0-S：Exp / PSD | 各自先做外部对照和独立几何诊断，再做有限修复 |
+| 并行 | R1 / R2：算术所有权、Prepared生命周期 | 可以独立验证；不因Power单例阻断整个体系 |
+| 3 | R3：稀疏多精度KKT和完整资源契约 | 原始KKT方向合格，完整峰值上界成立前内存准入继续拒绝 |
+| 4 | R4 / R5：结构化核与多核 | 正确性门先过，再做真实调用、同目标误差和实际资源匹配的比较 |
+| 5 | R6：真实应用生产资格 | 新standard-v1控制、新CSDR基线、有限N14/BF512、SDPB和8/16/32核证据 |
+
+每包遵循：冻结输入/来源 → 基线与负控 → 单一可证伪改动 → 相关检查 → 独立审阅 → 开发分支整合 → 同HEAD复测。包内失败不自动停止无依赖的其他包；没有过门的路线不得被默认启用。
+
+## T0 · 跨求解器、精度与问题适定性诊断（立即执行）
+
+### T0.1 冻结真正的原问题，不把迭代点当问题
+
+- 当前优先案例：`validation/scientific_core/fixtures/factor_affine_trial_17.toml` 与 trial19。只取两份相同的 **A/b/c、锥顺序和alpha**；捕获的x/s/y/tau/kappa是算法状态，不能作为另一个求解器的建模输入。
+- 规范形式为 `min sum(t_i)`，`t_i>=0`，`(t_i,1,a_i) in PowerCone(0.5)`，三个a的实际binary64值约为 `0.626678964309454, 0.3230223181314613, -0.7919401216799509`。固定原始位串，所有高精度输入都**精确提升这些存储值**；不从截短十进制重建另一道题。
+- 解析校验：`t_i*=a_i^2`，最优值的精确有理数为 `91209111564668556464635313382413 / 81129638414606681695789005144064`，约 `1.1242390986454483421`。这不是任何外部求解器的运行结果。
+- 严格原始可行点取 `t_i=a_i^2+1`，每个Power determinant为1。严格对偶可行点取orthant分量1/2和Power对偶块 `(1/2,(a_i^2+1)/2,-a_i)`：stationarity精确成立，`4uv-w^2=1`。本例A还满足 `A'A=2I`。因此这里有明确的可行性/有界性/适定性依据，不能把正常边界最优点的barrier病态误称为原问题ill-defined。
+- 输出：可重建canonical输入、精确目标/原始与对偶witness审计、输入文件散列和两份fixture一致性检查。诊断参考不进入SDPX方向或根的生成。
+
+### T0.2 最小对照矩阵
+
+| 求解器 | 真实算术 | 初始请求目标 | 用途与边界 |
+| --- | --- | --- | --- |
+| MOSEK | 双精度 | 默认约1e-8，再显式1e-12 | 容差不是precision；不称为BF256/BF512，不把near-optimal当严格optimal |
+| Clarabel.jl 0.11.1 | Float64 | 默认1e-8，再1e-12 | 与MOSEK相同原输入/目标；记录默认及改变后的设置 |
+| Clarabel.jl 0.11.1 | BigFloat256 | 先1e-12同目标，再1e-30 | 区分增加算术精度与要求更高输出精度 |
+| Clarabel.jl 0.11.1 | BigFloat512 | 先1e-30同目标，再1e-60 | 检查残差是否继续下降，不能只有BigFloat类型标签 |
+| SDPX | Float64 / BF256 / BF512 | 对应同目标 | 记录当前默认路线与显式实验路线，禁止合并两者结果 |
+| 可选后继 | Float64x4（实际209 bits） | 已通过BF基线的目标 | 先确认Clarabel/provider真实支持；不假定与BF256等精度 |
+
+两个形式分别记账：
+1. **原生Power形式**：相同12×3 canonical问题，prefix3 orthants + 三个Power块。
+2. **明确等价的SOC对照**：`(t,1,a)` 映射为 `(t+1,t-1,2a)`，一般块映射为 `(s1+s2,s1-s2,2s3)`。只用整数/二进制精确系数；保存线性映射并用其转置恢复原Power对偶量。也可单列MOSEK rotated-SOC形式 `(t,1/2,a)`，但不能把转换后成功计作“原生Power路径成功”。
+
+初轮不扩成性能campaign：每个必要单元一次有界独立进程；差异、异常或声称改进时再做至少一次独立复现。MOSEK 11.1.3 的Python包、Clarabel.jl 0.11.1及本地许可证文件已经发现，**这只是可用性线索，MOSEK实际许可/求解与高精度求解结果尚未取得**。不得把安装失败或许可证失败计为数学失败。
+
+### T0.3 高精度设置与独立审计
+
+- Julia `setprecision` 必须包住settings、数据、workspace、solve和输出；记录实际存储precision与舍入。目标常数在目标类型内从字符串或整数幂生成，不先变成Float64再补位。
+- Clarabel使用原生Julia接口和明确 `direct_solve_method=:qdldl`。先保留默认行为作基线；另列precision-adjusted arm，完整记录gap/feas/infeas/reduced tolerances、static/dynamic regularization、`eps(T)^2`、iterative refinement、step阈值和迭代上限。
+- 0.11.1 的 `static_regularization_proportional` 默认来自未带T的 `eps()^2`；BigFloat不能沿用这一默认却宣称所有设置已适配精度。调整正则、equilibration、presolve、minimum-step等均是明确实验变量，不能被隐藏在“只提高precision”的标签里。
+- 原输入始终相同。内部equilibration可以做独立开/关对照，但输出必须恢复原坐标；不能只检查缩放后的残差。
+- 对每个返回结果保存真实x/s/y或等价的primal/dual活动量、状态、终止原因、迭代次数、目标、配置、时间和资源。独立检查 `Ax+s-b`、`A'y+c`、原锥可行性、目标/dual gap、complementarity及相对精确最优值的误差；分别报告绝对量和明确分母的归一化量。
+- 参考可用exact dyadic/rational或有证明的更高精度包络；不得调用被测求解器的同一残差函数充当唯一审计。超时、没有结果和未达到目标也保留原始回执。
+
+### T0.4 结果决定下一步，不预设结论
+
+| 观测 | 解释边界 | 后续动作 |
+| --- | --- | --- |
+| MOSEK/Clarabel双精度过原坐标门，SDPX失败 | 强证据指向SDPX的算法/实现，而非模型ill-defined | 比较scaling、root、corrector、边界与终止策略；选择最小可复现差异修复 |
+| 双精度失败，高精度通过 | 支持有限精度/表示/容差问题，不自动证明原问题病态 | 分开测算术与设置效应，做精度/条件阶梯并据此设计受支持政策 |
+| SOC通过、原生Power失败 | 指向锥表示/非对称实现路径差异 | 审计等价映射和对偶恢复；研究可明确声明的通用转换或稳定Power算法 |
+| 所有求解器失败 | 不是ill-posedness证明 | 检查canonical映射、Slater/facial结构、秩、尺度、数据误差和证书；只在证据成立后修模型或标Unknown |
+| 软件、许可证、类型或provider不可用 | 操作性阻断，不是求解失败 | 精确记录原因；修私有环境或说明未测，不更换证据口径 |
+
+单例止损规则：完成初轮外部/精度/等价形式对照后写出诊断。连续两轮实现实验若没有新的可测改进或推翻假设，应暂停该假设，转查其他solver源码/论文或重审表示，而不是继续叠加局部证书。保留良定义的失败回归；不能删除困难样本、放宽全局门或把局部停工伪装成阶段完成。只有需要新增问题规模、资源费用或生产政策时才请求新决定。
+
+参考入口：[MOSEK power-cone cookbook](https://docs.mosek.com/modeling-cookbook/powo.html)、[数值建模与适定性](https://docs.mosek.com/modeling-cookbook/practical.html)、[MOSEK数值诊断](https://docs.mosek.com/11.1/capi/debugging-numerical.html)、[Clarabel arbitrary precision](https://clarabel.org/stable/literate/build/arbitrary_precision/)、本机Clarabel 0.11.1的 `settings.jl`、`coneops_powcone.jl`、`coneops_nonsymmetric_common.jl`、`solver.jl`。对fallback、third-order correction和reduced-accuracy终止只研究其设计理由；不能直接照搬成删除SDPX独立门的许可。
+
 ## 依据与当前边界
 
 本轮只读体系审阅锁定：SDPX `7ffcc416`、MFLA `50e6e0b`、BFLA `f95d3e6`、MultiFloats 3.2.6、用户提供的 [MultiFloatArithmetic](https://github.com/yongjunx23-del/MultiFloatArithmetic.jl) `d2bbbd8`；Julia 1.12.6、MutableArithmetics 1.8.0。MFA 是待评估材料，尚非 solver 执行依赖。
@@ -84,6 +154,18 @@
 
 **检查**：Mac 小型精确点、解析问题与负例；本地门通过后提交新、有界 PBS standard-v1 资格任务。未过此阶段，不晋升一般 HSD/Exp/PSD 求解能力。
 
+### R0实施包与具体交付
+
+- **R0-P1 外部差异定位**：完成T0报告，将问题本身、normal boundary conditioning、原生Power和SOC表示差异分开。若参考solver已解决，不再把尚未验证的“模型病态”作为默认解释。
+- **R0-P2 原生pair/trial**：审阅隔离候选 `44bd368`，补齐被中断的兼容性外层回执；覆盖owner/generation/settings、真实rounded shadow、原生BFGS、拒绝trial不替换anchor、原输入变更隔离。通过后仅作为实验构造器整合，不发布生产有效状态。
+- **R0-P3 完整accepted step**：用真实affine边界和mu_aff选择sigma，不用固定.25/.75样本代替；保留边界.995、默认damping.9、拒绝收缩.5、64次backtrack及当前残差homotopy/merit规则。当前merit高于 `16sqrt(eps)*scale` 时仍要求 `alpha>=2cbrt(eps)`；小于可分辨预测量须有真实可表示下降，其他情形至少实现原预测下降的1/4。逐个记录根、pair、方向、trial、进展门的实际结果。
+- **R0-P4 有限runtime迁移**：映射 `src/cones/runtime/nonsymmetric_api.jl`、`product.jl`、`src/hsd/predictor_corrector.jl`、`linesearch.jl` 及KKT消费者；禁止一个消费者保留因子而另一个重新物化旧Theta。先明确实验one-secant策略，strict double-secant的H(s)义务单独过门；原型审阅不自动授权默认政策改变。
+- **R0-E Exp**：纯Exp与mixed各冻结一个失败case，先T0对照；定位共轭重构、真实metric、third contraction、scalar closure、trial恢复中的第一处错误。给出精确点/协变/非有限负控、完整方向和真实solve回归，不能只修一个数值比值便称mixed成功。
+- **R0-S PSD**：先做显式Float64/n=2 SPD-relative谱实验，检查relative pivot、small-eigenvalue cancellation、归一化后真实V/H、实际非对称输入缺陷和root装配误差。保留原 `PYP≈S`、`KSK≈Y`、Lambda、双向组合及有限性门；小维通过后再决定通用谱provider，不替换generic/indefinite Jacobi默认。
+- **R0-Q 总验收**：Float64、BF256/BF512、x4分别运行LP/SOC/RSOC/PSD/Exp/Power/mixed的正常、边界、不可行、无界及非Slater控制；每个对外成功结果独立验证原坐标。任何尚未合格类型/锥组合留在unsupported/experimental清单。
+
+**交付门**：T0诊断、永久失败fixture、数学契约与策略范围、独立审阅、同HEAD完整路径结果、全部原生/参考差异解释。只通过根或frozen Newton不能关闭R0。
+
 ## R1 · 所有权、AccuracyContract 与算术有效域
 
 **保留范围**：独立 owned-copy、输入/输出变更隔离、统一 AccuracyContract、原坐标 evaluator、失败分类、最小 typed iteration log、native 数值 checkpoint。
@@ -97,26 +179,54 @@
 
 **检查**：Mac 逐标量和小矩阵、共享槽/undef/复用、极端 tau、目标常数/符号、scaled rays、NaN/Inf/边界；PBS 同种子跨 ARM/x86 与线程。所有权与证据修订可和 R0 并行。
 
+### R1实施包
+
+1. **R1-A 统一AccuracyContract**：把存储类型/有效bits、构造精度、工作精度、验证精度、舍入、finite/subnormal/overflow和允许误差分别记录；状态至少区分verified、unsupported、numerical failure和infrastructure failure。
+2. **R1-B owned对象矩阵**：覆盖BigFloat256/512/1024的初始化、copy、view、共享槽、重复solve、失败恢复、输出持有及外层任务并发；逐实际backing存储检查，不按值相等推断无alias。验证precision/rounding改变不会复用旧因子。
+3. **R1-C provider闭包**：分别补Julia1.10/1.11/1.12、Mac/Linux及LinearSolve/QDLDL扩展缺口；已完成选择可复用其原始证据，不能把一个pin/ABI/扩展的结论迁移到另一个。
+4. **R1-D 稳定公共输出**：提供原坐标evaluator、typed iteration log、失败原因与checkpoint精度信息。测试source/result mutation、极小tau和scaled rays；参考不足时返回Unknown而非伪成功。
+
+**交付门**：声明的配置矩阵全部有执行证据；没有错误positive certificate；不把native-core局部测试或逻辑存储探针称为通用算术/内存资格。
+
 ## R2 · 单一 Prepared Native 与资源生命周期
 
 **保留范围**：PreparedConicProblem、solve-local 数值 workspace、numeric-only update、旧兼容层隔离、required CI、tested-as-executed 选项。
 
 **下一步**：
-- 修复结构缓存 enable/disable/clear 与读取/发布的锁纪律；结构缓存不得保存共享可变数值状态。
+- 已审结构缓存锁协议与owned收缩恢复保持回归；下一步验证真实backend symbolic reuse及完整生命周期，shared结构缓存仍不得保存可变数值状态。
 - 明确 provider、scratch 和线程预算的所有者；精度、结构、布局改变必须失效。持久线程 scratch 不是未经验证的低风险替换。
 - 补只读结构/路线诊断：真实 n/m、等式/约化 rank、fixed-trace 适用性、full/compact 维数、存储标量数、provider/扩展、请求与实际线程、各阶段时间；不修改路由决策。
 
 **验收/检查**：同结构 100 次 c/b 更新不重复符号分析；结构改变必失效；并发独立 solver 无共享可变数据或额外内存增长；冷编译、prepare、数值更新、solve、verify 账目可核对。Mac 检查生命周期，PBS 对照外层并发与单 solve 多线程。
 
+### R2实施包
+
+1. **R2-A 真正的symbolic/numeric分离**：在provider真实symbolic分析入口计数；同结构100次c/b更新应不重复分析。现有metadata reuse只能证明metadata reuse，不满足这项出口。
+2. **R2-B 失效事务**：precision、rounding、CSC结构、cone布局、provider和线程预算变化时撤销旧receipt；在构造、factor、solve和证书阶段分别注入失败，确认下一次合法更新可恢复。
+3. **R2-C 并发所有者**：外层独立PreparedSolver各有数值scratch/结果；shared cache只放不可变结构。记录实际外层任务×内部线程，检查全部被写buffer的归属和任务迁移，不只看条目数量。
+4. **R2-D 资源账本/CI**：分别测冷编译、prepare、update、factor、solve、verify与retained outputs；把测试过的配置放入required CI。稳定重复运行的live-object增长与RSS分别记录，不能互相替代。
+
+**交付门**：真实symbolic计数、失效/恢复负控、所有权证明、可重复资源账目和同结构长期回归均通过。
+
 ## R3 · 稀疏多精度 KKT 与 cone-preserving scaling
 
 **保留范围**：真正 sparse signed-LDL/indefinite provider，原始与正则化算子分离，backward-error 驱动 refinement，按需 rank/nullspace，稀疏 Ruiz、cone-preserving scaling，fill/内存/精度联合路线政策。
 
-**下一步**：先核实 QDLDL 扩展实际加载、数值类型、零 primal 对角与准定性前提；从小型独立 KKT 建立 provider gate，再接 SDPX。不能把可选适配器存在当作稀疏多精度已接通。
+**下一步**：保留已完成的小型BFLA/QDLDL provider、自然排序和LP-only私有研究检查，推进完整owned-live上界、原系统refinement及其他cone的稀疏表示。新类型/provider组合仍须核实实际加载、零primal对角与准定性契约；现有适配器和未准入LP研究不等于完整公开稀疏多精度资格。
 
 **验收**：宣称 sparse 的路径不偷偷形成 dense A/Q 或完整稠密因子；fill 和内存估算可核查；超过预算明确停止，或仅走获授权且有记录的回退；方向始终按原始方程预算验证，禁止静默 Float64 rank 权威。
 
 **检查**：Mac 亏秩/重复等式/正则失效/预算边界；PBS 固定 nnz/行倍增、稠密列、巨大单 SOC、256/512/1024 bits，记录 fill、RSS、方向误差和失败率。依赖 R0/R1 及 R2 seam；独立 provider 调查可提前。
+
+### R3实施包
+
+1. **R3-A provider数学契约**：明确signed LDL/准定性、零primal对角、排序、正则矩阵与原矩阵、目标precision、实际因子类型；小型独立KKT先验证，不以扩展成功加载代替数值资格。
+2. **R3-B 真实稀疏装配**：扩展已审LP-only私有pattern，逐类cone说明块存储、fill和回填映射；任何dense A/Q/Theta/因子形成都须显式披露。等式rank处理必须有原问题证书与dual recovery。
+3. **R3-C 原系统refinement**：残差从未正则化的原算子生成，按backward error验证收缩；静态/动态shift、拒绝/重构和精度提升分别留回执，禁止静默Float64 rank权威或隐藏fallback。
+4. **R3-D 完整owned-live上界**：分装配/分析/分解/求解/验证/结果保留阶段列出所有并存对象、actual capacity、索引/排列、MPFR/GMP scratch、临时复制、线程scratch及GC重叠；别名只计一次。现有 `8q+a+18d+ell` 是局部小计，不是峰值。不能证明完整界时内存准入继续unavailable，并与仅供研究的未准入入口明确区分。
+5. **R3-E 规模阶梯**：Mac先做亏秩/重复等式/失效/预算边界；再PBS做固定nnz增长、dense列、巨大SOC、256/512/1024bits。每格保留fill、RSS、阶段峰值、原方程误差和退出原因。
+
+**交付门**：原始KKT方向、存储/资源契约和失败恢复同时成立，才讨论公开稀疏路线；性能快不能抵消数学或预算失格。
 
 ## R4 · Julia 密集核、PSD 与 Bootstrap 结构化加速
 
@@ -130,6 +240,15 @@
 
 **验收/检查**：Mac 阈值两侧、奇数尾部、小矩阵与强基线 A/B；PBS PSD 16/64/128/256、clique 梯、CSDR、完整 N14 与真正 polynomial-matrix 案例。chordal/low-rank 必须有原问题等价性和 dual recovery；性能不得以错误 metric 为基线。结构族 ≥3× 仍是实验目标，不是承诺；独立微基准可提前，operator 集成依赖 R0–R3。
 
+### R4实施包
+
+1. **R4-A 扩展诚实配对矩阵**：从现有单个23×65×17单元扩展到小/中/大、奇数tail、transpose/view、beta与对消等级；冻结实际limb输入、每次调用输出和独立参考，执行真实ABBA+BAAB及独立进程重复。
+2. **R4-B 每次只换一个核策略**：按热点选择pack/layout、tile、TRSM或factor trailing update；记录请求线程与实际workers。不同FMA网络比较数值误差，不能要求无理由逐位相同或只看平均误差。
+3. **R4-C 结构先证等价**：PSD谱provider、panel/low-rank、chordal+recovery、Q3批量和采样/多项式结构各有独立映射与原坐标审计；先减少不必要O(k^4)存储，不用未经证明的rank截断。
+4. **R4-D end-to-end归因**：只保留在合格输入上改善实际热点且无回归的策略；单独报告compile/pack/prepare/factor/solve/verify。kernel改善至少2%的原目标不等于solver改善，更不能从一格外推到CSDR/N14。
+
+**交付门**：核正确性、provider兼容、代表结构族和总认证时间均可复现；同预算不同实际worker的结果必须标明。
+
 ## R5 · 有验证的自适应精度与单节点并行
 
 **保留范围**：低精度因子/目标精度残差分离，precision promotion 重建状态和因子；源数据不足则重新生成，不给 rounded data 补零。
@@ -138,13 +257,31 @@
 
 **验收/检查**：condition ladder 明确 IR 收缩/失败边界；不收缩则按受支持政策停止或晋升，不静默降精度；串行和并行达到相同数值资格。PBS 1/8/16/32 核，外层并发×内层线程、NUMA 对照；记录实际物理资源。依赖 R1/R3/R4。
 
+### R5实施包
+
+1. **R5-A 精度控制器**：明确低精度factor/目标精度residual的组合，监测IR收缩、停滞和错误界；升级时从足够精度的原数据重建所有数值状态与因子，禁止给已舍入数据补零假装提升精度。
+2. **R5-B 单一线程预算**：SDPX、MFLA/BFLA、BLAS及外层任务共享明确预算；验证nested parallelism、task migration、thread-local scratch失效和取消恢复。
+3. **R5-C 硬件矩阵**：本地1/4线程先过正确性，PBS再做1/8/16/32核、外层×内层、亲和性/NUMA对照。当前已准许的node120:ppn8任务不能超配后冒称16/32个物理核；后两档须先确认并取得足够的真实PBS分配。
+4. **R5-D 性能判定**：同原问题、同表示或明确同误差目标、同source/provider配置；每个timed输出过原坐标门，记录真实workers、RSS和总认证时间。不得用更宽松目标或更少有效位换取多核速度。
+
+**交付门**：精度升级/拒绝逻辑正确、串并行达到同数值资格、实际资源和改善归因可信；MPI不是当前单节点通过的前置条件。
+
 ## R6 · Production scientific qualification
 
 **保留范围**：支持/实验/不可用表，独立 parser/映射与 MOI 矩阵，取消/checkpoint 语义，长期/held-out 对抗和真实应用，可重建 release 证据。
 
 **验收**：只认证 R0–R5 已过门的子集，公开 known failures；困难问题允许 Unknown，不允许错误自信。锁定 Julia、MA、MPFR/GMP、provider 和扩展状态。未实现 MPI 不阻止边界明确的发布。
 
-**顺序**：新 standard-v1 基线 → N6 控制 → 完整有限 N14/BF512 → SDPX/SDPB 同目标精度与独立原坐标审计 → 8/16/32 核比较。大计算只在 PBS；不重复旧的失败 campaign、不改旧 CSDR 指纹、不触碰 held job 210917。
+**顺序**：新 standard-v1 基线 → N6 控制与新 CSDR 基线 → 完整有限 N14/BF512 → SDPX/SDPB 同目标精度与独立原坐标审计 → 8/16/32 核比较。大计算只在 PBS；不重复旧的失败 campaign、不改旧 CSDR 指纹、不触碰 held job 210917。
+
+### R6实施包
+
+1. **R6-A 支持矩阵**：按cone、类型/有效bits、平台、provider、策略、problem class列supported/experimental/unavailable和known failures；把局部实验与公开solve支持分开。
+2. **R6-B 接口与恢复**：独立parser/canonical/MOI映射，目标符号、非有限数据、infeasible/unbounded rays、取消/checkpoint、失败后恢复及长期held-out回归。
+3. **R6-C 应用阶梯**：新standard-v1 → N6控制与新CSDR小基线 → 完整有限N14/BF512 → SDPX/SDPB同目标精度与原坐标审计 → 8/16/32核比较。CSDR不得沿用旧101-iteration资格或旧指纹。
+4. **R6-D 可重建交付**：汇总源HEAD、Julia/MA/MPFR/GMP/provider/扩展、输入与环境散列、原始回执、审计器、known failures和复现命令。仅形成候选发布材料；push、公共main合并和release仍需另行授权。
+
+**交付门**：仅宣称R0–R5已过门的子集；有限N14的正确性不等于所有bootstrap家族都合格。未通过的问题如实Unknown，不能靠旧结果补齐新资格。
 
 ## 统一测量与第一实施批次
 
