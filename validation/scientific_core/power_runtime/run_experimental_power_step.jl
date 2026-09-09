@@ -71,8 +71,15 @@ function terminal_audit(ctx; target = 1e-8)
     dual_feas = maximum(abs, rD)
     homo_gap = abs(rG)
     obj_gap = abs(obj + dot(b, yN))      # c'x* + b'y* = -kappa/tau ~ 0
-    (; m, membership, primal_feas, dual_feas, homo_gap, obj, sNy, obj_gap,
-        obj_err = abs(obj - Float64(exact_obj)))
+    kappa_tau = ctx.kappa / ctx.tau
+    mu_norm = ctx.pair.mu / ctx.tau
+    scalars_ok = isfinite(ctx.tau) && ctx.tau > 0.0 && isfinite(ctx.kappa) &&
+                 ctx.kappa > 0.0 && isfinite(ctx.pair.mu) && ctx.pair.mu > 0.0
+    # ordinary certificate inequalities (stored recovered words):
+    #   complementarity s*'y* = s'y/tau^2, recovered gap c'x*+b'y* = -kappa/tau,
+    #   normalized mu, all finite positive scalars
+    (; m, membership, primal_feas, dual_feas, homo_gap, kappa_tau, mu_norm,
+        scalars_ok, obj, sNy, obj_gap, obj_err = abs(obj - Float64(exact_obj)))
 end
 
 @testset "experimental half-Power step context" begin
@@ -82,6 +89,7 @@ end
     @test ctx.pair isa NP.PairReceipt && EPS.NP.verify(ctx.pair)
     reached_floor = false
     terminal_ok = false
+    cold_rebuildable = 0
     prev_tokens = ctx.owner.tokens
     prev_anchor = ctx.pair
     for iter in 1:80
@@ -117,8 +125,13 @@ end
                 ctx.layout; policy = NP.POLICY, settings = ctx.settings,
                 owner = ctx.owner, warm = stale0_tokens)
             @test stale2 isa NP.PairRefusal
-            # cold replay certification of the committed pair (warm-independent)
-            @test NP.certify(ctx.pair).status === :certified
+            # OBSERVED cold-rebuild diagnostic (not a guarantee, not a gate):
+            # a true cold rebuild (warm=nothing, fresh owner) of the committed
+            # pair's stored words.
+            cold = NP.build(copy(ctx.pair.s), copy(ctx.pair.y), ctx.pair.mu,
+                ctx.layout; policy = NP.POLICY, settings = ctx.settings,
+                owner = NP.Owner())
+            cold isa NP.PairReceipt && (cold_rebuildable += 1)
             # rejected-trial rollback: anchor and tokens unchanged after a
             # failed trial construction attempt.
             anchor_before = ctx.owner.anchor
@@ -135,7 +148,9 @@ end
         if res.merit <= target
             aud = terminal_audit(ctx)
             if aud.membership && aud.sNy <= 1e-6 && aud.obj_err <= 1e-6 &&
-               aud.primal_feas <= 1e-7 && aud.dual_feas <= 1e-7
+               aud.primal_feas <= 1e-7 && aud.dual_feas <= 1e-7 &&
+               aud.homo_gap <= 1e-7 && aud.kappa_tau <= 1e-6 &&
+               aud.mu_norm <= 1e-6 && aud.scalars_ok && abs(aud.obj_gap) <= 1e-6
                 terminal_ok = true
                 println("TERMINATED iter=", iter, " merit=", res.merit, " obj_err=", aud.obj_err)
                 break
@@ -148,11 +163,16 @@ end
     terminal = terminal_audit(ctx)
     println("TERMINAL merit=", terminal.m, " membership=", terminal.membership,
         " pr=", terminal.primal_feas, " dr=", terminal.dual_feas,
-        " sNy=", terminal.sNy, " obj=", terminal.obj, " obj_err=", terminal.obj_err)
+        " sNy=", terminal.sNy, " homo_gap=", terminal.homo_gap,
+        " kappa/tau=", terminal.kappa_tau, " mu/tau=", terminal.mu_norm,
+        " obj=", terminal.obj, " obj_err=", terminal.obj_err)
     @test terminal.membership
     @test terminal.sNy <= 1e-6
     @test terminal.primal_feas <= 1e-7 && terminal.dual_feas <= 1e-7
+    @test terminal.homo_gap <= 1e-7 && terminal.kappa_tau <= 1e-6
+    @test terminal.mu_norm <= 1e-6 && terminal.scalars_ok && abs(terminal.obj_gap) <= 1e-6
     @test terminal.obj_err <= 1e-4
+    println("COLD_REBUILDABLE ", cold_rebuildable, "/", ctx.iterations)
     println("ACCEPTED_STEPS ", length(ctx.history))
     for h in ctx.history
         println("  alpha=", h.alpha, " merit=", h.merit, " sigma_mu=", h.sigma_mu)

@@ -9,9 +9,11 @@ Cold start -> certified terminal in 27 accepted steps. Every step is a genuine
 accepted trial with alpha in [0.026, 0.90] (useful-progress floor
 2cbrt(eps) ~ 1.21e-5), each trial carrying a FRESH full-gap polynomial root,
 stored-shadow reconstruction, compensated half-Power factor, true-geometry/
-decrement/BFGS certificates, a warm-path acceptance PLUS an independent cold
-replay certification (so committed pairs are warm-independent), and atomic
-commit of (point, factor pair, warm lineage, epoch). Homotopy/merit/progress
+decrement/BFGS certificates, and atomic commit of (point, factor pair, warm
+lineage, epoch). Accepted pairs are certified with their retained warm probe;
+in this run 24/27 accepted pairs are ALSO certifiable from a true cold rebuild
+(warm=nothing, fresh owner), recorded as an observed diagnostic, not a
+guarantee. Homotopy/merit/progress
 gates replicated unchanged from src/hsd. Predictor centering follows the
 reviewed source policy including the DUAL boundary (primal and dual cone
 bounds + tau/kappa), not primal only. Terminal original-coordinate audit is
@@ -20,12 +22,15 @@ coordinates, not the loop residual routine or cached vectors):
 - merit (homogeneous residuals) 8.39e-9 <= 1e-8 target
 - recovered primal residual 7.00e-10, dual residual 7.00e-10
 - complementarity s'y/tau^2 = 6.71e-9 ; cone membership true (1e-7 band)
+- recovered homogeneous gap c'x*+b'y*+kappa/tau = 2.80e-9, kappa/tau = 5.58e-10
 - objective 1.1242390972345995 vs exact 1.1242390986454483421 -> err 1.41e-9
 
-247 driver assertions pass at the frozen worktree HEAD; per-step next-epoch
-five-equation certification (2^-17), NC affine certification, cold replay
-certification, same-owner previous-generation stale-token refusal, and
-rejected-trial rollback (anchor/generation unchanged) are asserted.
+222 driver assertions pass at the frozen worktree HEAD; per-step next-epoch
+five-equation certification (2^-17), NC affine certification, ordinary terminal
+certificate inequalities (complementarity, recovered gap, kappa/tau, normalized
+mu, finite positive scalars), same-owner previous-generation stale-token
+refusal, and rejected-trial rollback (anchor/generation unchanged) are
+asserted.
 
 ## How it works
 

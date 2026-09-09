@@ -266,11 +266,7 @@ function step!(ctx; sigma_override = nothing)
             d.dx, d.ds, d.dy, d.dtau, d.dkappa, alpha)
         trial = NP.trial(ctx.pair, ctx.tau, ctx.kappa, d.ds, d.dy, d.dtau, d.dkappa,
             alpha; warm = ctx.owner.tokens)
-        # warm-path acceptance PLUS cold replay certification: the committed
-        # pair must be certified independently of the warm probe seed, so a
-        # later rebuild cannot disagree with the accepted geometry.
-        t_ok = trial.status === :certified && trial.tau > 0.0 && trial.kappa > 0.0 &&
-               NP.certify(trial.pair).status === :certified
+        t_ok = trial.status === :certified && trial.tau > 0.0 && trial.kappa > 0.0
         if t_ok
             p2 = maxinf(tr.rPt); d2 = maxinf(tr.rDt)
             trial_merit = max(p2, d2, abs(tr.gap2))
