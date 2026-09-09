@@ -41,6 +41,16 @@ inside(I,x)=Q(I.lo)<=x<=Q(I.hi)
             @test result.status===:certified
             result.status===:certified || continue
             @test length(result.selected.history)<=27
+            @test first(result.selected.history).shifts==(0,0,0)
+            @test all(h->h.certificate.status!==:certified,result.selected.history[1:end-1])
+            @test result.selected.history[end].L==result.L
+            for attempt in result.selected.history
+                @test attempt.L[:,2:3]==result.selected.original[:,2:3]
+                for i in 1:3
+                    original=result.selected.original[i,1]
+                    @test attempt.L[i,1] in (prevfloat(original),original,nextfloat(original))
+                end
+            end
             @test result.factor.reason===:true_stored_hessian_only
             @test !hasproperty(result.factor,:decrement)
             @test !result.production_admitted
@@ -63,4 +73,6 @@ inside(I,x)=Q(I.lo)<=x<=Q(I.hi)
                 " products=",result.products," sums=",result.sums)
         end
     end
+    @test HC.compute([1.,1.,0.],[NaN,0.,0.],[1.5,0.,0.]).status===:unsupported
+    @test HC.compute([1.,1.,2.],[1.,0.,0.],[1.5,0.,0.]).status===:unsupported
 end
