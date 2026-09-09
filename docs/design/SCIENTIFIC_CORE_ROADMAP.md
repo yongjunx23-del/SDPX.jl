@@ -32,6 +32,12 @@
 - **R0 半参数根/仿射 epoch/高阶修正**（`035a28c` 等）：断开实验资格，非生产。
 - **R1-A AccuracyContract + R2-A 真实 symbolic 计数**：已集成。
 - **T0 首轮**（`6a1333c`）：MOSEK/Clarabel/SDPX BigFloat 通过；Float64 Power 缺陷定位为 scaling 构造失败。
+- **R0–R3 统一验收（窄范围）**：Astra round-3 **PASS**（`febad00` 记录）；分区 1/2/3 = 3736/196/4622+1 broken，R2-A 门 Warm100=0/Cold100=1；故障注入 33/33。**不等于全阶段关闭**。
+- **R1-B 窄测试**（`1cc1b40`）：BigFloat 256/512/1024 owned-object 矩阵（别名隔离/重复求解/失败恢复/精度切换），standalone + CI 允许清单（`9dc5f68`）。
+- **R6-D 可重建交付**（`ced85ce`）：`check_reproducible_delivery.jl` 现如实记录 `manifest_sha1=absent` 与 active env Manifest，PASS/exit 0。
+- **R4-B MFLA panel SIMD 候选**（provider 分支 `f482be7`）：opt-in 4-lane Cholesky panel，位等价，blocked Cholesky 端到端 1.14–1.42×；SDPX 侧实验开关 `c5cb2c3`（默认关、版本鲁棒）。仅对 equality-Gram 较大问题有效；CSDR α3（42 等式）收益有限。
+- **CSDR 算法层调研**（`75ae7a7`，`docs/design/CSDR_ALGORITHM_OPTIONS.md`）：排序机会与“不再重查”清单；冻结指纹冲突裁决（roadmap 管辖，旧 guard 不变，105/`3a7833` 为未资格观察基线）。
+- **集群并行实测**：LP random_large 内层线程平坦（T1–T16），T32 −18%；进程级并行 282→559→893 solves/node-hr（ppn 8/16/32）。CSDR α3 本地 1/4 线程 41.3s→23.1s（1.79×），集群 1/8/16/32 战役进行中。
 
 ## 架构选择与不可越过的门（保持不变）
 
