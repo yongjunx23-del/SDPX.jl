@@ -42,6 +42,8 @@ end
     @test !r.accepted_state_available
     @test r.iterations == r.factorizations == r.factorization_attempts == 0
     @test isempty(r.x) && isempty(r.history) && r.audit === nothing
+    @test r.factor_ownership.prepared_dimension == r.factor_ownership.executed_dimension == 0
+    @test r.factor_ownership.factor_owner === :none && !r.factor_ownership.current
     @test_throws ErrorException FPH.execute_with_refusal(_ -> error("programming error"), run)
     @test_throws ArgumentError FPH.execute_with_refusal(_ -> throw(ArgumentError("bad input")), run)
 
@@ -61,6 +63,14 @@ end
     @test !singular.accepted_state_available
     @test singular.factorization_attempts == 1
     @test singular.factorizations == 0
+    @test singular.factor_ownership.factor_owner === :none
+    lost_start = FPH.execute_with_refusal(ledger -> begin
+        start(ledger)
+        throw(FPH.FactorPairNumericalRefusal(:startup,:injected,"state not returned"))
+    end, run)
+    @test lost_start.factorizations == 1
+    @test lost_start.factor_ownership.prepared_dimension == 0
+    @test lost_start.factor_ownership.factor_owner === :none
 
     # Diagnostics-level controls use genuine refusal counters. Construct a
     # planning context, then supply the actual attempted experimental route.
@@ -121,6 +131,13 @@ end
     ledger = FA.FactorizationLedger()
     st = start(ledger)
     @test ledger.attempts == ledger.completed == 1
+    pending = st.pending_epoch
+    own = FPH.retained_owner(st)
+    @test own.current && own.prepared_dimension == own.executed_dimension == 17
+    @test own.factor_owner === :factor_pair_session
+    @test st.pending_epoch === pending && ledger.attempts == ledger.completed == 1
+    @test isbitstype(typeof(own)) # no mutable state/factor references escape
+    @test st.A !== pending.A && st.x !== pending.x
     FPH.step!(st)
     anchor = st.owner.anchor
     history = copy(st.history)
@@ -135,6 +152,8 @@ end
     @test refused.pair_generation == st.owner.generation
     @test refused.factorization_attempts == attempts
     @test refused.factorizations == completed
+    @test refused.factor_ownership.current
+    @test refused.factor_ownership.executed_dimension == 17
     @test refused.refusal_stage === :terminal_audit
     @test refused.refusal_reason === :injected
     @test refused.refusal_detail == "known numerical refusal"
@@ -152,4 +171,53 @@ end
     @test limited.status === :iteration_limit
     @test limited.iterations == 2
     @test limited.factorization_attempts >= limited.factorizations >= 1
+    @test limited.factor_ownership.current
+
+    # Consumed pending epoch is no longer retained; historical LU is not an owner.
+    consumed = FPH.execute_with_refusal(start, state -> begin
+        state.pending_epoch = nothing # reproduce the actual consumption boundary
+        throw(FPH.FactorPairNumericalRefusal(:affine,:injected,"after consumption"))
+    end)
+    @test consumed.factorizations == 1 && consumed.accepted_state_available
+    @test consumed.factor_ownership.prepared_dimension == 0
+    @test consumed.factor_ownership.factor_owner === :none && !consumed.factor_ownership.current
+
+    # A stale retained object still owns prepared storage, never a current factor.
+    mutations = (
+        q -> (q.pending_generation += 1),
+        q -> (q.pending_pair = nothing),
+        q -> (q.owner.anchor = nothing),
+        q -> (q.owner = SDPX.NativeHalfPair.Owner()),
+        q -> (q.layout = SDPX.NativeHalfPair.Layout(0,(0.5,))),
+        q -> (q.A.nzval[1] = nextfloat(q.A.nzval[1])),
+        q -> (q.b[1] = nextfloat(q.b[1])),
+        q -> (q.c[1] = nextfloat(q.c[1])),
+        q -> (q.x[1] = -0.0), # exact words, not numeric equality
+        q -> (q.tau = nextfloat(q.tau)),
+        q -> (q.kappa = nextfloat(q.kappa)),
+        q -> (q.pending_epoch.A.nzval[1] = nextfloat(q.pending_epoch.A.nzval[1])),
+        q -> (q.pending_epoch.A.rowval[1] += 1),
+        q -> (q.pending_epoch.factor.factors[1,1] = nextfloat(q.pending_epoch.factor.factors[1,1])),
+        q -> (q.pending_epoch.factor.ipiv[1] += 1),
+        q -> (q.pending_epoch.cone.blocks[1].L[1,1] = nextfloat(q.pending_epoch.cone.blocks[1].L[1,1])),
+        q -> (q.pair.cone.blocks[1].L[1,1] = nextfloat(q.pair.cone.blocks[1].L[1,1])),
+    )
+    for mutate in mutations
+        q = start(FA.FactorizationLedger())
+        @test FPH.retained_owner(q).current
+        mutate(q)
+        snapshot = FPH.retained_owner(q)
+        @test snapshot.prepared_dimension == 17
+        @test snapshot.executed_dimension == 0 && !snapshot.current
+        @test snapshot.factor_owner === :factor_pair_session
+    end
+    q = start(FA.FactorizationLedger())
+    q.pending_epoch.factor.factors[1,1] = nextfloat(q.pending_epoch.factor.factors[1,1])
+    @test FA.integrity_failure(q.pending_epoch) !== nothing
+    @test_throws ErrorException FA.verify(q.pending_epoch)
+    q.pair.s[1] = nextfloat(q.pair.s[1])
+    @test SDPX.NativeHalfPair.integrity_failure(q.pair) !== nothing
+    @test_throws ErrorException SDPX.NativeHalfPair.verify(q.pair)
+    q.pending_epoch = :invalid_schema
+    @test_throws ArgumentError FPH.retained_owner(q)
 end

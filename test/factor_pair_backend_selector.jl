@@ -185,6 +185,9 @@ end
     @test d.memory.symmetric_core_actual_provider === :not_applicable
     @test d.termination.factor_pair_execution.refusal_stage === :none
     @test d.termination.factor_pair_execution.accepted_state_available
+    @test d.selected_algorithms.structure.factor_current
+    @test d.selected_algorithms.structure.prepared_core_dimension == 17
+    @test d.selected_algorithms.structure.executed_core_dimension == 17
     @test d.termination.factor_pair_execution.accepted_steps == d.termination.iterations
     @test d.termination.factor_pair_execution.factorization_attempts >= d.termination.factorizations > 0
 
@@ -194,7 +197,12 @@ end
         nonsymmetric_backend=SDPX.ExperimentalHalfPowerFactorPairBackend))
     @test SDPX.status(zero_time) === :time_limit
     @test !SDPX.certificate(zero_time).valid
-    @test SDPX.diagnostics(zero_time).termination.iterations == 0
+    zd = SDPX.diagnostics(zero_time)
+    @test zd.termination.iterations == 0
+    @test zd.selected_algorithms.structure.factor_current
+    @test zd.selected_algorithms.structure.factor_owner === :factor_pair_session
+    @test zd.selected_algorithms.structure.prepared_core_dimension == 17
+    @test zd.selected_algorithms.structure.executed_core_dimension == 17
 
     # The default path still executes and records the native backend choice.
     result = SDPX.optimize!(model; settings=SDPX.Settings(Float64;

@@ -1569,6 +1569,7 @@ function _factor_pair_public_core(
             accepted_state_available=get(terminal, :accepted_state_available, true),
             pair_generation=terminal.pair_generation,
             accepted_steps=length(terminal.history),
+            factor_ownership=terminal.factor_ownership,
         ),
         factor_pair_terminal=terminal.audit === nothing ? nothing : (
             tau=terminal.tau,
@@ -1586,10 +1587,10 @@ function _factor_pair_public_core(
                          last(terminal.history).backtracking,
         ),
         core_dimension=core_dim,
-        owner_prepared_dimension=core_dim,
-        owner_executed_dimension=status === Optimal ? core_dim : 0,
-        factor_owner=:factor_pair_session,
-        owner_current=status === Optimal,
+        owner_prepared_dimension=terminal.factor_ownership.prepared_dimension,
+        owner_executed_dimension=terminal.factor_ownership.executed_dimension,
+        factor_owner=terminal.factor_ownership.factor_owner,
+        owner_current=terminal.factor_ownership.current,
         owner_unused=(),
     )
 end

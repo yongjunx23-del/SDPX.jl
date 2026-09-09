@@ -63,9 +63,14 @@ struct BlockMetric
     shadow::Vector{Float64}
     frozen::Tuple{Vararg{UInt64}}
 end
-function verify(block::BlockMetric)
+function integrity_failure(block::BlockMetric)
     fingerprint(block.L,block.R,block.scale,block.mu,block.primal,block.dual,block.shadow)==block.frozen ||
-        error("factor/point/scale epoch drift")
+        return "factor/point/scale epoch drift"
+    nothing
+end
+function verify(block::BlockMetric)
+    failure = integrity_failure(block)
+    failure === nothing || error(failure)
     true
 end
 function block_metric(offset,L,s,y,shadow,mu)
@@ -107,14 +112,22 @@ struct FactorCone <: SDPX.AbstractConeLinearization{Float64}
     frozen_lp::Tuple{Vararg{UInt64}}
 end
 SDPX.cone_dimension(cone::FactorCone)=cone.dimension
-function SDPX.validate_cone_linearization(cone::FactorCone)
-    words(cone.lp_scales)==cone.frozen_lp || error("LP factor drift")
-    all(x->isfinite(x)&&x>0,cone.lp_scales) || error("LP factor domain")
+function integrity_failure(cone::FactorCone)
+    words(cone.lp_scales)==cone.frozen_lp || return "LP factor drift"
+    all(x->isfinite(x)&&x>0,cone.lp_scales) || return "LP factor domain"
     expected=length(cone.lp_scales)+1
     for b in cone.blocks
-        b.offset==expected || error("factor cone coverage drift");verify(b);expected+=3
+        b.offset==expected || return "factor cone coverage drift"
+        failure = integrity_failure(b)
+        failure === nothing || return failure
+        expected+=3
     end
-    expected==cone.dimension+1 || error("factor cone dimension drift")
+    expected==cone.dimension+1 || return "factor cone dimension drift"
+    nothing
+end
+function SDPX.validate_cone_linearization(cone::FactorCone)
+    failure = integrity_failure(cone)
+    failure === nothing || error(failure)
     true
 end
 function transform(cone::FactorCone,v,kind::Symbol)
@@ -162,11 +175,17 @@ end
 function epoch_fingerprint(e)
     fingerprint(e.A.nzval,e.b,e.c,e.x,e.s,e.y,e.tau,e.kappa,e.mu,e.Ahat,e.bhat,e.core,e.factor.factors)
 end
-function verify(e::AffineEpoch)
-    SDPX.validate_cone_linearization(e.cone)
-    epoch_fingerprint(e)==e.frozen || error("affine numerical epoch drift")
+function integrity_failure(e::AffineEpoch)
+    failure = integrity_failure(e.cone)
+    failure === nothing || return failure
+    epoch_fingerprint(e)==e.frozen || return "affine numerical epoch drift"
     (size(e.A),Tuple(e.A.colptr),Tuple(e.A.rowval),Tuple(e.factor.ipiv),
-        Tuple((b.offset,b.frozen) for b in e.cone.blocks),e.cone.frozen_lp,e.factor_mode)==e.frozen_structure || error("affine structure/factor drift")
+        Tuple((b.offset,b.frozen) for b in e.cone.blocks),e.cone.frozen_lp,e.factor_mode)==e.frozen_structure || return "affine structure/factor drift"
+    nothing
+end
+function verify(e::AffineEpoch)
+    failure = integrity_failure(e)
+    failure === nothing || error(failure)
     true
 end
 function build(row;factor_mode::Symbol=:stored_native)

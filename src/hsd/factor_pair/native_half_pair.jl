@@ -80,24 +80,30 @@ function pair_key(p::PairReceipt)
         key(p.cone.lp_scales),Tuple((b.offset,key(b.L),key(b.R),key(b.scale),key(b.mu),key(b.primal),key(b.dual),key(b.shadow)) for b in p.cone.blocks),
         key(p.reports),VERSION,Sys.ARCH,Sys.KERNEL)
 end
-function verify(p::PairReceipt)
-    RG.Phi._runtime_ok() || error("unsupported pair arithmetic context")
-    p.status===:certified && !p.production_admitted && p.policy===POLICY && valid(p.settings) || error("pair policy")
-    length(p.s)==length(p.y)==p.cone.dimension && valid(p.layout,length(p.s)) || error("pair dimensions")
+function integrity_failure(p::PairReceipt)
+    RG.Phi._runtime_ok() || return "unsupported pair arithmetic context"
+    p.status===:certified && !p.production_admitted && p.policy===POLICY && valid(p.settings) || return "pair policy"
+    length(p.s)==length(p.y)==p.cone.dimension && valid(p.layout,length(p.s)) || return "pair dimensions"
     p.layout.orthant==length(p.cone.lp_scales) && length(p.layout.alphas)==length(p.cone.blocks)==length(p.reports) ||
-        error("pair coverage")
-    isfinite(p.mu)&&p.mu>0 && all(isfinite,p.s)&&all(isfinite,p.y) || error("pair finite domain")
-    all(i->p.s[i]>0 && p.y[i]>0,1:p.layout.orthant) || error("orthant pair interior")
-    pair_key(p)==p.frozen || error("pair receipt drift")
-    SDPX.validate_cone_linearization(p.cone)
+        return "pair coverage"
+    isfinite(p.mu)&&p.mu>0 && all(isfinite,p.s)&&all(isfinite,p.y) || return "pair finite domain"
+    all(i->p.s[i]>0 && p.y[i]>0,1:p.layout.orthant) || return "orthant pair interior"
+    pair_key(p)==p.frozen || return "pair receipt drift"
+    failure = FA.integrity_failure(p.cone)
+    failure === nothing || return failure
     for (b,r) in zip(p.cone.blocks,p.reports)
         rows=b.offset:b.offset+2
-        size(b.L)==size(b.R)==(3,3) && length(b.primal)==length(b.dual)==length(b.shadow)==3 || error("pair factor dimensions")
-        b.offset==r.offset && b.primal==p.s[rows] && b.dual==p.y[rows] && b.mu==p.mu || error("pair metric point drift")
+        size(b.L)==size(b.R)==(3,3) && length(b.primal)==length(b.dual)==length(b.shadow)==3 || return "pair factor dimensions"
+        b.offset==r.offset && b.primal==p.s[rows] && b.dual==p.y[rows] && b.mu==p.mu || return "pair metric point drift"
         x,y,z=RG.point.(b.primal)
-        b.primal[1]>0 && b.primal[2]>0 && (x*y-z*z).lo>0 || error("primal pair interior")
-        SDPX._ns_conjugate_primal_interior(SDPX.PowerConjugateTag{Float64}(0.5),b.primal...) || error("native primal interior")
+        b.primal[1]>0 && b.primal[2]>0 && (x*y-z*z).lo>0 || return "primal pair interior"
+        SDPX._ns_conjugate_primal_interior(SDPX.PowerConjugateTag{Float64}(0.5),b.primal...) || return "native primal interior"
     end
+    nothing
+end
+function verify(p::PairReceipt)
+    failure = integrity_failure(p)
+    failure === nothing || error(failure)
     true
 end
 function root_call(y,s,probe)

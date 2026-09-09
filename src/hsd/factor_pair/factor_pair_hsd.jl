@@ -530,6 +530,51 @@ function step!(st::FactorPairState; sigma_override = nothing)
     end
 end
 
+# ------------------------------------------------------- retained factor ownership
+# Scalar-only receipt of the boundary snapshot, not a promise that Result
+# retains a factor after this solve-local state is released.
+_owner_receipt(dim::Int, current::Bool, reason::Symbol) =
+    (; prepared_dimension=dim, executed_dimension=current ? dim : 0,
+       factor_owner=dim == 0 ? :none : :factor_pair_session, current, reason)
+_words_equal(a::AbstractArray{Float64}, b::AbstractArray{Float64}) =
+    size(a) == size(b) && FA.words(a) == FA.words(b)
+_words_equal(a::Float64, b::Float64) = FA.words(a) == FA.words(b)
+retained_owner(::Nothing) = _owner_receipt(0, false, :no_returned_state)
+function retained_owner(st::FactorPairState)
+    e = st.pending_epoch
+    e === nothing && return _owner_receipt(0, false, :no_retained_epoch)
+    e isa FA.AffineEpoch || throw(ArgumentError("unexpected retained factor-pair epoch type"))
+    dim = size(e.core, 1) # actual retained storage, not a planned dimension
+    st.pending_pair === st.pair && st.owner.anchor === st.pair &&
+        st.pair.owner === st.owner &&
+        st.pending_generation == st.owner.generation == st.pair.generation ||
+        return _owner_receipt(dim, false, :owner_lineage)
+    NP.layout_key(st.layout) == NP.layout_key(st.pair.layout) &&
+        NP.settings_key(st.settings) == NP.settings_key(st.pair.settings) ||
+        return _owner_receipt(dim, false, :state_configuration)
+    NP.integrity_failure(st.pair) === nothing ||
+        return _owner_receipt(dim, false, :pair_integrity)
+    FA.integrity_failure(e) === nothing ||
+        return _owner_receipt(dim, false, :epoch_integrity)
+    m, n = size(st.A)
+    size(e.core) == (m+n+2, m+n+2) && size(e.A) == size(st.A) &&
+        e.A.colptr == st.A.colptr && e.A.rowval == st.A.rowval &&
+        _words_equal(e.A.nzval, st.A.nzval) &&
+        _words_equal(e.b, st.b) && _words_equal(e.c, st.c) &&
+        _words_equal(e.x, st.x) && _words_equal(e.s, st.pair.s) &&
+        _words_equal(e.y, st.pair.y) && _words_equal(e.tau, st.tau) &&
+        _words_equal(e.kappa, st.kappa) && _words_equal(e.mu, st.pair.mu) ||
+        return _owner_receipt(dim, false, :state_words)
+    e.cone.dimension == st.pair.cone.dimension &&
+        _words_equal(e.cone.lp_scales, st.pair.cone.lp_scales) &&
+        Tuple((b.offset,b.frozen) for b in e.cone.blocks) ==
+            Tuple((b.offset,b.frozen) for b in st.pair.cone.blocks) &&
+        e.factor_mode === :native_half_pair &&
+        e.source_record == st.source_record + st.iterations ||
+        return _owner_receipt(dim, false, :epoch_binding)
+    return _owner_receipt(dim, true, :current)
+end
+
 # ------------------------------------------------------- public failure boundary
 # This is a failure snapshot, not a certificate attempt: a failed audit must
 # not be required to succeed just to report the last accepted point.
@@ -574,7 +619,7 @@ function execute_with_refusal(start, iterate;
         end
     end
     return (; terminal..., factorization_attempts=ledger.attempts,
-        factorizations=ledger.completed)
+        factorizations=ledger.completed, factor_ownership=retained_owner(st))
 end
 
 # ------------------------------------------------------- terminal authority
