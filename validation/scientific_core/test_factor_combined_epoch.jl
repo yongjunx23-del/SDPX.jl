@@ -14,6 +14,15 @@ function refreeze(c;rho=copy(c.rho),hhat=copy(c.hhat),z=copy(c.z),rhs=FC.copy_rh
     p=FC.CombinedEpoch(c.epoch,direction,sigma_mu,corrections,rho,hhat,z,rhs,())
     FC.CombinedEpoch(c.epoch,direction,sigma_mu,corrections,rho,hhat,z,rhs,FC.fingerprint(p))
 end
+function exact_action_error(expected,actual,M,source)
+    residual=Q.(actual)-expected
+    work=abs.(Q.(actual))+abs.(M)*abs.(Q.(source))
+    maximum(iszero(work[i]) ? (iszero(residual[i]) ? Q(0) : error("zero work")) : abs(residual[i])/work[i] for i in eachindex(work))
+end
+function refreeze_epoch(e)
+    values=Tuple(k===:frozen ? FA.epoch_fingerprint(e) : getproperty(e,k) for k in fieldnames(typeof(e)))
+    typeof(e)(values...)
+end
 direction_fields(d)=(;dx=copy(d.dx),dy=copy(d.dy),ds=copy(d.ds),dtau=d.dtau,dkappa=d.dkappa)
 rhs_fields(r)=(;primal=copy(r.primal_affine),dual=copy(r.dual_affine),gap=r.homogeneous_gap,h=copy(r.cone_corrector),tau_kappa=r.tau_kappa)
 @testset "frozen combined factor epochs" begin
@@ -43,9 +52,15 @@ rhs_fields(r)=(;primal=copy(r.primal_affine),dual=copy(r.dual_affine),gap=r.homo
             end
             scalar=Q(combined.sigma_mu)-Q(e.tau)*Q(e.kappa)-Q(affine.direction.dtau)*Q(affine.direction.dkappa)
             @test inside(certificate.scalar_expected,scalar)
+            scalar_work=abs(Q(combined.rhs.tau_kappa))+Q(combined.sigma_mu)+abs(Q(e.tau)*Q(e.kappa))+
+                abs(Q(affine.direction.dtau)*Q(affine.direction.dkappa))
+            @test abs(Q(combined.rhs.tau_kappa)-scalar)/scalar_work<=Q(certificate.scalar_error)
             for i in eachindex(e.cone.lp_scales)
                 expected=(Q(combined.sigma_mu)-Q(e.s[i])*Q(e.y[i])-Q(affine.direction.ds[i])*Q(affine.direction.dy[i]))/Q(e.y[i])
                 @test inside(certificate.orthant_reports[i].expected,expected)
+                work=abs(Q(combined.rhs.cone_corrector[i]))+(Q(combined.sigma_mu)+abs(Q(e.s[i])*Q(e.y[i]))+
+                    abs(Q(affine.direction.ds[i])*Q(affine.direction.dy[i])))/Q(e.y[i])
+                @test abs(Q(combined.rhs.cone_corrector[i])-expected)/work<=Q(certificate.orthant_reports[i].error)
             end
             G=ref.W'*ref.W
             for (k,b) in enumerate(e.cone.blocks)
@@ -55,9 +70,34 @@ rhs_fields(r)=(;primal=copy(r.primal_affine),dual=copy(r.dual_affine),gap=r.homo
                     (report.intervals.tr,Ti*ri),(report.intervals.tz,Ti*zi),(report.intervals.gh,Gi*hi))
                     @test all(i->inside(intervals[i],exact[i]),1:3)
                 end
+                @test exact_action_error(Si'*ri,hhi,Si',ri)<=Q(report.errors.adjoint)
+                @test exact_action_error(Si*hhi,hi,Si,hhi)<=Q(report.errors.recovery)
+                @test exact_action_error(Ti*ri,hi,Ti,ri)<=Q(report.errors.forward)
+                @test exact_action_error(Ti*zi,hi,Ti,zi)<=Q(report.errors.inverse_posterior)
+                @test exact_action_error(Gi*hi,zi,Gi,hi)<=Q(report.errors.inverse_action)
+                work=abs.(ri)+abs.(Gi)*abs.(hi)+abs.(Gi)*abs.(Ti)*abs.(ri)
+                @test maximum(abs.(zi-ri)./work)<=Q(report.composed_error)
+                @test maximum(abs.(Gi*hi-ri)./work)<=Q(report.composed_error)
                 data=combined.corrections[k].data
+                x,y,z=Q.(e.s[rows]);gap=x*y-z*z;gradient=Q[y/gap+1/(2x),x/gap+1/(2y),-2z/gap]
+                expected=Q(combined.sigma_mu)*gradient-Q.(e.y[rows])-Q.(data.chi)
+                work=abs.(ri)+Q(combined.sigma_mu)*abs.(gradient)+abs.(Q.(e.y[rows]))+abs.(Q.(data.chi))
+                @test maximum(abs.(ri-expected)./work)<=Q(report.errors.rho)
                 @test data.L !== b.L
                 @test combined.corrections[k].point==e.s[rows]
+            end
+            if sigma==0.25
+                mismatched=deepcopy(e);mismatched.s[4]+=0.125;mismatched=refreeze_epoch(mismatched)
+                @test FA.verify(mismatched)
+                @test NativeFactorAffineCertificate.certify(mismatched,
+                    (;direction=affine.direction,rhs=FA.affine_rhs(mismatched))).reason===:metric_epoch_point
+                @test FC.certify(refreeze(combined;sigma_mu=combined.sigma_mu+1e-3),result).status===:unsupported
+                @test FC.certify(refreeze(combined;sigma_mu=NaN),result).reason===:sigma_domain
+                omitted=SDPX.HSDNewtonRHS(copy(combined.rhs.primal_affine),copy(combined.rhs.dual_affine),
+                    combined.rhs.homogeneous_gap,copy(combined.rhs.cone_corrector),combined.sigma_mu-e.tau*e.kappa)
+                @test FC.certify(refreeze(combined;rhs=omitted),(;result...,rhs=FC.copy_rhs(omitted))).status===:unsupported
+                wrongrhs=FC.copy_rhs(combined.rhs);wrongrhs.primal_affine[1]+=1e-3
+                @test FC.certify(refreeze(combined;rhs=wrongrhs),(;result...,rhs=FC.copy_rhs(wrongrhs))).reason===:semantic_rhs
             end
             @test NativeFactorAffineCertificate.certify(e,result).reason===:non_affine
             @test_throws ErrorException FA.solve(e,result.rhs)

@@ -27,7 +27,9 @@ Epoch ownership/fingerprints cover retained inputs, raw current-point correction
 values and attempted factors, rho/hHat/h/z, scalar/RHS groups, and affine direction.
 The original affine API and native affine certificate retain non-affine refusal.
 Only their private original-equation certificate kernel is shared after separate
-provenance guards.
+provenance guards. That kernel additionally requires each metric block's copied
+primal/dual/mu to equal the original epoch's corresponding inputs: separately
+refingerprinted but mismatched point metadata is not a valid certificate.
 
 ## Independent native authority
 

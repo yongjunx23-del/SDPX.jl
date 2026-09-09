@@ -104,6 +104,11 @@ function _certify_equations(epoch,result)
     FA.verify(epoch)
     RG.Phi._runtime_ok() || return (status=:unsupported,reason=:runtime)
     m,n=size(epoch.A);direction=result.direction;rhs=result.rhs
+    for block in epoch.cone.blocks
+        rows=block.offset:block.offset+2
+        block.primal==epoch.s[rows] && block.dual==epoch.y[rows] && block.mu==epoch.mu ||
+            return (status=:unsupported,reason=:metric_epoch_point,production_admitted=false)
+    end
     all(A->all(x->isfinite(x)&&(iszero(x)||0x1p-80<=abs(x)<=0x1p80),A),
         (epoch.A.nzval,epoch.b,epoch.c,direction.dx,direction.dy,direction.ds,
          rhs.primal_affine,rhs.dual_affine,rhs.cone_corrector)) || return (status=:unsupported,reason=:data_domain)
