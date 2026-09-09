@@ -170,3 +170,39 @@ function discard_symbolic!(slot::SessionSymbolicSlot)
     end
     return nothing
 end
+
+"""Force-close a lease after an unexpected check-in-path failure.
+
+Only the owning task may call this.  It invalidates any attached entry,
+clears the slot and releases the slot lock so the session is never left
+with an active owner or a retained factor.  Used when the check-in path
+fails before `finish_symbolic!` could run its own cleanup (e.g. a fault in
+the compatibility/generation step).
+"""
+function abandon_symbolic!(lease::SessionSymbolicLease)
+    entry = lease.entry
+    if entry !== nothing
+        try
+            invalidate!(entry.cache)
+        catch
+            # Never let diagnostics prevent the slot release below.
+        end
+    end
+    slot = lease.slot
+    if slot !== nothing
+        slot.entry = nothing
+        slot.active = false
+        if islocked(slot.lock)
+            try
+                unlock(slot.lock)
+            catch
+            end
+        end
+    end
+    lease.entry = nothing
+    lease.slot = nothing
+    lease.task = nothing
+    lease.active = false
+    lease.attached = false
+    return nothing
+end

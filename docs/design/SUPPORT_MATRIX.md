@@ -1,7 +1,9 @@
 # SDPX support matrix (R6-A)
 
-Status: **2026-09-09**, dev branch `development/scientific-core-20260907`, HEAD `f74a465`, SDPX 0.6.1.
-This matrix records the *actual* qualification state. A route listed as
+Status: **2026-09-09**, dev branch `development/scientific-core-20260907`, SDPX 0.6.1.
+This matrix records the *actual* qualification state and is maintained with the
+living plan (`docs/design/SCIENTIFIC_CORE_ROADMAP.md`); it is not pinned to a
+single historical HEAD. A route listed as
 `experimental` is opt-in and fail-closed; `unavailable` means the request is
 refused or returns a non-optimal result with an invalid certificate. No entry
 claims more than its evidence supports.
