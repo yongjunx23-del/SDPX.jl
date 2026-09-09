@@ -1747,4 +1747,79 @@ function SDPX._fixed_trace_neighborhood_vec4!(
     return true
 end
 
+# ---------------------------------------------------------------------------
+# Threaded exact dual Newton stats (autoresearch optimization).
+#
+# The per-column muladd chain is sequential and unchanged.  The cross-column
+# max/and reduction is exact (floating-point max and boolean conjunction do
+# not round), so a fixed contiguous column partition with per-task local
+# reduction and an ordered merge reproduces the serial `_shared_dual_stats`
+# result bit for bit at any thread count.  Parallelism goes through the
+# solver-owned `_q3_foreach` task pool (bounded, deterministic partition).
+# ---------------------------------------------------------------------------
+function _dual_stats_column_range!(
+    A::SparseMatrixCSC{MF,Int}, c::AbstractVector{MF},
+    dy::AbstractVector{MF}, dtau::MF, rD::AbstractVector{MF},
+    lo::Int, hi::Int,
+) where {T,N,MF<:MultiFloat{T,N}}
+    cw = true
+    gr = zero(MF)
+    on = zero(MF)
+    @inbounds for j in lo:hi
+        cdt = c[j] * dtau
+        residual = muladd(c[j], dtau, rD[j])
+        local_work = abs(rD[j]) + abs(cdt)
+        row_norm = abs(c[j])
+        for ptr in nzrange(A, j)
+            term = A.nzval[ptr] * dy[A.rowval[ptr]]
+            residual = muladd(A.nzval[ptr], dy[A.rowval[ptr]], residual)
+            local_work += abs(term)
+            row_norm += abs(A.nzval[ptr])
+        end
+        cw &= SDPX._product_hsd_newton_close(residual, local_work)
+        gr = max(gr, abs(residual))
+        on = max(on, row_norm)
+    end
+    return (cw, gr, on)
+end
+
+function SDPX._dual_newton_stats_threaded!(
+    A::SparseMatrixCSC{MF,Int}, c::AbstractVector{MF},
+    dy::AbstractVector{MF}, dtau::MF, rD::AbstractVector{MF},
+) where {T,N,MF<:MultiFloat{T,N}}
+    (MF === Float64x2 || MF === Float64x4) || return nothing
+    n = length(c)
+    nnz(A) < 65_536 && return nothing
+    workers = min(Threads.nthreads(), 8)
+    workers <= 1 && return nothing
+    chunk = cld(n, workers)
+    results = Vector{Tuple{Bool,MF,MF}}(undef, workers)
+    SDPX._q3_foreach(1:workers, workers; min_items=1) do worker
+        lo = (worker - 1) * chunk + 1
+        hi = min(worker * chunk, n)
+        results[worker] = _dual_stats_column_range!(
+            A, c, dy, dtau, rD, lo, hi,
+        )
+    end
+    componentwise = true
+    group_residual = zero(MF)
+    operator_norm = zero(MF)
+    for worker in 1:workers
+        cw, gr, on = results[worker]
+        componentwise &= cw
+        group_residual = max(group_residual, gr)
+        operator_norm = max(operator_norm, on)
+    end
+    rhs_norm = zero(MF)
+    direction_norm = abs(dtau)
+    m = length(dy)
+    @inbounds for k in 1:m
+        direction_norm = max(direction_norm, abs(dy[k]))
+    end
+    @inbounds for j in 1:n
+        rhs_norm = max(rhs_norm, abs(rD[j]))
+    end
+    return (componentwise, group_residual,
+        operator_norm * direction_norm + rhs_norm)
+end
 end

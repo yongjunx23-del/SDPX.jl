@@ -6,11 +6,11 @@ export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
 
 # CSDR alpha3 Float64x4 (primary): median of 3 guarded solves
 out=$($JULIA --startup-file=no --threads=4 --gcthreads=1 --heap-size-hint=4G \
-  --project=/tmp/sdpx-scientific-core-env-20260907 \
+  --project=/tmp/sdpx-opt-env-20260910 \
   .auto/csdr_bench.jl 2>&1) || { echo "CSDR_RUN_FAILED"; echo "$out" | tail -5; exit 1; }
 echo "$out" | grep -E "^METRIC" || { echo "NO_METRICS"; echo "$out" | tail -5; exit 1; }
 echo "$out" | grep -E "^METRIC|^CSDR"
 
 # Float64 LP general catalog (secondary): single tier-small LP
-$JULIA --startup-file=no --threads=1 --project=/tmp/sdpx-scientific-core-env-20260907 \
+$JULIA --startup-file=no --threads=1 --project=/tmp/sdpx-opt-env-20260910 \
   .auto/lp_bench.jl 2>&1 | grep -E "^METRIC" || echo "LP_METRICS_FAILED"

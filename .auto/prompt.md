@@ -56,3 +56,14 @@ numerical drift fails the run. Secondary: Float64 LP/SOCP general catalog.
 - CSDR alpha3 Float64x4: 19.9s median, 105 iterations, 914MB alloc, 5.0GB RSS
 - lp_seconds (3 catalog cases): 30.9s (JIT-heavy; treat as secondary)
 - Guard: certificate valid + objective within 1e-8 rel + 3-run determinism
+
+## Experiment log
+### E1: threaded exact dual Newton stats (KEPT)
+- Dual residual gate was 16.8ms/gate x2/iter (3.5s total, 30% of solve).
+- Added `_dual_newton_stats_threaded!` in the MFLA ext: fixed contiguous
+  column partition, per-task local reduction, ordered merge. Per-column
+  muladd chain unchanged; max/and are exact so results are bit-identical.
+- CSDR: 19.9s -> 17.37s (1.15x), 105 iters unchanged, objective/residuals
+  bit-identical. NOTE: ext module code must live INSIDE the module `end`.
+- Remaining hot spots (per iter): Gram SYRK 19ms, gate cone 2ms, solve
+  stages ~12ms x2, corr_rhs 9.2ms, schur_assembly 8.3ms, homogeneous 6.2ms.

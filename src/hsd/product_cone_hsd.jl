@@ -1,3 +1,7 @@
+const GATE_PRIMAL = Ref(0.0)
+const GATE_DUAL = Ref(0.0)
+const GATE_GAP = Ref(0.0)
+const GATE_CONE = Ref(0.0)
 #=====================================================================#
 
 @enum SymmetricBorderedReason::UInt8 begin
@@ -2359,12 +2363,23 @@ end
     )
 end
 
+function _dual_newton_stats_threaded!(args...)
+    return nothing
+end
+
 @inline function _product_hsd_dual_newton_stats(
     state::ProductConeHSDState{T},
 ) where {T}
     base = state.base
     # Columnwise muladd accumulation is the shared helper (same formulas,
-    # same order).
+    # same order).  The per-column muladd chain is sequential and unchanged;
+    # the cross-column max/and reduction is exact (floating-point max and
+    # boolean conjunction), so a deterministic fixed-partition threaded
+    # reduction reproduces the serial result bit for bit.
+    threaded = _dual_newton_stats_threaded!(
+        base.A, base.c, base.dy, base.dtau, base.rD,
+    )
+    threaded === nothing || return threaded
     return _shared_dual_stats(base.A, base.c, base.dy, base.dtau, base.rD)
 end
 
@@ -2480,12 +2495,15 @@ Base.@noinline function _product_hsd_newton_residual_ok(
     # A*dx + ds - b*dτ = -rP.  Componentwise arithmetic-work backward
     # stability is preferred; the standard scale-free normwise alternative
     # handles a structurally near-null row without an absolute floor.
+    t_g = time_ns()
     primal_componentwise, primal_residual, primal_work =
         _product_hsd_primal_newton_stats(state)
     (primal_componentwise ||
      _product_hsd_newton_close(primal_residual, primal_work)) || return false
+    GATE_PRIMAL[] += (time_ns() - t_g) * 1e-9
 
     # A'*dy + c*dτ = -rD.
+    t_g = time_ns()
     if _product_hsd_has_nonsymmetric(state) || !conditioned_authority
         dual_componentwise, dual_residual, dual_work =
             _product_hsd_dual_newton_stats(state)
@@ -2494,16 +2512,21 @@ Base.@noinline function _product_hsd_newton_residual_ok(
     else
         _product_hsd_symmetric_dual_residual_ok(state) || return false
     end
+    GATE_DUAL[] += (time_ns() - t_g) * 1e-9
 
     # Standard-HSD: c'*dx + b'*dy + dκ = -rG.  Gap terms are the shared
     # helper (same formulas, same order).
+    t_g = time_ns()
     gap_residual, gap_work = _shared_gap_terms(
         base.rG, base.dkappa, base.c, base.dx, base.b, base.dy,
     )
     _product_hsd_newton_close(gap_residual, gap_work) || return false
+    GATE_GAP[] += (time_ns() - t_g) * 1e-9
 
     # ds + Theta*dy = h. Recovery has left Theta*dy in `base.e`.
+    t_g = time_ns()
     _product_hsd_cone_newton_residual_ok(state) || return false
+    GATE_CONE[] += (time_ns() - t_g) * 1e-9
 
     # κ*dτ + τ*dκ = scalar_rhs.  Scalar terms are the shared helper (same
     # formulas, same order).
