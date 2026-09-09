@@ -846,6 +846,23 @@ mutable struct Q3EpochTimings
 end
 Q3EpochTimings() = Q3EpochTimings(0.0, 0.0, 0.0, 0, 0)
 
+# Process-wide Q3 worker budget for the current solve, set from the admitted
+# `settings.limits.threads`.  `_q3_workers()` caps it by the Julia pool and is
+# used by the task-based Q3 loops (HKM scalar/vec4).  A process-global value is
+# safe because a process executes one solve at a time (prepared sessions are
+# sequential and reject concurrent use); it is NOT cross-process admission
+# control.  `@threads :static` loops still use the whole pool, so a requested
+# budget below the pool requires `--threads` to match (one process per config).
+const _Q3_WORKER_BUDGET = Ref{Int}(typemax(Int))
+
+function set_q3_worker_budget!(n::Integer)
+    n >= 1 || throw(ArgumentError("Q3 worker budget must be positive"))
+    _Q3_WORKER_BUDGET[] = Int(n)
+    return Int(n)
+end
+
+@inline _q3_workers() = min(Threads.nthreads(), _Q3_WORKER_BUDGET[])
+
 mutable struct FixedTraceQ3CoreWorkspace{T,S,C,E,P}
     plan::P
     equality::E
@@ -889,6 +906,7 @@ mutable struct FixedTraceQ3CoreWorkspace{T,S,C,E,P}
     receipt_build_count::Int
     panel_action::Vector{T}       # scratch for structured A*v (equality rows)
     structured_A::Bool            # zero rows precede every soc block row
+    worker_budget::Int            # admitted Q3 worker budget (min'd with the pool)
     epoch_timing::Q3EpochTimings  # exclusive sub-phase timing, zero-allocation
 end
 
@@ -946,7 +964,8 @@ function _fixed_trace_primal_operator_norm(
 end
 
 function prepare_fixed_trace_q3_core_state(
-    system::NewtonSystem{T}, plan,
+    system::NewtonSystem{T}, plan;
+    workers::Integer=Threads.nthreads(),
 ) where {T<:AbstractFloat}
     n, m = length(system.c), length(system.b)
     plan.equality_panel |> size == (length(plan.zero_rows), n) ||
@@ -993,6 +1012,7 @@ function prepare_fixed_trace_q3_core_state(
         nothing, 0,
         alloc_zeros(T, length(plan.zero_rows)),
         _fixed_trace_structured_A_eligible(T, plan),
+        max(Int(workers), 1),
         Q3EpochTimings(),
     )
 end
@@ -1400,7 +1420,7 @@ function factor_symmetric_core_epoch!(
         "fixed-trace HKM linearization epoch is stale",
     ))
     epoch_timing = workspace.epoch_timing
-    epoch_timing.workers = Threads.nthreads()
+    epoch_timing.workers = _q3_workers()
     epoch_timing.epochs += 1
     t0 = time_ns()
     _fixed_trace_core_prepare_metric!(workspace, system)

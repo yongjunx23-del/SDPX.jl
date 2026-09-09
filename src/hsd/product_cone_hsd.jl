@@ -254,6 +254,9 @@ function _product_cone_hsd_state(
         ))
     end
     phase_timings = ProductHSDPhaseTimings()
+    # Admitted Q3 worker budget for this solve (task-based Q3 loops cap the
+    # Julia pool by this value; `@threads :static` loops still use the pool).
+    set_q3_worker_budget!(max(Int(schur_threads), 1))
     symmetric_core = if prepare_symmetric_core
         prepared_core = _prepare_product_hsd_symmetric_core(
             base;

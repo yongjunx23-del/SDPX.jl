@@ -1555,7 +1555,7 @@ function SDPX._hkm_vec4_linearization!(
     s_all = base.s; y_all = base.y
     ds_all = base.ds_a; dy_all = base.dy_a
     theta = core.theta_inverse; rhs = core.hkm_rhs
-    nthreads = Threads.nthreads()
+    nthreads = SDPX._q3_workers()
     next_batch = Threads.Atomic{Int}(1)
     failed = Threads.Atomic{Bool}(false)
     if nthreads <= 1 || nb < 128

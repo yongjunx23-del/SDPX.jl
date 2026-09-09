@@ -795,13 +795,13 @@ function _product_hsd_fixed_trace_hkm_linearization!(
         end
         return
     end
-    if Threads.nthreads() <= 1 || length(blocks) < 256
+    if _q3_workers() <= 1 || length(blocks) < 256
         for block_index in eachindex(blocks)
             run_block(block_index)
             failed[] && return false
         end
     else
-        @sync for _ in 1:Threads.nthreads()
+        @sync for _ in 1:_q3_workers()
             Threads.@spawn begin
                 while !failed[]
                     block_index = Threads.atomic_add!(next_block, 1)
