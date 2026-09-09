@@ -67,3 +67,21 @@ numerical drift fails the run. Secondary: Float64 LP/SOCP general catalog.
   bit-identical. NOTE: ext module code must live INSIDE the module `end`.
 - Remaining hot spots (per iter): Gram SYRK 19ms, gate cone 2ms, solve
   stages ~12ms x2, corr_rhs 9.2ms, schur_assembly 8.3ms, homogeneous 6.2ms.
+
+### E2: direct dim-3 SOC boundary step + threaded max-step (KEPT)
+- boundary_alpha spent most time copying blocks into scratch before
+  boundary_step!; copy cost > step cost for dim-3 blocks.
+- Added copy-free direct boundary computation for dim-3 SOC + threaded
+  exact min reduction. CSDR: 17.37 -> 17.35s (small; spawn overhead ate
+  most of it), allocations -4MB, RSS -250MB. Bit-identical.
+- Learned: MultiFloat lane SIMD only wins on large reductions (syrk/gemm);
+  small-block lane versions are SLOWER (gather overhead) and not
+  bit-identical (different rounding tree). Do not lane-ify small blocks.
+
+### Current phase breakdown after E1+E2 (15.55s core, 17.35s wall)
+per-iteration (~105 iters): Gram SYRK 19ms (hardware-bound, linear scaling
+to 4 threads), q3_metric total 27ms, homogeneous solve 6.1ms, predictor
+solve 23ms, corrector solve 24ms, corr_rhs 4.2ms, schur_assembly 8.3ms,
+line_search 12.4ms, residual 10.8ms.
+Next lever is ALGORITHMIC: reduce the 105 iterations (predictor/corrector
+policy, step quality) — that is GPT Pro territory per user directive.
