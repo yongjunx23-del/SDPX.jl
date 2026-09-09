@@ -41,6 +41,8 @@
 - **并行实现候选与回归验证**：`e1d78e9` 工作区独立预算 + 粗粒度范围调度；`9123695` 局部消除/变换/Gram 细分计时；`20c0614`/`bb4049c` 区分 LU/Cholesky 枢轴、自由变量边界并重置子计时；`5434dc6` 遵循注册 BLAS 控制器。Astra 审阅确认无算术/所有权阻塞。独立回归 `test/q3_worker_budget.jl` 134/134、`affine_builder_ownership.jl` 23/23、`hkm_vec4_parity.jl` 52/52、`blas_controller_diagnostics.jl` 9/9；三分区 4197/196/4857+1 全部通过。
 - **进程池已通过本地有限批次门**（`PERSISTENT_POOL_LOCAL_GATE.md`）：130 项 solver-free 契约测试全过；重测吞吐 199.60→608.20 次/小时（**3.0471×**），32/32 记录有效，每 worker 峰值/退前 RSS < 3 GiB；作为 opt-in 工具保留，非长期内存/生产调度资格。
 - **R4/CSDR 批量仿射装配**（`2cfa6af`）：dot/PSD-dot/A*block 走 builder；`3dde10a` 修复 mutable scalar 隔离（测试 23/23）。CSDR scratch 显式 `_affine_sum` 构建 1.411s/15.93GB→0.185s/0.724GB。
+- **R6-B 接口与恢复套件集成**（`ecf01f2`，CI 允许清单 `c5d0de0`）：`test/test_r6b_moi_mapping.jl`（35/35 通过，30.9s）涵盖非增量 MOI 包装器、copy_to、认证 LP 目标与选项拒绝；`test/test_r6b_checkpoint.jl`（26/26 通过，0.9s）涵盖 Float64/BigFloat 序列化往返、无 `.tmp` 残留、损坏与版本拒绝；CI 测试布局完整（48 mounted, 11 manual-only）。
+- **R2-C 多任务并发会话隔离与碰撞**（`b945537`）：在 `test/test_r2_full_qualification.jl` 中新增 11 个并发断言（全套 39/39 通过，threads=4）。并发独立会话位等价且槽隔离；同一会话并发碰撞被安全拒绝为 `ArgumentError("PreparedSolver is sequential...")` 无死锁；碰撞后会话无锁残留、后续求解即刻恢复 Optimal。
 - **LP random_large 选路归因关闭**（`c628083`）：实测 T1 29.19s vs T8 29.95s，实际走 native-HSD 稀疏 LDLT（因子化仅 2.3ms），首解 JIT 占 ~14s，`parallel_blas_panels` 是不可达算法；平坦是预期行为，无内层并行空间，不再 redesign。
 - **CSDR α3 集群配对战役（进行中）**：作业 211771（ppn8/24GB/4h），基线 vs 候选在池 1 与 8 各 3 次新鲜进程预热+测算（共 12 次），目前池 1（6/12）全部完成 exit 0，池 8 正在执行。
 
