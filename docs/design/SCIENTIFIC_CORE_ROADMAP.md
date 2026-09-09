@@ -37,6 +37,8 @@
 - **R6-D 可重建交付**（`ced85ce`）：`check_reproducible_delivery.jl` 现如实记录 `manifest_sha1=absent` 与 active env Manifest，PASS/exit 0。
 - **R4-B MFLA panel SIMD 候选**（provider 分支 `f482be7`）：opt-in 4-lane Cholesky panel，位等价，blocked Cholesky 端到端 1.14–1.42×；SDPX 侧实验开关 `c5cb2c3`（默认关、版本鲁棒）。仅对 equality-Gram 较大问题有效；CSDR α3（42 等式）收益有限。
 - **CSDR 算法层调研**（`75ae7a7`，`docs/design/CSDR_ALGORITHM_OPTIONS.md`）：排序机会与“不再重查”清单；冻结指纹冲突裁决（roadmap 管辖，旧 guard 不变，105/`3a7833` 为未资格观察基线）。
+- **CSDR 集群战役**（release `d52f041`，4 作业 24 次重复，全部 optimal/证书有效/位等价）：α3 1/8/16/32 线程中位 92.2/66.3/69.5/60.1s（1.39/1.33/1.53×，节点共享、CPU% 95–149% 使扩展数受混淆）；**HKM chunk-64 无效果（最佳 −1.85%，远低于 5% 门）→ 不采用，保持默认 0**；digest 全 24 次一致 `c354cf07`。
+- **并行诊断与预算（Phase 1/2）**：`0b7bc99` 加入 Q3 独占子相位计时（metric/factor/homogeneous + 实际 worker 数）；`f0325a4` 将 `settings.limits.threads` 作为 Q3 任务预算（`_q3_workers()`，HKM 标量/vec4 循环不再膨胀到线程池；`@threads :static` 仍用整池，需一进程一配置）。设计文档 `docs/design/PARALLEL_EXECUTION_DESIGN.md`。
 - **R4/CSDR 批量仿射装配已实现**（`2cfa6af`）：`_AffineBuilder` + `_affine_sum` 替代 dot/PSD-dot/A*block 的逐步 `+` 折叠；精确等价回归（Float64/BigFloat 重复索引、消去后重加、零系数、路由路径）通过；三分区 3776/196/4622+1 全过；CSDR 全模型构建 **1.411s/15.93GB → 0.185s/0.724GB（7.6×，分配 22×）**。
 - **集群并行实测**：LP random_large 内层线程平坦（T1–T16），T32 −18%；进程级并行 282→559→893 solves/node-hr（ppn 8/16/32）。CSDR α3 本地 1/4 线程 41.3s→23.1s（1.79×），集群 1/8/16/32 战役进行中。
 
