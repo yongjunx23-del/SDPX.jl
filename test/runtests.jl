@@ -680,8 +680,6 @@ include(joinpath(@__DIR__, "..", "benchmark", "optimization", "test_measure_targ
 include(joinpath(@__DIR__, "..", "benchmark", "bootstrap", "physics",
     "smatrix_4d", "spec_only", "test_smatrix_4d_spec.jl"))
 
-# Vec4 parity / affine-ownership regression (old-bug capture; repaired
-# separately).  Included last so a not-yet-repaired failure reports after
-# every other suite has run.
+# Regression coverage for repaired SIMD refusal/counter and affine ownership.
 include(joinpath(@__DIR__, "hkm_vec4_parity.jl"))
 include(joinpath(@__DIR__, "affine_builder_ownership.jl"))
