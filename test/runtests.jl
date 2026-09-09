@@ -662,6 +662,8 @@ include(joinpath(@__DIR__, "factor_pair_hsd_canonical.jl"))
 include(joinpath(@__DIR__, "accuracy_contract.jl"))
 include(joinpath(@__DIR__, "..", "validation", "scientific_core",
     "test_r2a_symbolic_numeric_separation.jl"))
+include(joinpath(@__DIR__, "..", "validation", "scientific_core", "exp_runtime",
+    "test_compensated_exp_reference.jl"))
 include(joinpath(@__DIR__, "..", "benchmark", "optimization", "test_profile_catalog.jl"))
 include(joinpath(@__DIR__, "..", "benchmark", "optimization", "test_compare_contract.jl"))
 include(joinpath(@__DIR__, "..", "benchmark", "optimization", "test_measure_target.jl"))
