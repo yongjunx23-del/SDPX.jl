@@ -165,7 +165,9 @@ function compute(s,ds,dy)
                 magnitude=(RG.point(1+forcing)*bounds[i]).lo
                 difference=(RG.point(forcing)*bounds[i]).lo
                 abs(raw[i])<=magnitude && abs(swap[i])<=magnitude &&
-                    RG.absupper(RG.point(raw[i])-RG.point(swap[i]))<=difference || return (status=:unsupported,reason=:symmetry_bound)
+                    RG.absupper(RG.point(raw[i])-RG.point(swap[i]))<=difference &&
+                    RG.absupper(RG.point(raw[i])-first[i])<=difference &&
+                    RG.absupper(RG.point(swap[i])-swapped[i])<=difference || return (status=:unsupported,reason=:symmetry_bound)
             end
         end
         SDPX._ns_corrector_third_symmetry_average!(workspace) || return (status=:unsupported,reason=:native_symmetry)
@@ -185,9 +187,11 @@ function compute(s,ds,dy)
         reason=SDPX._ns_corrector_euler_projection!(workspace,s...,ds)
         reason===SDPX.NS_CORRECTOR_CONVERGED || return (;status=:unsupported,reason=:native_projection,native_reason=reason)
         projected=copy(workspace.chi);check_vector(projected)
-        k=argmax(abs.(s));correction=projected[k]-averaged[k]
+        k=argmax(abs.(s))
+        correction=RG.point(projected[k])-RG.point(averaged[k])
         correction_scale=raw_work/RG.point(abs(s[k]))
-        ratio(RG.point(correction),correction_scale)<=0x1p-16 || return (status=:unsupported,reason=:projection_bound)
+        projection_bound=ratio(correction,correction_scale)
+        projection_bound<=0x1p-16 || return (status=:unsupported,reason=:projection_bound)
         all(i->i==k || projected[i]==averaged[i],1:3) || error("projection changed extra entries")
         final_lhs=dotpoly(EF.constant.(s),EF.constant.(projected),budget)
         final_residual=EF.enclose(EF.sub(final_lhs,euler_target,budget))
@@ -203,7 +207,7 @@ function compute(s,ds,dy)
         legacy=SDPX.try_nonsymmetric_higher_correction!(legacy_workspace,tag,s,ds,dy)
         (;status=:certified,reason=:experimental_current_point_corrector,L=copy(L),u,raw,swap,averaged,chi=projected,
             first,swapped,gradient,ytilde,factor,selected,posterior,natural_bounds=bounds,raw_error,final_error,
-            projection_error=workspace.projection_error,legacy_native_solve_error=workspace.solve_error,
+            projection_error=workspace.projection_error,projection_bound,legacy_native_solve_error=workspace.solve_error,
             legacy_status=legacy.status,legacy_reason=legacy.reason,
             products=budget.products+selected.products,
             sums=budget.sums+selected.sums,production_admitted=false)

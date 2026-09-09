@@ -67,6 +67,7 @@ inside(I,x)=Q(I.lo)<=x<=Q(I.hi)
             @test iszero(work) ? iszero(post) : abs(post)/work<=Q(result.final_error)
             @test result.raw_error<=0x1p-16
             @test result.projection_error<=0x1p-16
+            @test 0<=result.projection_bound<=0x1p-16
             push!(CORRECTOR_RESULTS,(;id,offset=block.offset,s,ds,dy,result))
             println("CORRECTOR_CERTIFIED ",id,"/",block.offset," solve=",result.posterior.worst,
                 " raw_euler=",result.raw_error," post_euler=",result.final_error,

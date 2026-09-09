@@ -50,14 +50,17 @@ a true-H posterior additionally uses its same128gamma12 ceiling.
 Both argument orders receive independent native enclosures; candidate components
 must lie within them. Natural scales use the actual stored Ls factor:
 ||Ls'a||*||Ls'u||*sqrt((LsLs')ii), with native outward bounds. Magnitude and swapped
-agreement must fit the LOWER endpoint of the existing512sqrt(eps) allowances,
-and the unchanged native averaging gate is also run.
+agreement, including each candidate's worst discrepancy from its full analytic
+enclosure, must fit the LOWER endpoint of the existing512sqrt(eps) allowances.
+Membership in a wide interval alone is insufficient. The unchanged native
+averaging gate is also run.
 
 Raw Euler is checked BEFORE projection against the actual executable target
 q=ds_aff'dy_aff, not the misleading old computed-Hu comment. Its work is the
 existing sum|s_i|*naturalBound_i + sum|ds_i dy_i| and its ceiling is1024sqrt(eps).
 The original largest-|s| single-coordinate projection is applied unchanged.
-Its size is independently bounded, raw/averaged/projected values retained, and
+Its actual stored-value change is independently enclosed before normalization,
+raw/averaged/projected values retained, and
 the final exact-dot residual is enclosed against128gamma9 times original dot
 work. Projection cannot hide a failed analytic raw-contraction certificate.
 
