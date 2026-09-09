@@ -266,9 +266,9 @@ _certificate_conflict_message(field::Symbol, value) = string(
 )
 
 function Outputs(
-    primal::Union{Symbol,Vector{VariableRef}}=:none,
-    constraint_dual::Union{Symbol,Vector{ConstraintRef}}=:none,
-    dual_slack::Union{Symbol,Vector{VariableRef}}=:none;
+    primal::Union{Symbol,Vector{VariableRef}}=:all,
+    constraint_dual::Union{Symbol,Vector{ConstraintRef}}=:all,
+    dual_slack::Union{Symbol,Vector{VariableRef}}=:all;
     objectives::Bool=true,
     certificate::Symbol=:summary,
     diagnostics::Symbol=:summary,

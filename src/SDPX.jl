@@ -160,6 +160,11 @@ include("moi_wrapper.jl")
 # v0.5 has one public modeling/solve interface.  Mature problem, workspace,
 # provider, and legacy solve types remain package-internal implementation
 # details and are intentionally not re-exported as parallel entry points.
+export Model, variable!, constraint!, objective!
+export Minimize, Maximize
+export Settings, Limits, Tolerances, Outputs
+export ZeroCone, Nonnegative, Reals, LorentzCone, RotatedLorentzCone
+export PSDCone, ExponentialCone, PowerCone
 export optimize!, execution_plan
 export status, value, dual, dual_slack
 export primal_objective, dual_objective
