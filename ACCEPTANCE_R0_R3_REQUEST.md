@@ -3,7 +3,7 @@
 **Repo:** `/tmp/sdpx-scientific-core-20260907` — branch `development/scientific-core-20260907`
 **Code under review:** `3588c433c107d33bd096f4653d5fd122dd7aa91f` (all tests below executed at this commit or its round-3 parent `ed73847`)
 **This document commit:** documentation-only on top; `git diff 3588c43..HEAD` touches only `ACCEPTANCE_R0_R3_REQUEST.md`
-**Prior verdicts:** `ec3e557` FAIL (six blockers); `55bde79` FAIL (two blockers); `be100b2` FAIL (one claim + incomplete partition-3 receipt)
+**Prior verdicts:** `ec3e557` FAIL (six blockers); `55bde79` FAIL (two blockers); `be100b2` FAIL (one claim + incomplete partition-3 receipt); **round-3 verdict: PASS for the requested repair scope** (not full R0–R3 closure).
 
 ## Round-3 repairs (from the be100b2 verdict)
 
@@ -14,7 +14,7 @@
 
 The round-2 repairs (exception-safe checkout/finalization, claim reconciliation) remain in place.
 
-## Executed evidence at `175e31d`
+## Executed evidence at `1e57da2` (code `3588c43`)
 
 - Partitioned regression at `1e57da2` (code identical to `3588c43`; only this document differs), quiet machine, all three parts completed inside the 175 s bound:
   - part 1 = **3736/3736**, exit 0, 105.4 s wall
