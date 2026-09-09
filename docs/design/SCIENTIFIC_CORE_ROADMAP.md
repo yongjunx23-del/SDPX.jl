@@ -109,6 +109,15 @@
 
 **实施包**：R5-A 精度控制器 → R5-B 单一线程预算 → R5-C 硬件矩阵（PBS 1/8/16/32 核，真实分配）→ R5-D 性能判定（同原问题/同误差目标/原坐标门）。
 
+### 已知缺口（fail-closed，不修补）
+
+以下四个源码缺口由诚实测试发现（`e2377c3` 记录），位于实验/未准入路径，默认公开路由不可达，保持不可用、不修补：
+
+- G1 `src/kernels/mixed_precision_kkt.jl:423` 引用了从未定义的 `REFINE_DEFAULT_TOL_ULPS`。
+- G2 `src/kernels/mixed_precision_kkt.jl:925`、`:1060` 调用的 `_normalize_equality_panel_columns!` 从未定义。
+- G3 `src/kernels/mixed_precision_kkt.jl:1168`、`:1235` 调用的 `_recover_original_equality_multiplier!` 从未定义。
+- G4 `src/pipeline/resources.jl:167,169` 的 `schur_bin_report` threads>1 非 owner 分支调用了未定义的 `_schur_parallel_bins`/`_schur_accumulator_memory_fraction`。
+
 ## R6 · Production scientific qualification
 
 **保留范围**：支持/实验/不可用表、独立 parser/MOI 映射、取消/checkpoint、长期 held-out 对抗、可重建 release 证据。
