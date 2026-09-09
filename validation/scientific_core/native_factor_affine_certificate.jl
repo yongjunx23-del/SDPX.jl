@@ -104,6 +104,12 @@ function _certify_equations(epoch,result)
     FA.verify(epoch)
     RG.Phi._runtime_ok() || return (status=:unsupported,reason=:runtime)
     m,n=size(epoch.A);direction=result.direction;rhs=result.rhs
+    vectors=(direction.dx,direction.dy,direction.ds,rhs.primal_affine,rhs.dual_affine,rhs.cone_corrector)
+    all(v->v isa Vector{Float64},vectors) && all(x->x isa Float64,
+        (direction.dtau,direction.dkappa,rhs.homogeneous_gap,rhs.tau_kappa)) ||
+        return (status=:unsupported,reason=:direction_rhs_type,production_admitted=false)
+    map(length,vectors)==(n,m,m,m,n,m) ||
+        return (status=:unsupported,reason=:direction_rhs_shape,production_admitted=false)
     for block in epoch.cone.blocks
         rows=block.offset:block.offset+2
         block.primal==epoch.s[rows] && block.dual==epoch.y[rows] && block.mu==epoch.mu ||

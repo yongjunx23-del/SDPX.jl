@@ -14,8 +14,9 @@ copy_rhs(r)=SDPX.HSDNewtonRHS(copy(r.primal_affine),copy(r.dual_affine),r.homoge
 copy_direction(d)=SDPX.NewtonDirection(copy(d.dx),copy(d.dy),copy(d.ds),d.dtau,d.dkappa)
 function correction_words(c)
     d=c.data
-    FA.fingerprint(c.point,c.ds,c.dy,c.alpha,d.L,d.u,d.raw,d.swap,d.averaged,d.chi,d.ytilde,
+    arrays=(c.point,c.ds,c.dy,d.L,d.u,d.raw,d.swap,d.averaged,d.chi,d.ytilde,
         d.selected.original,(attempt.L for attempt in d.selected.history)...)
+    (FA.fingerprint(c.alpha,arrays...),map(size,arrays),Tuple(attempt.shifts for attempt in d.selected.history))
 end
 struct CombinedEpoch{E,D,R}
     epoch::E
@@ -36,6 +37,10 @@ end
 function verify(c::CombinedEpoch)
     FA.verify(c.epoch)
     fingerprint(c)==c.frozen || error("combined numerical/structural epoch drift")
+    m,n=size(c.epoch.A);d=c.affine_direction
+    map(length,(c.rho,c.hhat,c.z,d.dx,d.dy,d.ds,c.rhs.primal_affine,c.rhs.dual_affine,c.rhs.cone_corrector))==
+        (m,m,m,n,m,m,m,n,m) || error("combined dimensions")
+    all(i->iszero(c.rho[i]),eachindex(c.epoch.cone.lp_scales)) || error("unused orthant rho policy")
     length(c.corrections)==length(c.epoch.cone.blocks) || error("combined block coverage")
     for (v,b) in zip(c.corrections,c.epoch.cone.blocks)
         v.offset==b.offset && v.alpha==0.5 || error("combined block policy")

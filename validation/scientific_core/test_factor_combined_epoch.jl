@@ -98,6 +98,14 @@ rhs_fields(r)=(;primal=copy(r.primal_affine),dual=copy(r.dual_affine),gap=r.homo
                 @test FC.certify(refreeze(combined;rhs=omitted),(;result...,rhs=FC.copy_rhs(omitted))).status===:unsupported
                 wrongrhs=FC.copy_rhs(combined.rhs);wrongrhs.primal_affine[1]+=1e-3
                 @test FC.certify(refreeze(combined;rhs=wrongrhs),(;result...,rhs=FC.copy_rhs(wrongrhs))).reason===:semantic_rhs
+                extra=(;direction_fields(affine.direction)...,dx=vcat(affine.direction.dx,0.))
+                @test NativeFactorAffineCertificate.certify(e,(;direction=extra,rhs=FA.affine_rhs(e))).reason===:direction_rhs_shape
+                narrower=(;direction_fields(affine.direction)...,dx=Float32.(affine.direction.dx))
+                @test NativeFactorAffineCertificate.certify(e,(;direction=narrower,rhs=FA.affine_rhs(e))).reason===:direction_rhs_type
+                shaped=deepcopy(combined.corrections);old=shaped[1]
+                shaped[1]=(;old...,data=(;old.data...,L=reshape(copy(vec(old.data.L)),1,9)))
+                @test FC.certify(refreeze(combined;corrections=shaped),result).reason===:corrector_words
+                @test_throws ErrorException FC.certify(refreeze(combined;hhat=vcat(combined.hhat,0.)),result)
             end
             @test NativeFactorAffineCertificate.certify(e,result).reason===:non_affine
             @test_throws ErrorException FA.solve(e,result.rhs)
