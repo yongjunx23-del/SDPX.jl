@@ -94,8 +94,16 @@ end
 function certify(epoch,result)
     FA.verify(epoch)
     RG.Phi._runtime_ok() || return (status=:unsupported,reason=:runtime)
+    result.rhs.cone_corrector == -epoch.s || return (status=:unsupported,reason=:non_affine)
+    certificate=_certify_equations(epoch,result)
+    certificate.reason===:physical_native_bounds ? (;certificate...,reason=:affine_native_bounds) : certificate
+end
+# Private equation kernel. Each caller must supply its separate RHS-provenance
+# guard; the public affine certificate above remains affine-only.
+function _certify_equations(epoch,result)
+    FA.verify(epoch)
+    RG.Phi._runtime_ok() || return (status=:unsupported,reason=:runtime)
     m,n=size(epoch.A);direction=result.direction;rhs=result.rhs
-    rhs.cone_corrector == -epoch.s || return (status=:unsupported,reason=:non_affine)
     all(A->all(x->isfinite(x)&&(iszero(x)||0x1p-80<=abs(x)<=0x1p80),A),
         (epoch.A.nzval,epoch.b,epoch.c,direction.dx,direction.dy,direction.ds,
          rhs.primal_affine,rhs.dual_affine,rhs.cone_corrector)) || return (status=:unsupported,reason=:data_domain)
@@ -172,7 +180,7 @@ function certify(epoch,result)
             products=polynomial_products+sum((c.products for c in point_certificates);init=0),
             sums=polynomial_sums+sum((c.sums for c in point_certificates);init=0)) :
             (;counter_scope=:partial_point_counts_unavailable,polynomial_products,polynomial_sums)
-        (;status=passed ? :certified : :unsupported,reason=:affine_native_bounds,metrics,errors,bounds,coefficient_error,
+        (;status=passed ? :certified : :unsupported,reason=:physical_native_bounds,metrics,errors,bounds,coefficient_error,
             counts...,production_admitted=false)
     catch err
         err isa RG.EnclosureFailure || err isa RG.Phi.ArithmeticDomainError || rethrow()
