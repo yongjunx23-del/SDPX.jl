@@ -249,6 +249,8 @@ struct NativeHSDPlan <: AbstractExecutionPlanPayload
     kkt_route::Symbol
     kkt_execution::NativeHSDKKTDescriptor
     structure::NativeHSDStructureFacts
+    # R0-P4 whole-epoch backend selector actually consulted for this plan.
+    nonsymmetric_backend::NonsymmetricBackendChoice
 end
 
 """Typed diagnostics for the direct native-HSD public route."""
@@ -689,6 +691,7 @@ function _native_hsd_plan(
         settings.kkt_route,
         kkt_execution,
         structure,
+        settings.nonsymmetric_backend,
     )
 
     entries = nnz(classification_layout.A)
@@ -1184,6 +1187,7 @@ function _native_hsd_diagnostics(
         planned_kkt_formulation=planned_formulation,
         executed_kkt_formulation=executed_formulation,
         requested_kkt_route=payload.kkt_route,
+        nonsymmetric_backend=payload.nonsymmetric_backend,
         planned_kkt_route=planned_kkt.route,
         executed_kkt_route=did_execute ? executed_kkt.route : :not_executed,
         planned_kkt_storage=planned_storage,
@@ -1389,6 +1393,11 @@ function _public_native_hsd_core(
     settings::Settings{T};
     allow_expanded_bordered_fallback::Bool=true,
 ) where {T<:AbstractFloat}
+    # R0-P4: typed fail-closed backend admission happens before any numerical
+    # setup.  The default backend returns immediately; an explicit experimental
+    # request either passes the declared scope or refuses here (never falls
+    # back to the default path).
+    enforce_factor_pair_admission!(settings)
     setup_started = time_ns()
     canonical = canonicalize(program)
     fixed_trace_plan = settings.kkt_route === :bordered ?

@@ -55,6 +55,7 @@ include("memory_utils.jl")
 include("frontend/solve_options.jl")
 include("midend/resolve_options.jl")
 include("public/settings.jl")
+include("hsd/factor_pair_admission.jl")
 include("public/outputs.jl")
 include("kernels/api.jl")
 include("kernels/generic.jl")
@@ -149,6 +150,8 @@ export primal_objective, dual_objective
 export certificate, diagnostics, iteration_history, performance_trace
 export Optimizer
 export clear_structure_cache!, set_structure_cache_enabled!
+export NonsymmetricBackendChoice, NativeNonsymmetricBackend
+export ExperimentalHalfPowerFactorPairBackend, UnsupportedBackendError
 
 # Symmetric-cone algebra (Subagent I) lives in the nested module
 # `SymmetricCones` (Nonnegative / SOC / PSDTriangle kernels). It is not part of
