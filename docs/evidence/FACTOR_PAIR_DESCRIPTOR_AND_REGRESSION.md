@@ -21,8 +21,12 @@ No R0–R6 stage closure or public/default promotion.
   route remains `:factor_pair`, formulation `:dense_factor_pair_lu`.
 - Failed-LU attempt metadata stays separate from factor completion/reuse.
 
-Design review `d261e7a6` completed read-only; implementation has not yet been
-independently reviewed. Existing owner-currentness inference from Optimal,
+Design review `d261e7a6` and implementation review `4cfe25a0` completed
+read-only. The latter passed the bounded descriptor/default-dispatch scope at
+`93d48e4`; it did not rerun tests or qualify the whole backend. Its nonblocking
+symmetric-only provider-field issue and focused rank/default-metadata test gaps
+were addressed in `c27e005`: 144/144 focused assertions passed, log
+`/tmp/fp-metadata-c27e005.log`. This small follow-up was not independently rereviewed. Existing owner-currentness inference from Optimal,
 rank/admission policy and complete peak-memory accounting remain open.
 
 ## Regression evidence
