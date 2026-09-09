@@ -29,12 +29,32 @@ clean worktree and no remaining Julia processes. A separate bounded
 same-protocol retry produced the passing results above. The timeout itself
 is not a passing receipt.
 
+## Astra scoped review
+
+Frozen clean `59d3be4992571992d732013f9e72b36cb5653acb`, diff from `f1c5df4`:
+source inspection and bounded tiny probes found no concrete new arithmetic,
+ownership or Q3 task-composability blocker. Probes covered nested stepped
+ranges, exactly-once visits, capped task budgets, joined exceptions, actual
+MPFR mutation isolation and extracted x4 metric parity/refusal. No full solve,
+trajectory, scientific digest, performance or independent certificate was tested.
+
+Run `f10881d6` returned the report but ended with `Request was aborted`.
+Same-protocol report-only recovery `987d5b89` completed normally and confirmed
+that the analysis was complete. Preserve both statuses; the failed runtime
+itself is not an acceptance receipt.
+
+Findings at the frozen snapshot: lifetime-cumulative Q3 timers across internal
+state reuse; incomplete pivot/border metadata; Float64 budget does not constrain
+ambient BLAS. Parent follow-ups `20c0614` (diagnostics/scope) and `bb4049c`
+(timer-only reset) remain outside that review. No arithmetic/route change was
+requested. Candidate status remains pending broader qualification.
+
 ## Still pending
 
 - Workspace budgets, nested ranges, exception joining, provider width and
   timing lifecycle tests; full source-matched regression partitions.
-- Astra numerical review of frozen `59d3be4`; later diagnostic correction
-  `20c0614` is outside that frozen review.
+- Follow-up verification of `20c0614` diagnostics and `bb4049c` timing reset;
+  neither is covered by the frozen `59d3be4` review.
 - Permanent pool fault tests and source-matched balanced throughput comparison.
   Astra confirmed lifecycle/freshness/queue repair probes at `dac8617` but
   found remaining worker-identity/RSS/numeric-gate gaps, addressed in later
