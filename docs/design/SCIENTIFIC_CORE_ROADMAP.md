@@ -37,7 +37,11 @@
 
 **独立审阅（`05f41f59`）判定 BLOCKING（公开准入）**，已修复：平台门控、A/b/c 所有权、边界消去、typed 数值拒绝、NC 全局稠密矩阵、同时存活内存准入（估计+拒绝）、时间限制、事务原子性负控、prepared-epoch 复用、selector 传播、typed 准入先于 legacy policy。仍开放：原问题/约化后准入与行置换、原坐标恢复、route-neutral 公开 terminal/result、资格矩阵。公开 opt-in 路由继续 `:not_implemented` 失败关闭。
 
-仍未完成（不得声称公开路由合格）：canonical/equality-reduction → factor-pair 映射与可逆行置换、原坐标恢复、route-neutral terminal/public result、完整内存准入、资格矩阵与独立审阅闭环。公开默认 Float64 Power dispatch **未修复**，opt-in 公开路由仍拒绝。
+5. **公开 opt-in 路由接通**（`0ebf053`）：`_public_native_hsd_core` 在约化后、legacy 运行前分叉到 `FactorPairHSD`；经既有 `hsd_recover_optimal_source!` 恢复全 canonical 坐标，再由**未改动的**普通 original-coordinate 恢复与证书管线出结果。E2E：`optimize!` + `ExperimentalHalfPowerFactorPairBackend` → `:optimal`、`certificate.valid=true`、obj `1.1242390971673781`（精确值误差 `1.48e-9`）；诊断诚实披露 `factor_pair`/`dense_factor_pair_core`/`lu_dense`/`dense_lu` 与真实 termination 量（tau `2.99`、kappa `1.74e-9`、mu `5.20e-9`、residuals 有限、last_step `:factor_pair`）。
+
+6. **R0-E 研究切片**（`1308d5e`）：按 oracle 设计实现补偿 Exp 评估器/共轭（精确指数归约 + atanh 级数 39 项、outward q、余项界；EFT 两分量；`log1p` 经 `t=ρ/(2+ρ)`；未改动 `16eps`/64 上限；类型化拒绝；范围/上下文守卫），独立 MPFR 审计，6/6 冻结记录、177 断言。结果：log 半径 ~1e-33（目标 2^-90）；**B 不是 "root unrepresentable"**——补偿根可认证（Rmax ~1e-23 vs 阈值 ~5.7e-21），旧 margin 台账才是失败点；A7 旧 shadow 仍被未改动的 exact identity 拒绝（defect -4.88e-11），改进 shadow 过 m12（-3.27e-12）但 rounded current-primal gradient 仍失败 m21（-6.27e-11），两者都如实报告。**不声称公开 Float64 Exp 状态变化。**
+
+仍未完成（不得声称公开路由合格）：opt-in 公开路由的独立审阅闭环、完整资格矩阵（mutation/rollback/scaling/objective-transform/负控）、完整内存上界、Exp 的 whole-epoch 迁移决策。公开默认 Float64 Power/Exp dispatch **未修复**（默认仍 breakdown，known-issue control 保留）。
 
 ## T0 · 跨求解器、精度与问题适定性诊断（立即执行）
 
