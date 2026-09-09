@@ -41,49 +41,74 @@ function sprint_res(prefix, res)
     end
 end
 
-target = 1e-8
+target = 1e-8          # experimental merit target (loop ceiling)
+cert_tol = SDPX.default_certificate_tol(Float64)   # ordinary certificate tolerance (source default 1e-6)
 # Independent terminal audit: recompute residuals with a separate dense
-# implementation and evaluate cone membership from recovered coordinates,
-# without reusing the loop's residual routine or cached residual vectors.
-function terminal_audit(ctx; target = 1e-8)
+# implementation and evaluate the ORDINARY certificate inequalities of
+# src/certificates/certificates.jl:438-502 at the declared tolerance, without
+# reusing the loop's residual routine or cached residual vectors.
+function terminal_audit(ctx; tol = cert_tol)
     Am = Matrix(A); bm = b; cm = c
     xN = ctx.x ./ ctx.tau; sN = ctx.pair.s ./ ctx.tau; yN = ctx.pair.y ./ ctx.tau
+    inv_tau = 1.0 / ctx.tau
     rP = Am * xN + sN - bm
     rD = transpose(Am) * yN + cm
-    rG = dot(cm, xN) + dot(bm, yN) + ctx.kappa / ctx.tau
+    rG = dot(cm, xN) + dot(bm, yN) + ctx.kappa * inv_tau
     m = max(maximum(abs, rP), maximum(abs, rD), abs(rG))
     obj = dot(c, xN)
-    sNy = dot(ctx.pair.s, ctx.pair.y) / (ctx.tau^2)
-    scale = max(1.0, maximum(abs, sN), maximum(abs, yN), maximum(abs, xN), abs(obj))
-    tol = 1e-7 * scale
-    # original-coordinate feasibility and cone membership within the band
+    sNy = dot(ctx.pair.s, ctx.pair.y) / (ctx.tau^2)   # complementarity s*'y*
+    # --- ordinary certificate quantities (certificates.jl) ---
+    finite_ok = all(isfinite, ctx.x) && all(isfinite, ctx.pair.s) &&
+                all(isfinite, ctx.pair.y) && isfinite(ctx.tau) &&
+                isfinite(ctx.kappa) && isfinite(ctx.pair.mu)
+    tau_ok = ctx.tau > tol
+    # normalized homogeneous residual: max|rP|,|rD|,|rG| / (||A||+||b||+||c||+1)
+    data_norm = maximum(sum(abs, Am; dims = 2)) + maximum(abs, bm) +
+                maximum(abs, cm) + 1.0
+    norm_resid = (m / data_norm) * inv_tau
+    # data-scaled recovered feasibility
+    primal_scale = max(1.0, SDPX._cert_maxabs(xN), SDPX._cert_maxabs(sN),
+                       SDPX._cert_maxabs(bm))
+    dual_scale = max(1.0, SDPX._cert_maxabs(yN), SDPX._cert_maxabs(cm))
+    rec_primal = SDPX._cert_maxabs(rP) * inv_tau
+    rec_dual = SDPX._cert_maxabs(rD) * inv_tau
+    pr_lim = tol * primal_scale
+    du_lim = tol * dual_scale
+    # cone membership of recovered st = s/tau, yt = y/tau
+    tol_band = 1e-7 * max(1.0, SDPX._cert_maxabs(sN), SDPX._cert_maxabs(yN))
     membership = true
     for i in 1:3
-        membership &= (sN[i] >= -tol && yN[i] >= -tol)
+        membership &= (sN[i] >= -tol_band && yN[i] >= -tol_band)
     end
     for blk in 0:2
         rows = 3 + 3*blk + 1 : 3 + 3*blk + 3
         x, y, z = sN[rows]; u, v, w = yN[rows]
-        membership &= (x >= -tol && y >= -tol && x*y - z*z >= -tol)
-        membership &= (u >= -tol && v >= -tol && 4.0*u*v - w*w >= -tol)
+        membership &= (x >= -tol_band && y >= -tol_band && x*y - z*z >= -tol_band)
+        membership &= (u >= -tol_band && v >= -tol_band && 4.0*u*v - w*w >= -tol_band)
     end
-    primal_feas = maximum(abs, rP)
-    dual_feas = maximum(abs, rD)
-    homo_gap = abs(rG)
-    obj_gap = abs(obj + dot(b, yN))      # c'x* + b'y* = -kappa/tau ~ 0
-    kappa_tau = ctx.kappa / ctx.tau
-    mu_norm = ctx.pair.mu / (ctx.tau^2)   # homogeneous-scaling invariant mu/tau^2
-    scalars_ok = isfinite(ctx.tau) && ctx.tau > tol && isfinite(ctx.kappa) &&
-                 ctx.kappa > 0.0 && isfinite(ctx.pair.mu) && ctx.pair.mu > 0.0
-    # ordinary certificate inequalities (src/certificates/certificates.jl),
-    # thresholded in units of the requested `target` (=:tol), incl. the
-    # recovery scalar condition tau > tol:
-    #   complementarity s*'y* = s'y/tau^2 <= 100tol, recovered gap
-    #   c'x*+b'y* = -kappa/tau (|.| <= 100tol), homogeneous residual
-    #   <= 100tol, kappa/tau <= 100tol, normalized mu/tau^2 <= 100tol,
-    #   primal/dual feasibility <= 100tol, finite positive scalars.
-    (; m, membership, primal_feas, dual_feas, homo_gap, kappa_tau, mu_norm,
-        scalars_ok, obj, sNy, obj_gap, obj_err = abs(obj - Float64(exact_obj)))
+    # recovered primal-dual gap and complementarity
+    primal_objective = obj
+    dual_pairing = dot(bm, yN)
+    gap_scale = SDPX._certificate_objective_scale(primal_objective, dual_pairing)
+    gap_resid = abs(primal_objective + dual_pairing)
+    gap_lim = tol * gap_scale
+    cone_comp = abs(dot(sN, yN))
+    kappa_rec = ctx.kappa * inv_tau
+    mu_norm = ctx.pair.mu * inv_tau * inv_tau          # mu/tau^2 invariant
+    nu = Float64(length(ctx.pair.s))                   # cone-row count
+    mu_lim = tol * (1.0 + nu)
+    finite_limits = isfinite(pr_lim) && isfinite(du_lim) && isfinite(gap_lim) &&
+                    isfinite(mu_lim) && isfinite(norm_resid)
+    cert_ok = finite_ok && tau_ok && finite_limits &&
+              norm_resid <= tol && membership &&
+              rec_primal <= pr_lim && rec_dual <= du_lim &&
+              gap_resid <= gap_lim && cone_comp <= gap_lim &&
+              kappa_rec <= gap_lim && mu_norm <= mu_lim
+    (; m, membership, primal_feas = SDPX._cert_maxabs(rP),
+        dual_feas = SDPX._cert_maxabs(rD), homo_gap = abs(rG),
+        norm_resid, kappa_tau = kappa_rec, mu_norm, obj, sNy,
+        obj_gap = gap_resid, primal_scale, dual_scale, gap_scale, cert_ok,
+        obj_err = abs(obj - Float64(exact_obj)))
 end
 
 @testset "experimental half-Power step context" begin
@@ -153,11 +178,7 @@ end
             " mu=", ctx.pair.mu, " tau=", ctx.tau, " kappa=", ctx.kappa)
         if res.merit <= target
             aud = terminal_audit(ctx)
-            tol100 = 100 * target
-            if aud.membership && aud.sNy <= tol100 && aud.obj_err <= tol100 &&
-               aud.primal_feas <= tol100 && aud.dual_feas <= tol100 &&
-               aud.homo_gap <= tol100 && aud.kappa_tau <= tol100 &&
-               aud.mu_norm <= tol100 && aud.scalars_ok && abs(aud.obj_gap) <= tol100
+            if res.merit <= target && aud.cert_ok && aud.obj_err <= 1e-6
                 terminal_ok = true
                 println("TERMINATED iter=", iter, " merit=", res.merit, " obj_err=", aud.obj_err)
                 break
@@ -171,15 +192,12 @@ end
     println("TERMINAL merit=", terminal.m, " membership=", terminal.membership,
         " pr=", terminal.primal_feas, " dr=", terminal.dual_feas,
         " sNy=", terminal.sNy, " homo_gap=", terminal.homo_gap,
-        " kappa/tau=", terminal.kappa_tau, " mu/tau=", terminal.mu_norm,
+        " kappa/tau=", terminal.kappa_tau, " mu/tau^2=", terminal.mu_norm,
         " obj=", terminal.obj, " obj_err=", terminal.obj_err)
     @test terminal.membership
-    tol100 = 100 * target
-    @test terminal.sNy <= tol100
-    @test terminal.primal_feas <= tol100 && terminal.dual_feas <= tol100
-    @test terminal.homo_gap <= tol100 && terminal.kappa_tau <= tol100
-    @test terminal.mu_norm <= tol100 && terminal.scalars_ok &&
-          abs(terminal.obj_gap) <= tol100
+    @test terminal.cert_ok
+    @test terminal.obj_err <= 1e-6
+    @test terminal.mu_norm <= cert_tol * (1.0 + Float64(length(ctx.pair.s)))
     @test terminal.obj_err <= 1e-4
     println("COLD_REBUILDABLE ", cold_rebuildable, "/", cold_attempts)
     println("ACCEPTED_STEPS ", length(ctx.history))
