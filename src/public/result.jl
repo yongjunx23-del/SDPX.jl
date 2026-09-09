@@ -478,3 +478,156 @@ function Base.show(io::IO, result::Result{T}) where {T}
         ")",
     )
 end
+
+# ---------------------------------------------------------------------------
+# Mature standard accessors (solver frontend / result return API)
+# ---------------------------------------------------------------------------
+
+"""Return the primal objective value (delegates to `primal_objective`)."""
+objective_value(result::Result) = primal_objective(result)
+
+"""Return the dual objective value (delegates to `dual_objective`)."""
+dual_objective_value(result::Result) = dual_objective(result)
+
+"""Return the original-coordinate primal residual."""
+primal_residual(result::Result) = result.certificate.primal_residual
+
+"""Return the original-coordinate dual residual."""
+dual_residual(result::Result) = result.certificate.dual_residual
+
+"""Return the original-coordinate relative duality gap."""
+relative_gap(result::Result) = result.certificate.relative_gap
+
+"""Return the number of solver iterations."""
+iterations(result::Result) = result.iterations
+
+"""Whether `result` certifies optimality (optimal status and valid certificate)."""
+is_optimal(result::Result) = status(result) === :optimal && result.certificate.valid
+
+"""Whether `result` reports a primal-infeasibility certificate."""
+is_primal_infeasible(result::Result) = status(result) === :primal_infeasible
+
+"""Whether `result` reports a dual-infeasibility certificate."""
+is_dual_infeasible(result::Result) = status(result) === :dual_infeasible
+
+"""Whether `result` reports an optimal primal point."""
+function primal_status(result::Result)
+    state = status(result)
+    (state === :optimal || state === :almost_optimal) && return :feasible_point
+    state === :dual_infeasible && return :infeasibility_certificate
+    return :unknown_result_status
+end
+
+"""Whether `result` reports an optimal dual point."""
+function dual_status(result::Result)
+    state = status(result)
+    (state === :optimal || state === :almost_optimal) && return :feasible_point
+    state === :primal_infeasible && return :infeasibility_certificate
+    return :unknown_result_status
+end
+
+"""Return the MOI-standard termination status (matches `status(result)`)."""
+termination_status(result::Result) = status(result)
+
+@inline function _mature_seconds_value(value)
+    value === nothing && return nothing
+    value === unavailable && return nothing
+    value isa Real || return nothing
+    isfinite(value) || return nothing
+    return Float64(value)
+end
+
+function _mature_trace_seconds(trace::PerformanceTrace)
+    final = trace.final
+    if final isa NamedTuple && haskey(final, :total_seconds)
+        value = _mature_seconds_value(final.total_seconds)
+        value !== nothing && return value
+    end
+    phases = trace.phases
+    if phases isa NamedTuple
+        for key in (:total_seconds, :reference_seconds)
+            haskey(phases, key) || continue
+            value = _mature_seconds_value(phases[key])
+            value !== nothing && return value
+        end
+    end
+    setup = trace.setup
+    if setup isa NamedTuple
+        for key in (:pipeline_seconds, :core_seconds, :total_seconds)
+            haskey(setup, key) || continue
+            value = _mature_seconds_value(setup[key])
+            value !== nothing && return value
+        end
+    end
+    return nothing
+end
+
+function _mature_diagnostics_seconds(diagnostics)
+    hasproperty(diagnostics, :timings) || return nothing
+    timings = getproperty(diagnostics, :timings)
+    timings === nothing && return nothing
+    for key in (:total, :core, :pipeline)
+        try
+            haskey(timings, key) || continue
+            value = _mature_seconds_value(timings[key])
+            value !== nothing && return value
+        catch
+            continue
+        end
+    end
+    return nothing
+end
+
+"""
+    solve_time(result) -> Union{Float64,Nothing}
+
+Total solve time in seconds when retained, else `nothing`. Prefers the
+retained `performance_trace` (`final.total_seconds`, then phase reference
+seconds), then falls back to retained `diagnostics` timings (`total`, then
+`core`). Never throws for a not-retained field.
+"""
+function solve_time(result::Result)
+    trace = result.performance_trace
+    if trace !== nothing
+        value = _mature_trace_seconds(trace)
+        value !== nothing && return value
+    end
+    stored = result.diagnostics
+    stored === nothing && return nothing
+    return _mature_diagnostics_seconds(stored)
+end
+
+@inline function _mature_show_objective(data)
+    data === nothing && return "not retained"
+    return string(data)
+end
+
+function Base.show(io::IO, ::MIME"text/plain", result::Result{T}) where {T}
+    println(io, "======================== SDPX Conic Optimizer ========================")
+    println(io, "Status: ", status(result))
+    println(
+        io,
+        "Termination: reason=", result.termination.reason,
+        " stage=", result.termination.stage,
+    )
+    println(io, "Iterations: ", result.iterations)
+    elapsed = solve_time(result)
+    if elapsed === nothing
+        println(io, "Solve time: not retained")
+    else
+        println(io, "Solve time: ", elapsed, " s")
+    end
+    println(io, "Primal objective: ", _mature_show_objective(result.primal_objective_data))
+    println(io, "Dual objective: ", _mature_show_objective(result.dual_objective_data))
+    println(io, "Duality gap (relative): ", result.certificate.relative_gap)
+    println(io, "Primal residual: ", result.certificate.primal_residual)
+    println(io, "Dual residual: ", result.certificate.dual_residual)
+    println(
+        io,
+        "Certificate: ",
+        result.certificate.valid ? "valid" : "invalid",
+        " (original_coordinates, method=", result.certificate.method,
+        ", reason=", result.certificate.reason, ")",
+    )
+    return print(io, "======================================================================")
+end

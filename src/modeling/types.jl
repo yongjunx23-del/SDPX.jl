@@ -268,3 +268,59 @@ function Base.show(io::IO, model::Model{T}) where {T}
           ", variables=", num_variables(model), ", constraints=", num_constraints(model),
           ", blocks=", length(model.variable_blocks), ")")
 end
+
+@inline function _mature_domain_label(domain::ProductConeDomain)
+    domain isa PowerCone && return "PowerCone"
+    return string(typeof(domain))
+end
+
+function _mature_scalar_breakdown(records, kind::Symbol)
+    counts = Dict{String,Int}()
+    for record in records
+        label = _mature_domain_label(record.domain)
+        if kind === :variable
+            counts[label] = get(counts, label, 0) + record.length
+        else
+            counts[label] = get(counts, label, 0) + length(record.refs)
+        end
+    end
+    isempty(counts) && return ""
+    ordered = sort!(collect(keys(counts)))
+    return join((string(label, ": ", counts[label]) for label in ordered), ", ")
+end
+
+function Base.show(io::IO, ::MIME"text/plain", model::Model{T}) where {T}
+    if T === BigFloat
+        println(io, "SDPX Model{BigFloat} (", model.arithmetic.precision_bits, " bits)")
+    else
+        println(io, "SDPX Model{", T, "}")
+    end
+    if model.objective === nothing
+        println(io, "Objective: none")
+    else
+        sense = model.objective.sense isa Minimize ? "Minimize" : "Maximize"
+        constant = model.objective.expression.constant
+        if iszero(constant)
+            println(io, "Objective: ", sense)
+        else
+            println(io, "Objective: ", sense, " (constant=", constant, ")")
+        end
+    end
+    nblocks = length(model.variable_blocks)
+    if nblocks == 0
+        println(io, "Variables: ", num_variables(model))
+    else
+        breakdown = _mature_scalar_breakdown(model.variable_blocks, :variable)
+        println(io, "Variables: ", num_variables(model), " in ", nblocks, " blocks (", breakdown, ")")
+    end
+    cblocks = length(model.constraint_blocks)
+    if cblocks == 0
+        return print(io, "Constraints: ", num_constraints(model))
+    end
+    breakdown = _mature_scalar_breakdown(model.constraint_blocks, :constraint)
+    return print(
+        io,
+        "Constraints: ", num_constraints(model),
+        " in ", cblocks, " blocks (", breakdown, ")",
+    )
+end

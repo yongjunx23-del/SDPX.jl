@@ -163,6 +163,13 @@ include("moi_wrapper.jl")
 export optimize!, execution_plan
 export status, value, dual, dual_slack
 export primal_objective, dual_objective
+export objective_value, dual_objective_value
+export primal_residual, dual_residual, relative_gap
+export iterations, solve_time
+export is_optimal, is_primal_infeasible, is_dual_infeasible
+export primal_status, dual_status, termination_status
+export num_variables, num_constraints
+export variable_by_name, constraint_by_name, variable_names, constraint_names
 export certificate, diagnostics, iteration_history, performance_trace
 export Optimizer
 export clear_structure_cache!, set_structure_cache_enabled!
