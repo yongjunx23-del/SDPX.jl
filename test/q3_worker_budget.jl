@@ -45,7 +45,7 @@ end
     @test SDPX._q3_foreach(1:n, 2) do i
         Threads.atomic_add!(counts[i], 1)
         out[i] = 2i
-    end == 2
+    end == min(2, _POOL)
     @test all(c -> c[] == 1, counts)
     @test out == collect(2:2:2n)
     # Budget 1 stays serial but exact.
@@ -65,10 +65,11 @@ end
         end
         (a, b, all(c -> c[] == 1, bcounts))
     end)
-    @test nested == (1, 2, true)
+    @test nested == (1, min(2, _POOL), true)
     # Failure joins: the exception propagates and the executor is reusable.
     detonated = Threads.Atomic{Int}(0)
-    @test_throws CompositeException SDPX._q3_foreach(1:n, 4) do i
+    exception_type = _POOL > 1 ? CompositeException : ErrorException
+    @test_throws exception_type SDPX._q3_foreach(1:n, 4) do i
         Threads.atomic_add!(detonated, 1)
         i == 500 && error("boom-500")
     end
@@ -102,8 +103,9 @@ end
     ext = Base.get_extension(SDPX, :SDPXMultiFloatLinearAlgebraExt)
     # x4 provider thread-count configuration is admitted per backend.
     @test ext._Provider(Float64x4; threads=1).config.thread_count == 1
-    @test ext._Provider(Float64x4; threads=2).config.thread_count ==
-        min(2, _POOL)
+    # The low-level provider retains its requested config; core admission
+    # clamps the budget before constructing it, and kernels also cap workers.
+    @test ext._Provider(Float64x4; threads=2).config.thread_count == 2
     for ST in (Float64, BigFloat, Float64x2, Float64x3, Float64x4)
         @testset "$ST" begin
             setprecision(BigFloat, 256) do
