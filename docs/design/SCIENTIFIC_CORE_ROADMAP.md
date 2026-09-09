@@ -1,6 +1,6 @@
 # SDPX 科学内核与高精度体系：完整 R0–R6 路线图
 
-更新：2026-09-08。本文接续 2026-09-07 项目审计，更新其执行路线图；旧审计、历史实验与证书保持原样。它是当前技术设计与验收计划，不是会话交接文档。
+更新：2026-09-09。本文接续 2026-09-07 项目审计，更新其执行路线图；旧审计、历史实验与证书保持原样。它是当前技术设计与验收计划，不是会话交接文档。
 
 目标：以 Julia 为主体，提高 MultiFloat、BigFloat 和大规模多核计算能力；优化对象最终是**获得原坐标认证解的总时间与内存**，不是单个算术峰值。用户已授权按本计划自动实施、检查和交付；推送、合并主分支和发布仍不在授权内。
 
@@ -31,7 +31,11 @@
 
 ### 受限集成与仍未过门的工作
 
-- R0 半参数根/真实存储几何后继 `0f47d73` 获独立窄审并参考性集成为 `9c60352`：两个保留的warm根在1次向外区间Newton求值内达到原相对目标，原生产根仍各失败64次。64项通过；精确有理数证明实际L与真实Newton decrement满足2^-22，但物化H/逆B的真实metric误差超过该目标，尽管H/B均SPD。原生重构在新scratch中执行，未发布任何生产有效状态。下一步已限定为显式、未晋升的dual-Hessian one-secant因子表示与完整仿射Newton epoch；strict路径使用H(s)，不得偷换成L(shadow)。证据：`power-root-geometry/parent-report.md`。
+- R0 因子保留研究链已获分片独立审阅并整合至开发分支 `035a28c`，仅新增22个 `validation/scientific_core/` 文件，不改生产默认入口。实际L/R/scale贯穿完整有边框仿射Newton系统，不形成normal equations；独立有理数与原生EFT分别认证真实存储几何、BFGS目标、变换系数及原五方程。compensated-shadow构造的六个候选取得真实因子/metric证书，但旧log-factor门全部拒绝这些新候选，不把新证书改称旧门通过；也不声称六个旧L全部失格。原生仿射计数P2已闭合：trial17完整6383/403373、trial19完整6108/332617次TwoProd/TwoSum，旧3897/291663及3677/236349只是另列的polynomial小计。证据：`factor-affine-epoch/`、`compensated-half-factor/`、`native-affine-certificate/counter-fix-report.md`。
+- R0 半参数cold/warm全gap多项式根与current-primal高阶修正已按断开实验范围审阅/集成。根保留[0,1]括区间、原容差和有限预算，166次成功调用最多5次迭代/4次中点探测，不用解析根；低于2^-40的域仍拒绝。corrector使用独立L(s)，不借用L(shadow)，保留真实H分量后验、双序三阶项、原raw-Euler目标ds_aff⋅dy_aff与有界投影。初稿advisor符号错误由父流程在编码前发现并经erratum纠正。trial17/block4原L的eta8.14e-7失格；固定27点首列相邻Float64位型网格第7次得到eta8.84e-8，其余五块保留原候选，全部满足原2^-22且不加ridge/放宽容差。full verifier缺失dual的P1及失败路径计数P2均修复并复审闭合。旧完整corrector本身在这六点也成功，不能将其描述成旧失败。证据：`half-full-gap-root/`、`factor-combined-epoch/`。
+- 整合源码 `035a28c` 通过3593项具名复测：stored-affine239、compensated-affine273、full-gap-root2865、current-corrector216；四个独立有界进程分别247/247/238/243个来源/环境散列前后相同。限制仍为已验证Julia1.12.6/aarch64 Darwin原生Float64语境；combined RHS/Newton、line search、strict/general-alpha/BF/x4及生产策略尚未闭合。后继combined实验在隔离工作树中准备，**无R0–R6完整阶段完成**。整合回执：`continuous-factor-integration/summary.json`。
+
+- R0 半参数根/真实存储几何后继 `0f47d73` 获独立窄审并参考性集成为 `9c60352`：两个保留的warm根在1次向外区间Newton求值内达到原相对目标，原生产根仍各失败64次。64项通过；精确有理数证明实际L与真实Newton decrement满足2^-22，但物化H/逆B的真实metric误差超过该目标，尽管H/B均SPD。原生重构在新scratch中执行，未发布任何生产有效状态。其显式、未晋升的dual-Hessian one-secant因子表示与仿射Newton后继见上；strict路径使用H(s)，不得偷换成L(shadow)。证据：`power-root-geometry/parent-report.md`。
 - R2 恢复误删的cold owned约束收缩方法（非旧Schur求解器），按审阅及P2修复集成为 `186d76f`。原PreparedSolver首次求解在结果桥接处因缺失buildP_owned!报错；buildP_owned!/accumulate_v_owned!现恢复Dense/Sparse线性与Frobenius语义。最终216项内核、1475项生命周期、20项固定BF256/512结果所有权检查通过。100次c/b更新、结构失效/恢复及4个外层并发会话有独立当前输入/残差/缓冲检查；不把元数据reuse计数当backend符号分析次数，不把cache条目数当RSS上界。证据：`prepared-block-assembly/parent-report.md`。
 - R3 私有LP pattern后继 `dedbbfe` 获独立窄审并集成为 `b005c66`：检查计数及canonical CSC后直接分配最终私有结构，消除shared-cache lookup/publication、临时sparse(A)及template复制；默认/shared/provider/原方程门不变。2739项结构/值/所有权、1210项既有研究数值/自然排序/准入拒绝、98项shared-cache协议检查通过。只减少已明确的构造重叠，不证明实际capacity、全对象、MPFR/GMP、GC或保留结果上界；内存准入仍拒绝。证据：`private-sparse-pattern/parent-report.md`。
 - 上述三个切片在整合源码 `b005c66` 重新通过共5822项具名检查，七个独立有界进程的来源/环境前后相同；用户原始main工作树、原环境、旧失败证据未动。整合回执：`continuous-core-integration/summary.json`。
@@ -69,7 +73,7 @@
 **保留范围**：独立 primal/dual/HSD 推导，强弱不可行及非 Slater 边界；Exp 自协调性/Fenchel 关系；SOC `2μe` 与 Euclidean/svec pairing；所有 RHS、scalar closure、coupled/fused/trial/refinement/ray 消费者。
 
 **下一步**：
-- Power：共享对数比值的信息丢失已按窄范围修复；Float64 额外逆候选的精确否决已完成窄审并集成；后续实际失败点已捕获，半参数 Phi 补偿包络仅取得参考资格。下一步联合研究向外根括区间与真实存储点几何，禁止放宽 useful-progress 或把较准 Phi 直接套入未证明的旧停机账本。原 Float64 `n=3*2^-54,d=1` 的约 0.287682 Phi 误差不再保留，但旧 floor 并非普遍可靠误差包络；不据此声称它解释全部历史失败。完整 native 误差账本仍缺失，Cartesian 诊断不能被当作独立重算真实梯度。联合处理根残差、可靠区间、停滞和有限预算，禁止仅收紧区间或盲加迭代数；精确 SPD 否决也不能替代根/梯度几何。覆盖 Float64、BF256/BF512、x4 冷种子和近边界点。
+- Power：共享对数比值的信息丢失已按窄范围修复；Float64 额外逆候选的精确否决已完成窄审并集成；后续实际失败点已捕获，半参数 Phi 补偿包络仅取得参考资格。半参数全gap根、因子保留仿射epoch及current-primal高阶修正已取得上述断开实验资格；下一步冻结combined epoch，认证原RHS、rho/hHat/h、scalar/orthant约定及完整原五方程，再处理line search和生产策略。禁止放宽 useful-progress 或把较准 Phi 直接套入未证明的旧停机账本。原 Float64 `n=3*2^-54,d=1` 的约 0.287682 Phi 误差不再保留，但旧 floor 并非普遍可靠误差包络；不据此声称它解释全部历史失败。完整 native 误差账本仍缺失，Cartesian 诊断不能被当作独立重算真实梯度。联合处理根残差、可靠区间、停滞和有限预算，禁止仅收紧区间或盲加迭代数；精确 SPD 否决也不能替代根/梯度几何。覆盖 Float64、BF256/BF512、x4 冷种子和近边界点。
 - Exp：补中心比值消去的精确点回归及范围/溢出负例；以正确的 Float64 ulp 和显式舍入参考区分梯度重构误差与配对求和误差。研究稳定梯度/metric 表示，保留全部独立门。
 - PSD：已取得 pre-overwrite 实际对象捕获资格；下一片为显式、仅 Float64/n=2 的 SPD-relative 谱实验，不改默认/generic/indefinite 路线。先限定相对pivot、范围与小特征值消去误差，检查归一化后的实际特征系统和原输入非对称缺陷；保留全部原坐标门；`1405207` 已修复有限性前置检查，不能以此替代谱误差或原坐标metric证明。实际 `S/Y/P/Pinv/R/Q/Lambda` 只用于提升精度诊断，不更换 Cholesky、svec 展开或重新求逆，不强制两个反例被接受。
 - 把所有已确认反例纳入永久测试；不把舍入上界、两个精度下的失败或局部失败推成普遍不可能性。
