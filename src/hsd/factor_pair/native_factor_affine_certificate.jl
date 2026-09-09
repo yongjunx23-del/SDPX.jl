@@ -98,6 +98,20 @@ function certify(epoch,result)
     certificate=_certify_equations(epoch,result)
     certificate.reason===:physical_native_bounds ? (;certificate...,reason=:affine_native_bounds) : certificate
 end
+# Block-diagonal interval entry lookup.  Rows are either LP (1x1 diagonal) or
+# a contiguous 3-row Power block; every cross-block entry is exactly zero.
+function _block_entry(i,j,lpn,diag,blocks,mats)
+    if i <= lpn
+        return i == j ? diag[i] : RG.point(0)
+    end
+    for (bi,block) in enumerate(blocks)
+        rows=block.offset:block.offset+2
+        i in rows || continue
+        j in rows || return RG.point(0)
+        return mats[bi][i-rows.start+1,j-rows.start+1]
+    end
+    return RG.point(0)
+end
 # Private equation kernel. Each caller must supply its separate RHS-provenance
 # guard; the public affine certificate above remains affine-only.
 function _certify_equations(epoch,result)
@@ -119,22 +133,30 @@ function _certify_equations(epoch,result)
         (epoch.A.nzval,epoch.b,epoch.c,direction.dx,direction.dy,direction.ds,
          rhs.primal_affine,rhs.dual_affine,rhs.cone_corrector)) || return (status=:unsupported,reason=:data_domain)
     try
-        Theta=fill(RG.point(0),m,m);Wmatrix=fill(RG.point(0),m,m)
+        # Block-diagonal verifier storage: no global dense Theta/W matrix is
+        # ever materialized.  `_theta_entry`/`_w_entry` return the same interval
+        # (and exact zero for cross-block entries) the dense matrix held, so the
+        # inequalities and their summation order are unchanged.
+        lpn=length(epoch.cone.lp_scales)
+        theta_diag=Vector{RG.I}(undef,lpn);w_diag=Vector{RG.I}(undef,lpn)
+        theta_blocks=Matrix{RG.I}[];w_blocks=Matrix{RG.I}[]
         theta_dy=Vector{RG.I}(undef,m);metrics=Any[];polys=Any[]
         for i in eachindex(epoch.cone.lp_scales)
-            scale=RG.point(epoch.cone.lp_scales[i]);Theta[i,i]=scale*scale;Wmatrix[i,i]=RG.point(1)/scale
-            theta_dy[i]=Theta[i,i]*RG.point(direction.dy[i])
-            ratio=(RG.point(epoch.s[i])/RG.point(epoch.y[i]))/Theta[i,i]-RG.point(1)
+            scale=RG.point(epoch.cone.lp_scales[i]);theta_diag[i]=scale*scale;w_diag[i]=RG.point(1)/scale
+            theta_dy[i]=theta_diag[i]*RG.point(direction.dy[i])
+            ratio=(RG.point(epoch.s[i])/RG.point(epoch.y[i]))/theta_diag[i]-RG.point(1)
             push!(metrics,(status=RG.absupper(ratio)<=RG.KAPPA ? :certified : :unsupported,
                 reason=:lp_metric,true_bound=RG.absupper(ratio)))
         end
         for block in epoch.cone.blocks
             p=polynomials(block);push!(polys,p);rows=block.offset:block.offset+2
-            Theta[rows,rows]=intervals(p.Tn,p.Td)
-            Wmatrix[rows,rows]=intervals(p.Wn,p.Wd)
+            push!(theta_blocks,intervals(p.Tn,p.Td))
+            push!(w_blocks,intervals(p.Wn,p.Wd))
             theta_dy[rows]=paction(p.Tn,p.Td,direction.dy[rows],p.budget)
             push!(metrics,bfgs_bound(block,p))
         end
+        theta_entry(i,j)=_block_entry(i,j,lpn,theta_diag,epoch.cone.blocks,theta_blocks)
+        w_entry(i,j)=_block_entry(i,j,lpn,w_diag,epoch.cone.blocks,w_blocks)
         # Verify actual transformed coefficients using the declared W entries,
         # not a larger product-of-absolute-factor work denominator.
         coefficient_error=0.0
@@ -148,7 +170,7 @@ function _certify_equations(epoch,result)
             end
             for i in 1:m
                 work=RG.point(0)
-                for j in 1:m;work=work+RG.abs_interval(Wmatrix[i,j])*RG.point(abs(source[j]));end
+                for j in 1:m;work=work+RG.abs_interval(w_entry(i,j))*RG.point(abs(source[j]));end
                 coefficient_error=max(coefficient_error,ratio_bound(RG.point(target[i])-expected[i],work))
             end
         end
@@ -164,7 +186,7 @@ function _certify_equations(epoch,result)
             push!(bounds[1],r);errors[1]=max(errors[1],ratio_bound(r,work))
             r=RG.point(ds[i])+theta_dy[i]-RG.point(rhs.cone_corrector[i])
             work=RG.point(abs(ds[i]))+RG.point(abs(rhs.cone_corrector[i]))
-            for j in 1:m;work=work+RG.abs_interval(Theta[i,j])*RG.point(abs(dy[j]));end
+            for j in 1:m;work=work+RG.abs_interval(theta_entry(i,j))*RG.point(abs(dy[j]));end
             push!(bounds[4],r);errors[4]=max(errors[4],ratio_bound(r,work))
         end
         for j in 1:n
