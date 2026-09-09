@@ -37,17 +37,56 @@ constraints, or non-attained optima).
 | Clarabel 0.11.1 | Float64 | default 1e-8 | SOLVED | 2.98e-09 | 8.47e-09 |
 | Clarabel 0.11.1 | Float64 | tightened 1e-12 | SOLVED | 3.04e-14 | 2.22e-12 |
 | Clarabel 0.11.1 | BigFloat256 | tightened 1e-30 | SOLVED | 7.29e-31 | 3.11e-30 |
-| Clarabel 0.11.1 | BigFloat512 | tightened 1e-30 | SOLVED | 7.29e-31 | 3.11e-30 |
+| Clarabel 0.11.1 | BigFloat512 | tightened 1e-30 | SOLVED | 7.29e-31 (tolerance-limited) | 3.11e-30 |
 | Clarabel 0.11.1 | Float64 SOC | default | SOLVED | 5.75e-09 | 1.32e-08 |
 | Clarabel 0.11.1 | BigFloat256 SOC | tightened | ALMOST_SOLVED | 8.67e-22 | ~0 |
 | **SDPX (dev `113869c`)** | **Float64** | default | **numerical_breakdown** | **1.12 (obj 0)** | n/a |
-| SDPX (dev `113869c`) | BigFloat256 | default | optimal | 1.48e-26 (rel 1.32e-26) | primal 1.88e-26 / dual 4.07e-26 |
-| SDPX (dev `113869c`) | BigFloat512 | default | optimal | 1.48e-26 (rel 1.32e-26) | primal 1.88e-26 / dual 4.07e-26 |
+| SDPX (dev `adcacf8`) | BigFloat256 | default | optimal | 1.48e-26 (rel 1.32e-26) | primal 1.88e-26 / dual 4.07e-26 |
+| SDPX (dev `adcacf8`) | BigFloat512 | default | optimal | 3.74e-54 (rel 3.33e-54) | primal 2.31e-52 / dual 4.69e-52 |
 
 Independent audit (not solver residual code): each returned value is converted
 exactly to `Rational{BigInt}`, then the original-coordinate primal residual, dual
 residual, cone/dual-cone membership, complementarity and objective error are
 computed. All reported `SOLVED`/`optimal` points are feasible and near-optimal.
+
+Audit corrections (first T0 draft had defects, now fixed):
+- The Clarabel cone-block audit now uses the actual rows: prefix orthant rows
+  1-3, Power blocks rows 4-6, 7-9, 10-12. The first draft treated rows 1-3 as a
+  Power block and omitted rows 10-12.
+- The audit rebuilds `A/b` in the run's own precision `T`, not Float64.
+- The SOC arm uses a rounded `sqrt(2)` map (Clarabel 0.11.1 has no rotated-SOC
+  cone type), so it is a near-equivalent cross-check; the native Power arm is
+  the authority for the solver's power-cone path.
+- The SDPX BigFloat arm now passes `Model(BigFloat; precision_bits=...)`
+  explicitly; the first draft's "512" run was silently reset to 256 by
+  `optimize!`. The corrected 512-bit run reaches 3.74e-54 objective error.
+
+## Where SDPX Float64 fails (parent debug capture)
+
+`SDPX_DEBUG_LINE_SEARCH=1` on the Float64 run shows the final exhausted search
+at an already near-converged iterate (`current_merit=2.684e-7`, `p=1.0408e-7`,
+`d=1.1119e-7`, `gap=2.6841e-7`). Trials with `alpha` above the progress floor
+fail the **nonsymmetric scaling** gate with typed reasons:
+
+- `NS_SCALING_CONJUGATE_FAILED` + `NS_SCALING_NO_FALLBACK` +
+  `NS_CONJUGATE_ITERATION_LIMIT` (root solve does not converge at Float64);
+- `NS_CONJUGATE_HESSIAN_NOT_SPD`;
+- `NS_SCALING_FALLBACK_DENOMINATOR` / `NS_SCALING_FALLBACK_NOT_SPD` with
+  `NS_SCALING_GRAM_NONSYMMETRIC`, `NS_SCALING_BFGS_DENOMINATOR`,
+  `NS_SCALING_FORCED_DUAL_HESSIAN`.
+
+Trials that do satisfy the scaling neighborhood land at `alpha ~ 2.3e-23`, i.e.
+far below the useful-progress floor `2cbrt(eps) ~ 1.21e-5`, and fail only
+`progress=false`. So the Float64 failure is a **scaling-construction failure at
+near-boundary points**, not a merit/homotopy/termination failure. Note
+`base.record.step_size`/`backtracking` are only written on success, so the
+reported `step_size=1.921e-4` is the previous accepted step, not the rejected
+alpha.
+
+This is exactly what the reviewed repair trajectory (compensated half-Power
+factor + full-gap polynomial root + native certified pair) targets: the legacy
+log-based factor/root path cannot construct the scaling at these points, while
+the compensated factor and polynomial root are independently certified there.
 
 ## Diagnosis
 

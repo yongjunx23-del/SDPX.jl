@@ -9,7 +9,10 @@
 #   :power - native Clarabel.PowerConeT(0.5) with activity (t, 1, a)
 #   :soc   - SecondOrderConeT(3) with activity (t+1/2, t-1/2, sqrt(2)*a)
 #            since (t+1/2)^2 >= (t-1/2)^2 + 2a^2  <=>  t >= a^2.
-#            Clarabel 0.11.1 has no rotated-SOC cone type.
+#            Clarabel 0.11.1 has no rotated-SOC cone type.  sqrt(2) is rounded
+#            to the working precision, so this arm is a near-equivalent
+#            cross-check, not an exact reformulation; the native power arm is
+#            the authority for the solver's power-cone path.
 #
 # Float64 and BigFloat (256/512) at default and tightened tolerances.
 # The audit reconstructs every returned value exactly as Rational{BigInt}.
@@ -107,7 +110,7 @@ function audit(rec)
     x = [exact(v) for v in rec.x]
     s = [exact(v) for v in rec.s]
     z = [exact(v) for v in rec.z]
-    A, b, _, _ = build_data(Float64, Symbol(rec.form))
+    A, b, _, _ = build_data(eltype(rec.x), Symbol(rec.form))
     Ax = zeros(Rational{BigInt}, m)
     for j in 1:3, i in 1:m
         A[i, j] == 0 && continue
@@ -119,9 +122,11 @@ function audit(rec)
     obj_err = abs(obj - A_EXACT)
     primal_min = big(0)
     dual_min = big(0)
+    # rows 1-3 are the prefix orthant; the three Power/SOC blocks are rows
+    # 4-6, 7-9 and 10-12.  Audit the three cone blocks, not the orthant.
     for i in 0:2
-        s1, s2, s3 = s[3i + 1], s[3i + 2], s[3i + 3]
-        z1, z2, z3 = z[3i + 1], z[3i + 2], z[3i + 3]
+        s1, s2, s3 = s[3i + 4], s[3i + 5], s[3i + 6]
+        z1, z2, z3 = z[3i + 4], z[3i + 5], z[3i + 6]
         if rec.form == "power"
             primal_min = min(primal_min, s1 * s2 - s3^2)
             dual_min = min(dual_min, 4 * z1 * z2 - z3^2)

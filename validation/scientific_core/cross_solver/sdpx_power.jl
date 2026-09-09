@@ -14,8 +14,8 @@ floatword(s) = reinterpret(Float64, parse(UInt64, s; base = 16))
 row = TOML.parsefile(FIXTURE)
 a = [floatword(row["b_bits"][k]) for k in (6, 9, 12)]
 
-function run_once(::Type{T}) where {T<:AbstractFloat}
-    model = SDPX.Model(T)
+function run_once(::Type{T}; precision_bits::Int=0) where {T<:AbstractFloat}
+    model = T === BigFloat ? SDPX.Model(BigFloat; precision_bits=precision_bits) : SDPX.Model(T)
     x = SDPX.variable!(model, :fixed_signal, 3; domain = SDPX.Reals())
     t = SDPX.variable!(model, :power_epigraph, 3; domain = SDPX.Nonnegative())
     for i in 1:3
@@ -40,7 +40,7 @@ open(joinpath(OUT, "sdpx.txt"), "w") do io
                 " primal_res=", cert.primal_residual, " dual_res=", cert.dual_residual)
         else
             setprecision(BigFloat, prec) do
-                r = run_once(BigFloat)
+                r = run_once(BigFloat; precision_bits=prec)
                 cert = SDPX.certificate(r)
                 @printf("BigFloat%-4d status=%s primal_obj=%s primal_res=%s dual_res=%s\n",
                     prec, SDPX.status(r), string(cert.primal_objective), string(cert.primal_residual), string(cert.dual_residual))
