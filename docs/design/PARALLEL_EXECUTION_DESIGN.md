@@ -44,11 +44,17 @@ not as a structural constant.
 | — `kkt_factorization_seconds` | 12.335 | 29.9% | charges metric prep + panel transform + SYRK + LU + homogeneous solve, not pure LU |
 | unaccounted | ~8.7 | ~21% | the canonical phase projection omits buckets |
 
-105 factorizations (`mfla_pivoted_ldlt`). The "factorization" bucket is
-dominated by the **triangular Gram assembly** (exactly 7,585,200 MACs per
-assembly), which *is* parallelizable; the 42×42 LU is negligible. The
-`direction_seconds` bucket overlaps its children, so adding phase times
-double-counts.
+105 factorizations. **Label caveat:** the trace reports
+`selected.executed_factorization_kernel=mfla_pivoted_ldlt`, but
+`src/hsd/native_hsd_public.jl:1107-1117` labels every executed core that way
+while fixed-trace actually constructs `ProviderLPLUCache`
+(`fixed_trace_q3.jl:949`) and `factor_cache/routes/lp_lu.jl:291` calls
+`la_lu_factor!`. The label is **mislabeled**; do not infer LDLT. The
+"factorization" bucket is dominated by the **triangular Gram assembly**
+(exactly 7,585,200 MACs per assembly), which *is* parallelizable; the 42×42
+factor is negligible. The `direction_seconds` bucket overlaps its children, so
+adding phase times double-counts; the canonical projection omits
+residual/scaling buckets instead.
 
 ### 1.3 Design defects that make efficiency worse than the Amdahl bound
 
@@ -57,26 +63,36 @@ double-counts.
    admitted `plan.selected_threads`. A requested `Limits(...threads=4)` does not
    establish four workers, and concurrent solves each expand to the full Julia
    pool.
-2. **Atomic per-block claiming.** The HKM loops claim one block (scalar) or four
+2. **SIMD metric silently disabled by a layout assumption.** The vec4 HKM
+   metric required SOC offsets `3*(b-1)+1` (SOC rows first), but the
+   structured-A gate requires equality rows **before** SOC rows
+   (`fixed_trace_q3.jl:983-994`). For α3 (42 equality rows, SOC offsets
+   `43+3(b-1)`) the vec4 metric never activates and every block runs the scalar
+   metric; SPD inverse and RHS also stay scalar. A parent candidate makes the
+   kernel offset-aware (bit-identical; see Section 5).
+3. **Atomic per-block claiming.** The HKM loops claim one block (scalar) or four
    blocks (vec4) per `atomic_add!`; with thousands of blocks this is a
-   contention point, and the claim order is nondeterministic.
-3. **Barriers per residual pass.** The Q3 residual computation runs as several
+   contention point, and the claim order is nondeterministic. Whether it
+   dominates relative to metric inversion/RHS arithmetic is **unmeasured**.
+4. **Barriers per residual pass.** The Q3 residual computation runs as several
    separate whole-vector passes with `@sync` barriers; each pass pays a
-   full-vector memory sweep.
-4. **Incomplete accounting.** ~21% of α3 wall time is not attributed to any
-   phase, and `direction_seconds` overlaps children. We cannot optimize what we
-   do not measure.
-5. **Wrong axis for some LP-like cases.** Where no parallel path is selected or
+   full-vector memory sweep. The residual bucket is 7% of α3 T1, so eliminating
+   it entirely bounds the gain at ~1.076×.
+5. **Incomplete accounting.** ~21% of α3 wall time is not attributed to any
+   phase, and `direction_seconds` overlaps children. We cannot optimize what
+   we do not measure.
+6. **Wrong axis for some LP-like cases.** Where no parallel path is selected or
    the parallel Gram share is small, inner threading adds overhead; but this is
    a policy/threshold question (see `plan.jl:318-322`) to be settled by
    instrumentation, not assumed.
-
-6. **Static-partitioning composability hazard.** Coarse `@threads :static`
-   partitioning (a proposed fix for atomic-claim contention) introduces
-   non-primary/nested-task composability problems: nested parallel regions,
-   task migration, and blocking behaviour when the solve runs inside an outer
-   task pool. Any partitioning change must specify how it composes with the
-   outer scheduler and the existing thread budget.
+7. **Static-partitioning composability hazard.** Coarse `@threads :static`
+   partitioning (a proposed fix for atomic-claim contention) is unsuitable for
+   nested/non-primary-thread calls: nested parallel regions, task migration,
+   and blocking when the solve runs inside an outer task pool. Scratch must
+   belong to a worker range, not a migrating task's transient `threadid()`.
+8. **SIMD type assumption.** `_hkm_vec4_full_metric!` hardcodes
+   `MultiFloatVec{4,Float64,4}` under a broader MultiFloat dispatch; do not
+   broaden SIMD eligibility without explicit x4/type qualification.
 
 ## 2. Proposal: a two-level execution model
 
@@ -118,10 +134,55 @@ a user thread count alone:
 - **NUMA/affinity** on the cluster: first-touch placement, per-thread scratch,
   avoid false sharing on adjacent block writes.
 - **Validity gate for scaling claims**: every timed run records
-  `Percent of CPU this job got`; a low value is *evidence to investigate*, not
-  proof of contention (serial phases and policy gating produce the same
-  signature). Only report a run as contended when node load / other-job
-  evidence supports it; otherwise attribute it via per-phase instrumentation.
+  `Percent of CPU this job got`. A low value is **not** by itself evidence of
+  contention: under the fitted α3 model even an uncontended p=32 solve averages
+  only ~2.33 CPU-equivalents because the serial share dominates. Compare CPU%
+  against the model's expected CPU-equivalents and require independent
+  node-load/allocation/affinity evidence before claiming contention; otherwise
+  attribute the gap via per-phase instrumentation.
+
+## 5. Astra design-review outcome (2026-09-09)
+
+Verdict: **architecture sound, causal claims overstated**. The fitted `s`
+values are effective scaling parameters, not intrinsic limits; several proposed
+causes (atomic claims, bandwidth, false sharing, GC) remain unmeasured
+hypotheses. Ranked changes from the review:
+
+| Rank | Change | Expected effect | Risk / measurement |
+| --- | --- | --- | --- |
+| 1 | **Persistent warmed one-thread process workers** for queued independent solves (the campaign currently pays Julia startup + warmup per item: `shard_template.pbs:49-56`, `run_case.jl:19-36`) | Amortizes startup/JIT/warmup on the proven throughput axis; no isolated-solve latency gain | Retained memory, state leakage, certification failures; compare certified jobs per reserved node-hour including startup, monitor RSS |
+| 2 | **Exclusive phase timing + truthful receipts** (`performance_trace.jl:158-205`, `phase_timings.jl:39-51`, Q3 factor body `:1385-1407`) | No direct speedup; stops optimizing the wrong component | Instrumentation overhead; keep inclusive `direction_seconds`, add exclusive children/remainder |
+| 3 | **One budgeted coarse-range executor** for Q3 + provider (`product_cone_hsd.jl:234,258-267,546-548`; `fixed_trace_q3.jl:949-950`) | Enforces limits, removes atomic claiming, composable scheduling | Nested oversubscription, migrated-task scratch, cancellation; test admitted budgets inside larger pools |
+| 4 | **Make the existing HKM SIMD usable for equality-prefixed layouts** (`ext/SDPXMultiFloatLinearAlgebraExt.jl:1425-1433,1475-1487`) | Accelerates a currently scalar fallback; benefits T1 as well as threaded runs | Gather actual offsets, preserve per-lane arithmetic, count real SIMD batches |
+| 5 | **Fuse narrowly adjacent residual operations** (`fixed_trace_q3.jl:1070-1092,1106-1115,1150-1158`) | Removes barriers/dispatch/writes; residual is 7% of T1, so the bound is ~1.076× | Free variables, generic-layout fallback, aliases; verify all paths and fixed-worker parity |
+
+**First change to implement:** persistent warmed one-thread process workers (not
+a solver-wide task graph or public batching API). Accept gate: same reserved
+cores/memory/problem stream/environment/certification; compare current
+fresh-process launcher with persistent workers over repeated batches; count
+only independently certified completions including startup/collection/failures;
+accept a reproducible **≥2% throughput improvement** with bounded retained
+memory and no state-isolation/certification regression; otherwise keep the
+existing one-thread process scheduler. Keep execution management outside the
+numerical core.
+
+**Architecture comparison:** two-level process throughput + gated inner-thread
+latency is the best fit; a persistent process pool is the recommended
+throughput implementation; a persistent Julia task pool needs budget
+enforcement/ownership qualification first; a task graph is a poor initial fit
+due to numerical dependencies; multiple solves in one process exposes shared
+GC/cache/ownership hazards (reconsider after R1/R2 concurrency qualification);
+parallel sparse factorization ranks below the above until LP profiling shows a
+large enough factor share (a 20% overall gain with a 4× faster factor needs the
+factor to be ≥22.2% of time).
+
+**Additional hazards:** `@threads :static` is unsuitable for arbitrary nested
+calls; scratch must belong to a worker range, not a migrating task's
+`threadid()`; `_hkm_vec4_full_metric!` hardcodes `MultiFloatVec{4,Float64,4}`
+(do not broaden without x4 qualification); `fixed_trace_q3_core_preflight` is
+diagnostic-only, not a memory-admission bound; whole-job CPU% includes
+startup/warmup; the campaign's bare `wait` does not aggregate child failures
+into FAIL, so throughput must count validated result records.
 - **Digest caveat**: threading changes Gram reduction order, so trajectories
   differ across thread counts; bit-identity/A-B gates must compare within a
   fixed thread count.
