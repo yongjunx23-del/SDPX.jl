@@ -25,8 +25,14 @@ const tau_off = 10.0 * 2.0 * eps(Float64)
     # extremely separated exponents stay provable (:pass for rho < tau)
     @test SE._relative2_offdiag_gate(1.0, 2.0^-600, 1.0, tau_off) === :pass
     # explicit tiny tolerance must NOT be bypassed by the short-cut: with
-    # a=c=1, b=2^-1072 and tau=2^-1074 the correlation is 4*tau -> :fail
-    @test SE._relative2_offdiag_gate(1.0, 2.0^-1072, 1.0, 2.0^-1074) === :fail
+    # a=c=1, b=2^-1072 and tau=2^-1074 the correlation is 4*tau; the gate
+    # refuses (:unresolved, subnormal region without a proven pass) and
+    # must never return :pass
+    @test SE._relative2_offdiag_gate(1.0, 2.0^-1072, 1.0, 2.0^-1074) === :unresolved
+    # subnormal-bound products are not outward-rounded: with a=0.5, c=1.0,
+    # b=tau=2^-1074 the correlation is sqrt(2)*tau > tau, and a naively
+    # rounded hi could collapse to tau -> refuse, never pass
+    @test SE._relative2_offdiag_gate(0.5, 2.0^-1074, 1.0, 2.0^-1074) === :unresolved
     # ...while the same short-cut region with a big enough tau passes
     @test SE._relative2_offdiag_gate(1.0, 2.0^-1072, 1.0, tau_off) === :pass
     # tiny correlation -> skip
@@ -162,8 +168,8 @@ end
 @testset "psd relative2 D0 advantage vs absolute route" begin
     # Production route (absolute-threshold Jacobi) on the dyadic case: the
     # rotation is skipped, D0 = diag(1, 1/sqrt(2*delta^2)) and the recovered
-    # D0*M*D0 residual is catastrophic (~0.707 = rho, the relative
-    # contraction). The experimental relative route's D0 attains ~1e-16/1e-31.
+    # D0*M*D0 residual is the full relative contraction (~0.707 = rho). The
+    # experimental relative route's D0 attains ~1e-16/1e-31.
     δ = 2.0^-50
     M = [1.0 δ; δ 2.0*δ^2]
     A = copy(M); V0 = Matrix{Float64}(I, 2, 2); w0 = zeros(2)
