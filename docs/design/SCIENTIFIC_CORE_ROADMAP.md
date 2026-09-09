@@ -35,12 +35,13 @@
 - **R0–R3 统一验收（窄范围）**：Astra round-3 **PASS**（`febad00` 记录）；分区 1/2/3 = 3736/196/4622+1 broken，R2-A 门 Warm100=0/Cold100=1；故障注入 33/33。**不等于全阶段关闭**。
 - **R1-B 窄测试**（`1cc1b40`）：BigFloat 256/512/1024 owned-object 矩阵（别名隔离/重复求解/失败恢复/精度切换），standalone + CI 允许清单（`9dc5f68`）。
 - **R6-D 可重建交付**（`ced85ce`）：`check_reproducible_delivery.jl` 现如实记录 `manifest_sha1=absent` 与 active env Manifest，PASS/exit 0。
-- **R4-B MFLA panel SIMD 候选**（provider 分支 `f482be7`）：opt-in 4-lane Cholesky panel，位等价，blocked Cholesky 端到端 1.14–1.42×；SDPX 侧实验开关 `c5cb2c3`（默认关、版本鲁棒）。仅对 equality-Gram 较大问题有效；CSDR α3（42 等式）收益有限。
+- **R4-B MFLA panel SIMD 候选**（provider 分支 `f482be7`）：默认关；小型单进程 blocked-Cholesky 观察 1.14–1.42×，不是 solver 或完整 provider 资格。SDPX 实验开关 `c5cb2c3` 尚未集成；需完整矩阵与端到端配对验证。
 - **CSDR 算法层调研**（`75ae7a7`，`docs/design/CSDR_ALGORITHM_OPTIONS.md`）：排序机会与“不再重查”清单；冻结指纹冲突裁决（roadmap 管辖，旧 guard 不变，105/`3a7833` 为未资格观察基线）。
-- **CSDR 集群战役**（release `d52f041`，4 作业 24 次重复，全部 optimal/证书有效/位等价）：α3 1/8/16/32 线程中位 92.2/66.3/69.5/60.1s（1.39/1.33/1.53×，节点共享、CPU% 95–149% 使扩展数受混淆）；**HKM chunk-64 无效果（最佳 −1.85%，远低于 5% 门）→ 不采用，保持默认 0**；digest 全 24 次一致 `c354cf07`。
-- **并行诊断与预算（Phase 1/2）**：`0b7bc99` 加入 Q3 独占子相位计时（metric/factor/homogeneous + 实际 worker 数）；`f0325a4` 将 `settings.limits.threads` 作为 Q3 任务预算（`_q3_workers()`，HKM 标量/vec4 循环不再膨胀到线程池；`@threads :static` 仍用整池，需一进程一配置）。设计文档 `docs/design/PARALLEL_EXECUTION_DESIGN.md`。
-- **R4/CSDR 批量仿射装配已实现**（`2cfa6af`）：`_AffineBuilder` + `_affine_sum` 替代 dot/PSD-dot/A*block 的逐步 `+` 折叠；精确等价回归（Float64/BigFloat 重复索引、消去后重加、零系数、路由路径）通过；三分区 3776/196/4622+1 全过；CSDR 全模型构建 **1.411s/15.93GB → 0.185s/0.724GB（7.6×，分配 22×）**。
-- **集群并行实测**：LP random_large 内层线程平坦（T1–T16），T32 −18%；进程级并行 282→559→893 solves/node-hr（ppn 8/16/32）。CSDR α3 本地 1/4 线程 41.3s→23.1s（1.79×），集群 1/8/16/32 战役进行中。
+- **CSDR 集群战役**（release `d52f041`，4 作业 24 次重复）：全部报告 optimal/证书有效，digest 一致 `c354cf07`。1/8/16/32 线程中位 92.207/66.257/69.525/60.149s；节点/时间窗不同，非受控扩展率，CPU% 本身不证明争用。**chunk-64 最佳 −1.85%，未过 5% 门，不采用**。旧应用 guard 尚未协调。
+- **并行实现候选（待资格）**：`e1d78e9` 取代 `f0325a4` 的进程全局预算，工作区/provider 接收独立预算，Q3 使用可嵌套粗粒度范围任务；修复 LU 标签与 SIMD 拒绝/类型/计数器。`9123695` 拆分 local/transform/Gram 计时并行化独立局部 metric；worker 字段是预算不是 CPU 测量。详见 `PARALLEL_EXECUTION_DESIGN.md`。
+- **进程池候选（待资格）**：`69916e6` 引入，`dac8617`/`4630328` 修复超时回收、队列竞态、输出/源码身份及组合验收门；历史 2.85× 使用未跟踪脚本，不能作为修复版通过凭证。
+- **R4/CSDR 批量仿射装配**（`2cfa6af`）：dot/PSD-dot/A*block 走 builder；旧窄回归通过。`3dde10a` 修复 mutable scalar 输入/输出隔离，独立测试进行中。CSDR scratch 显式调用 `_affine_sum` 的构建观察 1.411s/15.93GB→0.185s/0.724GB；冻结 driver 的任意 `sum` 不会自动获得该收益。
+- **LP 集群观察**：内层线程 T1–T16 平坦、T32 较慢；进程级 282→559→893 solves/node-hr（ppn 8/16/32）。实际并行路径需按 route/尺寸核实，不推断 LP 无并行工作。
 
 ## 架构选择与不可越过的门（保持不变）
 

@@ -33,7 +33,7 @@
 #       Persistent child: load SDPX once, run one excluded warmup solve,
 #       then claim items from the shared queue directory (atomic mkdir
 #       locks) until every item has a result receipt. Writes one receipt
-#       per item plus a worker summary (peak/retained RSS, failures).
+#       per item plus a worker summary (peak/pre-exit RSS, failures).
 #       Fails closed (exit 1) if any claimed item is non-optimal/invalid.
 #   --mode=fresh --items=N --workers=W --outdir=D
 #       Parent: run the SAME item set with one fresh process per item, at
@@ -42,7 +42,7 @@
 #       Parent: spawn W persistent workers against one shared queue.
 #   --mode=compare --items=N --workers=W --outdir=D --reps=R
 #       Parent: interleave fresh/persistent whole-batch runs R times each
-#       (fresh, persistent, fresh, persistent, ...) and write a comparison
+#       (fresh, persistent, persistent, fresh, ...) and write a comparison
 #       summary with the >=2% certified-throughput gate verdict inputs.
 #
 # Execution management only: this file contains no solver numerics.
@@ -464,6 +464,9 @@ function valid_receipt(r, index::Integer)
         get(r, "loaded_sdpx", "") == realpath(ROOT) || return false
         r["item_index"] == index && r["seed"] == Int(item_seed(index)) || return false
         r["workload"] == "lp_random_large" || return false
+        r["model_structure"] == "planted_box_lp_m$(WORKLOAD_M)_n$(WORKLOAD_N)_rebuilt_per_item" || return false
+        r["julia_version"] == string(VERSION) || return false
+        r["maxrss_bytes"] isa Integer && r["rss_bytes"] isa Integer || return false
         r["iterations"] isa Integer && r["iterations"] >= 0 || return false
         r["source_commit"] == readchomp(`git -C $ROOT rev-parse HEAD`) || return false
         r["script_sha256"] == bytes2hex(sha256(read(SCRIPT))) || return false
@@ -678,7 +681,7 @@ function parent_compare(n_items::Integer, n_workers::Integer, outdir::AbstractSt
         "median_persistent_throughput" => Float64(median(persist_tp)),
         "gate_ratio_persistent_over_fresh" => Float64(gate_ratio),
         "gate_threshold" => 1.02,
-        "gate_pass" => Bool(all_valid && isolation_ok && memory_ok && gate_ratio >= 1.02),
+        "gate_pass" => Bool(all_valid && isolation_ok && memory_ok && isfinite(gate_ratio) && gate_ratio >= 1.02),
         "all_batches_valid" => all_valid,
         "memory_samples_within_limit" => memory_ok,
         "per_worker_rss_limit_bytes" => rss_limit,

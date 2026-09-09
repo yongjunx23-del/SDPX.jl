@@ -24,8 +24,8 @@ standard tolerance 2e-5. Every item is REBUILT per solve (fresh `Model`;
 rebuild is milliseconds vs multi-second solves) so the comparison isolates
 process startup/JIT amortization, not session reuse. Solver path is
 identical in both arms: `run_one(spec, Float64; threads=1)` with
-`certification=true`. Each arm reserves the same W=2 cores (`--threads=1`,
-BLAS/OMP/MKL=1 per process).
+`certification=true`. Each arm uses the same W=2 process-concurrency limit
+(`--threads=1`, BLAS/OMP/MKL=1); this does not reserve cores or pin affinity.
 
 Raw artifacts for this run live outside the worktree (`/tmp/pool_compare`,
 `rep{1,2}_{fresh,persistent}/results/*.toml` + `batch_summary.toml` +
@@ -52,8 +52,8 @@ pays one excluded warmup (~36 s, counted in wall time, not in certified
 count) and then solves each further item in ~3–4 s. Per-item objectives are
 bit-identical across fresh/persistent and across reps (e.g. item 0:
 887.0975136347557, 10 iterations everywhere); state-isolation check passes,
-no certification regression (32/32 certified, 0 failures, warmups also
-optimal+valid).
+all 32 historical receipts report validity, no recorded failures, and
+warmups also report optimal+valid. This is not independent certification.
 
 ## Verdict
 
