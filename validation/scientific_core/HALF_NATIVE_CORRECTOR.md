@@ -2,7 +2,8 @@
 
 This current-primal factor is distinct from the conjugate-shadow factor in the
 scaling epoch. The new factor-only API does not demand current-pair conjugacy.
-The original shadow verifier still requires its true decrement. If the initially
+The original shadow verifier still requires its true decrement and explicitly
+refuses a missing dual; only the dedicated factor-only API uses that sentinel. If the initially
 formed current-point factor fails, a fixed27-point grid of original/previous/next
 binary64 words in its first column is tested, original first. Every choice must
 pass the SAME independent true-Hessian metric and backward targets; there is no
@@ -68,3 +69,10 @@ The original full corrector is invoked in separate scratch only for diagnostics.
 A new certificate never relabels an old failure as success. Combined RHS,
 linearization, corrector Newton solve, line search and default/strict integration
 remain separate work; production_admitted remains false.
+
+Every result labels EFT counter scope. Completed factor-selection work survives
+later polynomial-domain failures and is included in complete totals. When a
+selection fails without counts, only polynomial subtotals and known selection
+subtotals are reported under a partial scope, with no fabricated aggregate.
+Available selection history is retained on both success and refusal. These are
+EFT-call counts, not all native FLOPs, allocation, RSS or timing measurements.

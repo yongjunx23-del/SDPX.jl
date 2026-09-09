@@ -29,6 +29,18 @@ inside(I,x)=Q(I.lo)<=x<=Q(I.hi)
     central.status===:certified || println("CENTRAL_CORRECTOR ",central)
     @test central.status===:certified
     @test central.chi==[1.5,0.,0.]
+    @test FA.HalfPowerFactorCertificate.verify_hessian([1.,1.,0.],central.L).status===:certified
+    @test FA.HalfPowerFactorCertificate.verify([1.,1.,0.],central.L,nothing).reason===:missing_dual
+    failed=HC.compute([1.,1.,0.],[1.,0.,0.],[0x1p-80,0.,0.])
+    @test failed.status===:unsupported && failed.reason===:direction_domain
+    @test failed.counter_scope===:complete
+    @test failed.selected.status===:certified
+    @test failed.polynomial_products==failed.polynomial_sums==0
+    @test failed.products==failed.selected.known_products>0
+    @test failed.sums==failed.selected.known_sums>0
+    partial=HC.compute([1.,1.,2.],[1.,0.,0.],[1.5,0.,0.])
+    @test partial.counter_scope===:partial_selection_counts_unavailable
+    @test !hasproperty(partial,:products) && !hasproperty(partial,:sums)
     @test !HC.raw_accuracy([1.75,-0.25,0.],central.first) # symmetric/Euler-compatible wrong vector
     @test !HC.raw_accuracy([-0.5,0.,0.],central.first) # rejected oracle sign error
     for id in (17,19)
@@ -41,6 +53,9 @@ inside(I,x)=Q(I.lo)<=x<=Q(I.hi)
             result.status===:certified || println("UNSUPPORTED_CORRECTOR ",id,"/",block.offset," ",result)
             @test result.status===:certified
             result.status===:certified || continue
+            @test result.counter_scope===:complete
+            @test result.products==result.polynomial_products+result.selected.known_products
+            @test result.sums==result.polynomial_sums+result.selected.known_sums
             @test length(result.selected.history)<=27
             @test first(result.selected.history).shifts==(0,0,0)
             @test all(h->h.certificate.status!==:certified,result.selected.history[1:end-1])

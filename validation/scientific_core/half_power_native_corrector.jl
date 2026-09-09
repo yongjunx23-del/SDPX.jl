@@ -118,7 +118,7 @@ end
 function current_factor(s)
     formed=HF.factor(s)
     formed.status===:formed || return (status=:unsupported,reason=:factor_domain)
-    original=copy(formed.L);history=Any[];products=formed.two_prod_calls;sums=formed.two_sum_calls
+    original=copy(formed.L);history=Any[];products=formed.two_prod_calls;sums=formed.two_sum_calls;complete=true
     # Preserve the original candidate when it already passes. Only after its
     # failure consider a fixed neighbouring-word grid in the dominant column;
     # every selection must pass the SAME independent true-Hessian certificate.
@@ -130,18 +130,42 @@ function current_factor(s)
             shifts[i]==1 && (L[i,1]=nextfloat(L[i,1]))
         end
         certificate=EF.verify_hessian(s,L)
+        complete &= hasproperty(certificate,:products) && hasproperty(certificate,:sums)
         products+=get(certificate,:products,0);sums+=get(certificate,:sums,0)
         push!(history,(;shifts,L=copy(L),certificate))
-        certificate.status===:certified && return (;status=:certified,L,certificate,original,history,products,sums)
+        counts=(;counter_scope=complete ? :complete : :partial_point_counts_unavailable,
+            known_products=products,known_sums=sums)
+        certificate.status===:certified && return (;status=:certified,L,certificate,original,history,counts...)
     end
-    (;status=:unsupported,reason=:factor_grid_exhausted,original,history,products,sums)
+    (;status=:unsupported,reason=:factor_grid_exhausted,original,history,
+        counter_scope=complete ? :complete : :partial_point_counts_unavailable,known_products=products,known_sums=sums)
+end
+mutable struct Progress
+    budget::EF.Budget
+    selection_started::Bool
+    selected::Any
 end
 function compute(s,ds,dy)
+    progress=Progress(EF.Budget(0,0),false,nothing)
+    result=_compute(s,ds,dy,progress)
+    selected=progress.selected
+    partial=progress.selection_started && (selected===nothing || get(selected,:counter_scope,:unavailable)!==:complete)
+    polynomial_products=progress.budget.products;polynomial_sums=progress.budget.sums
+    selection_products=selected===nothing ? 0 : get(selected,:known_products,0)
+    selection_sums=selected===nothing ? 0 : get(selected,:known_sums,0)
+    counts=partial ? (;counter_scope=:partial_selection_counts_unavailable,polynomial_products,polynomial_sums,
+        known_selection_products=selection_products,known_selection_sums=selection_sums) :
+        (;counter_scope=:complete,polynomial_products,polynomial_sums,
+        products=polynomial_products+selection_products,sums=polynomial_sums+selection_sums)
+    (;result...,counts...,selected,production_admitted=false)
+end
+function _compute(s,ds,dy,progress)
     RG.Phi._runtime_ok() || return (status=:unsupported,reason=:runtime)
-    budget=EF.Budget(0,0)
+    budget=progress.budget
     try
         check_vector(ds);check_vector(dy)
-        selected=current_factor(s)
+        progress.selection_started=true
+        selected=current_factor(s);progress.selected=selected
         selected.status===:certified || return (;status=:unsupported,reason=:true_factor,selected,production_admitted=false)
         L=selected.L;factor=selected.certificate
         tag=SDPX.PowerConjugateTag{Float64}(0.5)
@@ -209,12 +233,11 @@ function compute(s,ds,dy)
             first,swapped,gradient,ytilde,factor,selected,posterior,natural_bounds=bounds,raw_error,final_error,
             projection_error=workspace.projection_error,projection_bound,legacy_native_solve_error=workspace.solve_error,
             legacy_status=legacy.status,legacy_reason=legacy.reason,
-            products=budget.products+selected.products,
-            sums=budget.sums+selected.sums,production_admitted=false)
+            production_admitted=false)
     catch err
         err isa RG.EnclosureFailure || err isa RG.Phi.ArithmeticDomainError || rethrow()
         (;status=:unsupported,reason=err isa RG.EnclosureFailure ? err.reason : :eft_domain,
-            products=budget.products,sums=budget.sums,production_admitted=false)
+            production_admitted=false)
     end
 end
 end

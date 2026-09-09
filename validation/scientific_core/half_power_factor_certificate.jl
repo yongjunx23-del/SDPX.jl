@@ -41,7 +41,7 @@ function product(budget,terms...)
     result
 end
 enclose(a)=isempty(a) ? RG.point(0) : RG.checked(Phi._enclose_sum(a))
-verify(shadow,L,dual)=_verify(shadow,L,dual)
+verify(shadow,L,dual)=dual===nothing ? (status=:unsupported,reason=:missing_dual) : _verify(shadow,L,dual)
 verify_hessian(shadow,L)=_verify(shadow,L,nothing)
 function _verify(shadow,L,dual)
     eltype(shadow)===eltype(L)===Float64 && length(shadow)==3 && size(L)==(3,3) ||
