@@ -43,59 +43,53 @@ end
 
 target = 1e-8          # experimental merit target (loop ceiling)
 cert_tol = SDPX.default_certificate_tol(Float64)   # ordinary certificate tolerance (source default 1e-6)
-# Independent terminal audit: recompute residuals with a separate dense
-# implementation and evaluate the ORDINARY certificate inequalities of
-# src/certificates/certificates.jl:438-502 at the declared tolerance, without
-# reusing the loop's residual routine or cached residual vectors.
-function terminal_audit(ctx; tol = cert_tol)
+const POW_ALPHA = 0.5
+
+# Pure certificate-quantity evaluation on RECOVERED coordinates (xN, sN, yN
+# = (x,s,y)/tau) plus the homogeneous embedding scalars (tau, kappa, mu).
+function _cert_quantities(xN::Vector{Float64}, sN::Vector{Float64},
+    yN::Vector{Float64}, tau::Float64, kappa::Float64, mu::Float64; tol::Float64)
     Am = Matrix(A); bm = b; cm = c
-    xN = ctx.x ./ ctx.tau; sN = ctx.pair.s ./ ctx.tau; yN = ctx.pair.y ./ ctx.tau
-    inv_tau = 1.0 / ctx.tau
     rP = Am * xN + sN - bm
     rD = transpose(Am) * yN + cm
-    rG = dot(cm, xN) + dot(bm, yN) + ctx.kappa * inv_tau
+    rG = dot(cm, xN) + dot(bm, yN) + kappa / tau
     m = max(maximum(abs, rP), maximum(abs, rD), abs(rG))
     obj = dot(c, xN)
-    sNy = dot(ctx.pair.s, ctx.pair.y) / (ctx.tau^2)   # complementarity s*'y*
-    # --- ordinary certificate quantities (certificates.jl) ---
-    finite_ok = all(isfinite, ctx.x) && all(isfinite, ctx.pair.s) &&
-                all(isfinite, ctx.pair.y) && isfinite(ctx.tau) &&
-                isfinite(ctx.kappa) && isfinite(ctx.pair.mu)
-    tau_ok = ctx.tau > tol
-    # normalized homogeneous residual: max|rP|,|rD|,|rG| / (||A||+||b||+||c||+1)
+    sNy = dot(sN, yN)                       # complementarity s*'y*
+    finite_ok = all(isfinite, xN) && all(isfinite, sN) && all(isfinite, yN) &&
+                isfinite(tau) && isfinite(kappa) && isfinite(mu)
+    tau_ok = tau > tol
     data_norm = maximum(sum(abs, Am; dims = 2)) + maximum(abs, bm) +
                 maximum(abs, cm) + 1.0
-    norm_resid = (m / data_norm) * inv_tau
-    # data-scaled recovered feasibility
+    norm_resid = m / data_norm
     primal_scale = max(1.0, SDPX._cert_maxabs(xN), SDPX._cert_maxabs(sN),
                        SDPX._cert_maxabs(bm))
     dual_scale = max(1.0, SDPX._cert_maxabs(yN), SDPX._cert_maxabs(cm))
-    rec_primal = SDPX._cert_maxabs(rP) * inv_tau
-    rec_dual = SDPX._cert_maxabs(rD) * inv_tau
+    rec_primal = SDPX._cert_maxabs(rP)
+    rec_dual = SDPX._cert_maxabs(rD)
     pr_lim = tol * primal_scale
     du_lim = tol * dual_scale
-    # cone membership of recovered st = s/tau, yt = y/tau
-    tol_band = 1e-7 * max(1.0, SDPX._cert_maxabs(sN), SDPX._cert_maxabs(yN))
+    # ORDINARY cone-membership predicates at the declared tolerance (rows
+    # 1:3 orthant, rows 4..12 the three power-3 blocks, alpha = POW_ALPHA)
     membership = true
     for i in 1:3
-        membership &= (sN[i] >= -tol_band && yN[i] >= -tol_band)
+        membership &= (sN[i] >= -tol && yN[i] >= -tol)
     end
     for blk in 0:2
         rows = 3 + 3*blk + 1 : 3 + 3*blk + 3
-        x, y, z = sN[rows]; u, v, w = yN[rows]
-        membership &= (x >= -tol_band && y >= -tol_band && x*y - z*z >= -tol_band)
-        membership &= (u >= -tol_band && v >= -tol_band && 4.0*u*v - w*w >= -tol_band)
+        pv = sN[rows]; dv = yN[rows]
+        membership &= SDPX.power_membership(pv[1], pv[2], pv[3], POW_ALPHA; tol = tol)
+        membership &= SDPX.power_dual_membership(dv[1], dv[2], dv[3], POW_ALPHA; tol = tol)
     end
-    # recovered primal-dual gap and complementarity
     primal_objective = obj
     dual_pairing = dot(bm, yN)
     gap_scale = SDPX._certificate_objective_scale(primal_objective, dual_pairing)
     gap_resid = abs(primal_objective + dual_pairing)
     gap_lim = tol * gap_scale
     cone_comp = abs(dot(sN, yN))
-    kappa_rec = ctx.kappa * inv_tau
-    mu_norm = ctx.pair.mu * inv_tau * inv_tau          # mu/tau^2 invariant
-    nu = Float64(length(ctx.pair.s))                   # cone-row count
+    kappa_rec = kappa / tau
+    mu_norm = mu / (tau^2)                   # mu/tau^2 invariant
+    nu = Float64(length(sN))
     mu_lim = tol * (1.0 + nu)
     finite_limits = isfinite(pr_lim) && isfinite(du_lim) && isfinite(gap_lim) &&
                     isfinite(mu_lim) && isfinite(norm_resid)
@@ -104,13 +98,22 @@ function terminal_audit(ctx; tol = cert_tol)
               rec_primal <= pr_lim && rec_dual <= du_lim &&
               gap_resid <= gap_lim && cone_comp <= gap_lim &&
               kappa_rec <= gap_lim && mu_norm <= mu_lim
-    (; m, membership, primal_feas = SDPX._cert_maxabs(rP),
-        dual_feas = SDPX._cert_maxabs(rD), homo_gap = abs(rG),
-        norm_resid, kappa_tau = kappa_rec, mu_norm, obj, sNy,
-        obj_gap = gap_resid, primal_scale, dual_scale, gap_scale, cert_ok,
+    return (m = m, membership = membership, primal_feas = SDPX._cert_maxabs(rP),
+        dual_feas = SDPX._cert_maxabs(rD), homo_gap = abs(rG), norm_resid,
+        kappa_tau = kappa_rec, mu_norm, obj, sNy, obj_gap = gap_resid,
+        primal_scale, dual_scale, gap_scale, cert_ok,
         obj_err = abs(obj - Float64(exact_obj)))
 end
 
+# Independent terminal audit: recompute residuals with a separate dense
+# implementation (recovered coordinates, no tau redivision) and evaluate the
+# ORDINARY certificate inequalities of src/certificates/certificates.jl:438-502
+# at the declared tolerance with the source cone-membership predicates.
+function terminal_audit(ctx; tol = cert_tol)
+    return _cert_quantities(collect(ctx.x ./ ctx.tau),
+        collect(ctx.pair.s ./ ctx.tau), collect(ctx.pair.y ./ ctx.tau),
+        ctx.tau, ctx.kappa, ctx.pair.mu; tol = tol)
+end
 @testset "experimental half-Power step context" begin
     start = EPS.cold_start(problem, layout)
     @test start.ok
@@ -196,6 +199,21 @@ end
         " obj=", terminal.obj, " obj_err=", terminal.obj_err)
     @test terminal.membership
     @test terminal.cert_ok
+    # homogeneous-rescaling invariance regression: multiplying every embedding
+    # coordinate (x,s,y,tau,kappa) by rho and mu by rho^2 leaves the recovered
+    # residuals, gap, complementarity, kappa/tau and mu/tau^2 unchanged, so
+    # cert_ok is invariant.
+    rho = 2.0
+    xr = collect((rho .* ctx.x) ./ (rho * ctx.tau))
+    sr = collect((rho .* ctx.pair.s) ./ (rho * ctx.tau))
+    yr = collect((rho .* ctx.pair.y) ./ (rho * ctx.tau))
+    rescaled = _cert_quantities(xr, sr, yr, rho * ctx.tau, rho * ctx.kappa,
+        rho^2 * ctx.pair.mu; tol = cert_tol)
+    @test rescaled.cert_ok == terminal.cert_ok
+    @test rescaled.norm_resid ≈ terminal.norm_resid rtol = 1e-12
+    @test rescaled.kappa_tau ≈ terminal.kappa_tau rtol = 1e-12
+    @test rescaled.mu_norm ≈ terminal.mu_norm rtol = 1e-12
+    @test rescaled.sNy ≈ terminal.sNy rtol = 1e-12
     @test terminal.obj_err <= 1e-6
     @test terminal.mu_norm <= cert_tol * (1.0 + Float64(length(ctx.pair.s)))
     @test terminal.obj_err <= 1e-4

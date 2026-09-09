@@ -11,7 +11,7 @@ accepted trial with alpha in [0.026, 0.90] (useful-progress floor
 stored-shadow reconstruction, compensated half-Power factor, true-geometry/
 decrement/BFGS certificates, and atomic commit of (point, factor pair, warm
 lineage, epoch). Accepted pairs are certified with their retained warm probe;
-in this run 24/27 accepted pairs are ALSO certifiable from a true cold rebuild
+in this run 25/27 accepted pairs are ALSO certifiable from a true cold rebuild
 (warm=nothing, fresh owner), recorded as an observed diagnostic, not a
 guarantee. Homotopy/merit/progress
 gates replicated unchanged from src/hsd. Predictor centering follows the
@@ -25,17 +25,21 @@ coordinates, not the loop residual routine or cached vectors):
 - recovered homogeneous gap c'x*+b'y*+kappa/tau = 2.80e-9, kappa/tau = 5.58e-10
 - THE TERMINAL POINT PASSES THE ORDINARY CERTIFICATE INEQUALITIES of
   src/certificates/certificates.jl:438-502 at the source-default Float64
-  tolerance 1e-6: normalized homogeneous residual (max|rP|,|rD|,|rG|/
-  (||A||+||b||+||c||+1))/tau <= 1e-6; recovered primal <= 1e-6*primal_scale,
-  dual <= 1e-6*dual_scale; st in K and yt in K*; recovered gap
-  |c'xt + b'yt| <= 1e-6*gap_scale; cone complementarity |st'yt| <= gap_lim;
-  kappa/tau = 5.58e-10 <= gap_lim; invariant mu/tau^2 = 5.59e-10 <=
-  1e-6*(1+nu); tau > 1e-6; all scalars finite. Independently re-evaluated
+  tolerance 1e-6, evaluated on RECOVERED coordinates with no tau redivision:
+  normalized homogeneous residual max|rP|,|rD|,|rG|/(||A||+||b||+||c||+1)
+  = 1.2e-9 <= 1e-6; recovered primal = 7.0e-10 <= 1e-6*primal_scale and
+  dual = 7.0e-10 <= 1e-6*dual_scale; st in K and yt in K* via the source
+  power_membership / power_dual_membership predicates at tolerance 1e-6;
+  recovered gap |c'xt + b'yt| = 5.6e-10 <= 1e-6*gap_scale; cone
+  complementarity |st'yt| = 6.7e-9 <= gap_lim; kappa/tau = 5.58e-10 <=
+  gap_lim; invariant mu/tau^2 = 5.59e-10 <= 1e-6*(1+nu); tau > 1e-6; all
+  scalars finite. A homogeneous-rescaling regression (rho=2) verifies the
+  acceptance quantities are scaling-invariant. Independently re-evaluated
   from stored recovered coordinates by a separate dense implementation.
 - experimental merit target 1e-8: merit = 2.80e-9 <= 1e-8
 - objective 1.1242390972345995 vs exact 1.1242390986454483421 -> err 1.41e-9
 
-222 driver assertions pass at the frozen worktree HEAD; per-step next-epoch
+227 driver assertions pass at the frozen worktree HEAD; per-step next-epoch
 five-equation certification (2^-17), NC affine certification, ordinary terminal
 certificate inequalities (complementarity, recovered gap, kappa/tau, normalized
 mu, finite positive scalars), same-owner previous-generation stale-token
