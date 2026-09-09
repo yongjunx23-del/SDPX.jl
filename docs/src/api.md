@@ -32,7 +32,6 @@ constraint_by_name
 variable_names
 constraint_names
 num_variables
-num_constraints
 ```
 
 ## Starts
@@ -82,13 +81,9 @@ counts or the ambient scope.
 ```@docs
 AccuracyContract
 AccuracyClass
-AccuracyVerified
-AccuracyUnsupported
-AccuracyNumericalFailure
-AccuracyInfrastructureFailure
-UnsupportedAccuracyContext
 accuracy_contract
 accuracy_class
+UnsupportedAccuracyContext
 ```
 
 ## Nonsymmetric backend selection
@@ -99,8 +94,6 @@ backend is explicitly selected.
 
 ```@docs
 NonsymmetricBackendChoice
-NativeNonsymmetricBackend
-ExperimentalHalfPowerFactorPairBackend
 UnsupportedBackendError
 ```
 

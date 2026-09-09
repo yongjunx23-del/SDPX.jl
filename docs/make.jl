@@ -49,7 +49,11 @@ makedocs(;
     # implementation modules; their exported algebra is not part of SDPX's
     # frozen public API, so documenting the root API must not make those
     # nested implementation namespaces a build requirement.
-    checkdocs_ignored_modules=[SDPX.ExtendedPrecisionBLAS, SDPX.SymmetricCones],
+    checkdocs_ignored_modules=[
+        SDPX.ExtendedPrecisionBLAS,
+        SDPX.SymmetricCones,
+        SDPX.FactorPreservingAffine,
+    ],
 )
 
 # Pull requests must build the same site as main without attempting a deploy.
