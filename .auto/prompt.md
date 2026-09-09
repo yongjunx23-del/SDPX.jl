@@ -51,3 +51,8 @@ numerical drift fails the run. Secondary: Float64 LP/SOCP general catalog.
   Both are FP-arithmetic divergence in direction construction / residual
   acceptance gates. Fixing these robustness gaps IS part of the optimization
   goal (a solver that breaks down is not high-performance).
+
+## Session baseline (2026-09-10, commit 27839e4)
+- CSDR alpha3 Float64x4: 19.9s median, 105 iterations, 914MB alloc, 5.0GB RSS
+- lp_seconds (3 catalog cases): 30.9s (JIT-heavy; treat as secondary)
+- Guard: certificate valid + objective within 1e-8 rel + 3-run determinism
