@@ -11,6 +11,19 @@ Authority documents: `docs/design/SCIENTIFIC_CORE_ROADMAP.md` (R0–R6 plan),
 `validation/scientific_core/exp_runtime/COMPENSATED_EXP_DESIGN.md` (R0-E
 research design).
 
+## Committed qualification milestones (R6-A, 2026-09-09)
+
+| Milestone | Commit | Status |
+|---|---|---|
+| R1 ownership, AccuracyContract, truthful certificates | `7920982` | done; `test/test_r1_full_qualification.jl` |
+| R2 lifecycle and session-local symbolic reuse | `a274011` | done; evidence `docs/evidence/R2_FULL_QUALIFICATION.md` |
+| R0-P4 half-Power factor-pair public admission | `0ebf053` | opt-in experimental only; default Float64 Power remains known-failure |
+| R3 sparse core | LP-only, unadmitted | research only; memory admission stays unavailable until a complete peak bound exists |
+
+Open rows below are unchanged: N14 BigFloat512 certification, new-standard
+CSDR baseline, SDPX/SDPB 8/16/32-core comparison, sparse KKT memory
+admission.
+
 ## Default public route (`nonsymmetric_backend = NativeNonsymmetricBackend`)
 
 | Area | Status | Evidence / caveat |
