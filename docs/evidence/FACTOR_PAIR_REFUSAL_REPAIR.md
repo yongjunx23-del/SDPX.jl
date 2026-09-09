@@ -35,7 +35,13 @@ Total across focused testsets: 165 passing assertions. Logs:
 The first combined harness omitted Main.TOML for the namespace test; that
 harness error was corrected on the separate successful run without source edits.
 
-Independent source review submitted as workflow `8438609b`; pending at writing.
+Independent source review `8438609b` completed: one P2 finding, failed startup
+LU lost route-attempt provenance because diagnostics gated on completions.
+`e87154f` repairs that with an experimental-only attempted-execution predicate;
+completion-dependent factor/reuse/ownership facts remain unchanged. Added actual
+singular-LU and pre-LU-refusal diagnostics controls; 45 refusal assertions plus
+50 selector/public assertions passed at that HEAD (`/tmp/fp-attempt-e87154f.log`).
+This follow-up implementation has not itself received independent re-review.
 No full-suite result is claimed for this HEAD. Admission classification,
 formulation descriptor consistency, complete memory bounds, total time semantics,
 platform qualification and full public failure injection remain open. The known
