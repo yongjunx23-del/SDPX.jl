@@ -65,6 +65,32 @@ bicenter(lo, hi) = (BigFloat(lo) + BigFloat(hi)) / 2
         @test r.context.fast_math == 0
     end
 
+    @testset "relative interval predicate has sound inclusion directions" begin
+        @test CER._interval_abs_bounds(-2.0, 1.0) == (0.0, 2.0)
+        @test CER._interval_abs_bounds(-2.0, -1.0) == (1.0, 2.0)
+        @test CER._relative_interval_gate(-1.0, 1.0, 0.0, 0.0, 0.0).gate === :unresolved
+        @test CER._relative_interval_gate(2.0, 4.0, 3.0, 3.0, 0.0).gate === :unresolved
+        @test CER._relative_interval_gate(3.0, 3.0, 3.0, 3.0, 1e-12).gate === :pass
+        @test CER._relative_interval_gate(4.0, 4.0, 3.0, 3.0, 1e-12).gate === :fail
+        # Exact-rational negative controls: every sampled point must agree
+        # with a proved verdict; an unresolved interval is never forced to pass.
+        t = CER.VALIDATION_T * eps(Float64)
+        edge = 3.0 * (1.0 + t) / (1.0 - t)
+        intervals = ((-1.0, 1.0), (2.0, 4.0), (3.0, 3.0),
+            (prevfloat(edge), nextfloat(edge)), (4.0, 4.0))
+        counts = Dict(:pass=>0, :fail=>0, :unresolved=>0)
+        for (alo, ahi) in intervals, (blo, bhi) in intervals
+            r = CER._relative_interval_gate(alo, ahi, blo, bhi, t)
+            counts[r.gate] += 1
+            for a in (alo, (alo + ahi)/2, ahi), b in (blo, (blo + bhi)/2, bhi)
+                aq, bq, tq = Rational{BigInt}.((a, b, t))
+                exact_pass = abs(aq - bq) <= tq * (abs(aq) + abs(bq))
+                @test r.gate === :unresolved || (r.gate === :pass) == exact_pass
+            end
+        end
+        @test all(>(0), values(counts))
+    end
+
     @testset "gradient requires strictly positive signed margin" begin
         for x in (0.0, 1.0, nextfloat(0.0))
             r = CER.compensated_gradient_words(x, 1.0, 1.0)

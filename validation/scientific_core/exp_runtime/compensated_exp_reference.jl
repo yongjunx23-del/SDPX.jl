@@ -771,6 +771,34 @@ function _expansion_interval(exp::Vector{Float64})
     return lo, hi, (h = h, l = l, tail = tail)
 end
 
+# Bounds on |x| for x in [lo, hi]. In particular, a zero-straddling
+# interval has lower absolute bound zero, not the smaller endpoint magnitude.
+function _interval_abs_bounds(lo::Float64, hi::Float64)
+    isfinite(lo) && isfinite(hi) && lo <= hi ||
+        throw(ArgumentError("expected finite ordered interval endpoints"))
+    lower = lo <= 0.0 <= hi ? 0.0 : min(abs(lo), abs(hi))
+    return lower, max(abs(lo), abs(hi))
+end
+
+# Prove |a-b| <= t(|a|+|b|) using outward interval bounds. A pass
+# needs lhs_upper <= rhs_lower; a failure needs lhs_lower > rhs_upper.
+# Anything between these two proofs stays unresolved.
+function _relative_interval_gate(alo::Float64, ahi::Float64,
+    blo::Float64, bhi::Float64, t::Float64)
+    isfinite(t) && t >= 0.0 || throw(ArgumentError("invalid relative tolerance"))
+    amin, amax = _interval_abs_bounds(alo, ahi)
+    bmin, bmax = _interval_abs_bounds(blo, bhi)
+    dlo, dhi = prevfloat(alo - bhi), nextfloat(ahi - blo)
+    if !(isfinite(dlo) && isfinite(dhi))
+        return (; gate=:unresolved, lhs=Inf, rhs=0.0, lo=dlo, hi=dhi)
+    end
+    lhs_lo, lhs_hi = _interval_abs_bounds(dlo, dhi)
+    rhs_lo = max(0.0, prevfloat(t * max(0.0, prevfloat(amin + bmin))))
+    rhs_hi = nextfloat(t * nextfloat(amax + bmax))
+    gate = lhs_hi <= rhs_lo ? :pass : (lhs_lo > rhs_hi ? :fail : :unresolved)
+    return (; gate=gate, lhs=lhs_hi, rhs=rhs_lo, lo=dlo, hi=dhi)
+end
+
 """
     audit_pairings(; s_trial, d_trial, shadow, grad_primal) -> NamedTuple
 
@@ -797,31 +825,14 @@ function audit_pairings(;
             (-grad_primal[1], -grad_primal[2], -grad_primal[3]),
             s_trial)
         m21_lo, m21_hi, m21c = _expansion_interval(exp21)
-        # |m-3| <= t(|m|+3): pass iff lhs_up <= rhs_lo (sound direction).
-        lhs12 = nextfloat(max(abs(m12_lo - 3.0), abs(m12_hi - 3.0)))
-        rhs12 = prevfloat(t * prevfloat(max(abs(m12_lo), abs(m12_hi)) + 3.0))
-        lhs21 = nextfloat(max(abs(m21_lo - 3.0), abs(m21_hi - 3.0)))
-        rhs21 = prevfloat(t * prevfloat(max(abs(m21_lo), abs(m21_hi)) + 3.0))
-        # Certified-failure direction: lhs_lo > rhs_hi.
-        lhs12_lo = prevfloat(min(abs(m12_lo - 3.0), abs(m12_hi - 3.0)))
-        rhs12_hi = nextfloat(t * nextfloat(max(abs(m12_lo), abs(m12_hi)) + 3.0))
-        lhs21_lo = prevfloat(min(abs(m21_lo - 3.0), abs(m21_hi - 3.0)))
-        rhs21_hi = nextfloat(t * nextfloat(max(abs(m21_lo), abs(m21_hi)) + 3.0))
-        g12 = lhs12 <= rhs12 ? :pass :
-            (lhs12_lo > rhs12_hi ? :fail : :unresolved)
-        g21 = lhs21 <= rhs21 ? :pass :
-            (lhs21_lo > rhs21_hi ? :fail : :unresolved)
-        # Cross identity |m12-m21| <= t(|m12|+|m21|).
-        dlo = prevfloat(min(m12_lo - m21_hi, m12_hi - m21_lo))
-        dhi = nextfloat(max(m12_hi - m21_lo, m12_lo - m21_hi))
-        cross_lhs = nextfloat(max(abs(dlo), abs(dhi)))
-        cross_rhs_lo = prevfloat(t * prevfloat(max(abs(m12_lo), abs(m12_hi)) +
-            max(abs(m21_lo), abs(m21_hi))))
-        cross_rhs_hi = nextfloat(t * nextfloat(max(abs(m12_lo), abs(m12_hi)) +
-            max(abs(m21_lo), abs(m21_hi))))
-        cross_lhs_lo = prevfloat(min(abs(dlo), abs(dhi)))
-        cross = cross_lhs <= cross_rhs_lo ? :pass :
-            (cross_lhs_lo > cross_rhs_hi ? :fail : :unresolved)
+        p12 = _relative_interval_gate(m12_lo, m12_hi, 3.0, 3.0, t)
+        p21 = _relative_interval_gate(m21_lo, m21_hi, 3.0, 3.0, t)
+        pcross = _relative_interval_gate(m12_lo, m12_hi, m21_lo, m21_hi, t)
+        g12, g21, cross = p12.gate, p21.gate, pcross.gate
+        lhs12, rhs12 = p12.lhs, p12.rhs
+        lhs21, rhs21 = p21.lhs, p21.rhs
+        dlo, dhi = pcross.lo, pcross.hi
+        cross_lhs, cross_rhs_lo = pcross.lhs, pcross.rhs
         cls = g12 === :pass && g21 === :pass && cross === :pass ?
             :stored_geometry_certified :
             (g12 === :fail ? :stored_shadow_identity_failure :
