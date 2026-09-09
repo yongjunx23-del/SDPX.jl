@@ -141,7 +141,29 @@ a user thread count alone:
   node-load/allocation/affinity evidence before claiming contention; otherwise
   attribute the gap via per-phase instrumentation.
 
-## 5. Astra design-review outcome (2026-09-09)
+## 5. Implementation progress (2026-09-09)
+
+- **Phase 1 — exclusive Q3 sub-phase timing (merged `0b7bc99`).**
+  `Q3EpochTimings` records metric-preparation, numeric-factor and
+  homogeneous-solve wall times plus the effective worker count per epoch;
+  they accumulate into `ProductHSDPhaseTimings` as exclusive children of
+  `kkt_factorization_seconds` (`q3_metric_seconds`, `q3_factor_seconds`,
+  `q3_homogeneous_seconds`, `q3_epochs`, `q3_workers`) and into the timings
+  snapshot. Zero-allocation additive writes; no numerical change. Partitioned
+  regression 4197/196/4622+1 all pass.
+- **Phase 2 — admitted Q3 worker budget for task-based loops (merged `f0325a4`).**
+  `settings.limits.threads` sets a process-wide budget at state construction;
+  `_q3_workers()` caps it by the Julia pool and now drives the task-based HKM
+  scalar and vec4 loops, which previously expanded to `Threads.nthreads()`.
+  `@threads :static` loops still use the pool (a budget below the pool needs
+  `--threads` to match; one process per configuration). No numerical change.
+  Verified: pool=4/budget=2 → 2 workers; regression unchanged.
+- **Next:** run α3 with the new instrumentation to attribute the previously
+  unaccounted ~21% and the Q3 factor bucket, then target the measured serial
+  loops (Phase 3) and implement the persistent process-worker pool (Phase 4,
+  Astra's first recommendation).
+
+## 6. Astra design-review outcome (2026-09-09)
 
 Verdict: **architecture sound, causal claims overstated**. The fitted `s`
 values are effective scaling parameters, not intrinsic limits; several proposed
