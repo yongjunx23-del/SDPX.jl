@@ -156,7 +156,11 @@ def audit(rec, a, exact_opt):
     dets = []
     for i in range(3):
         s1, s2, s3 = s[3 * i], s[3 * i + 1], s[3 * i + 2]
-        dets.append({"primal_det": str(float(s1 * s2 - s3 * s3))})
+        if rec["form"] == "power":
+            dets.append({"primal_det": str(float(s1 * s2 - s3 * s3))})
+        else:
+            # MOSEK rotated quadratic cone: 2 x0 x1 >= sum_{i>=2} x_i^2
+            dets.append({"primal_det": str(float(2 * s1 * s2 - s3 * s3))})
     # objective error against exact optimum
     err = abs(obj - exact_opt)
     rec["audit"] = {
@@ -173,7 +177,10 @@ def audit(rec, a, exact_opt):
         dual_dets = []
         for i in range(3):
             z1, z2, z3 = z[3 * i], z[3 * i + 1], z[3 * i + 2]
-            dual_dets.append({"dual_det_4z1z2_minus_z3sq": str(float(4 * z1 * z2 - z3 * z3))})
+            if rec["form"] == "power":
+                dual_dets.append({"dual_det": str(float(4 * z1 * z2 - z3 * z3))})
+            else:
+                dual_dets.append({"dual_det": str(float(2 * z1 * z2 - z3 * z3))})
         comp = sum(s[k] * z[k] for k in range(9))
         rec["audit"]["dual_dets"] = dual_dets
         rec["audit"]["complementarity"] = str(float(comp))

@@ -38,8 +38,8 @@ constraints, or non-attained optima).
 | Clarabel 0.11.1 | Float64 | tightened 1e-12 | SOLVED | 3.04e-14 | 2.22e-12 |
 | Clarabel 0.11.1 | BigFloat256 | tightened 1e-30 | SOLVED | 7.29e-31 | 3.11e-30 |
 | Clarabel 0.11.1 | BigFloat512 | tightened 1e-30 | SOLVED | 7.29e-31 (tolerance-limited) | 3.11e-30 |
-| Clarabel 0.11.1 | Float64 SOC | default | SOLVED | 5.75e-09 | 1.32e-08 |
-| Clarabel 0.11.1 | BigFloat256 SOC | tightened | ALMOST_SOLVED | 8.67e-22 | ~0 |
+| Clarabel 0.11.1 | Float64 SOC (exact integer map) | default | SOLVED | 5.79e-09 | 1.32e-08 |
+| Clarabel 0.11.1 | BigFloat256 SOC (exact integer map) | tightened | ALMOST_SOLVED | 2.26e-17 | ~0 |
 | **SDPX (dev `113869c`)** | **Float64** | default | **numerical_breakdown** | **1.12 (obj 0)** | n/a |
 | SDPX (dev `adcacf8`) | BigFloat256 | default | optimal | 1.48e-26 (rel 1.32e-26) | primal 1.88e-26 / dual 4.07e-26 |
 | SDPX (dev `adcacf8`) | BigFloat512 | default | optimal | 3.74e-54 (rel 3.33e-54) | primal 2.31e-52 / dual 4.69e-52 |
@@ -54,9 +54,16 @@ Audit corrections (first T0 draft had defects, now fixed):
   1-3, Power blocks rows 4-6, 7-9, 10-12. The first draft treated rows 1-3 as a
   Power block and omitted rows 10-12.
 - The audit rebuilds `A/b` in the run's own precision `T`, not Float64.
-- The SOC arm uses a rounded `sqrt(2)` map (Clarabel 0.11.1 has no rotated-SOC
-  cone type), so it is a near-equivalent cross-check; the native Power arm is
-  the authority for the solver's power-cone path.
+- The SOC arm now uses the EXACT integer map `(s1+s2, s1-s2, 2*s3)`:
+  `(t+1, t-1, 2a)` with `(t+1)^2 >= (t-1)^2 + (2a)^2 <=> t >= a^2`. No
+  `sqrt(2)` rounding. The audit is form-aware (rotated/SOC membership for the
+  SOC arm, power/dual-power determinants for the native arm). Clarabel 0.11.1
+  has no rotated-SOC cone type, so this is a standard-SOC reformulation. The
+  native Power arm remains the authority for the solver's power-cone path.
+- MOSEK's rotated-SOC arm is audited with its own rotated-cone condition
+  `2*s1*s2 - s3^2 >= 0`, not the power determinant formula. Orthant
+  lower-bound duals are not part of MOSEK's ACC dual vector; the reported
+  complementarity is over the 9 ACC entries only.
 - The SDPX BigFloat arm now passes `Model(BigFloat; precision_bits=...)`
   explicitly; the first draft's "512" run was silently reset to 256 by
   `optimize!`. The corrected 512-bit run reaches 3.74e-54 objective error.

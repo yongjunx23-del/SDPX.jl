@@ -7,12 +7,12 @@
 #
 # Two exactly equivalent forms:
 #   :power - native Clarabel.PowerConeT(0.5) with activity (t, 1, a)
-#   :soc   - SecondOrderConeT(3) with activity (t+1/2, t-1/2, sqrt(2)*a)
-#            since (t+1/2)^2 >= (t-1/2)^2 + 2a^2  <=>  t >= a^2.
-#            Clarabel 0.11.1 has no rotated-SOC cone type.  sqrt(2) is rounded
-#            to the working precision, so this arm is a near-equivalent
-#            cross-check, not an exact reformulation; the native power arm is
-#            the authority for the solver's power-cone path.
+#   :soc   - SecondOrderConeT(3) with the EXACT integer map
+#            (s1+s2, s1-s2, 2*s3) for activity (t,1,a), i.e. (t+1, t-1, 2a).
+#            SOC membership (t+1)^2 >= (t-1)^2 + (2a)^2 <=> t >= a^2, with no
+#            sqrt(2) rounding.  Clarabel 0.11.1 has no rotated-SOC cone type.
+#            Original power primal is recovered by the inverse map; original
+#            power duals by the transpose map.
 #
 # Float64 and BigFloat (256/512) at default and tightened tolerances.
 # The audit reconstructs every returned value exactly as Rational{BigInt}.
@@ -48,9 +48,9 @@ function build_data(::Type{T}, form::Symbol) where {T}
             b[3 * i + 2] = one(T)          # s2 = 1
             b[3 * i + 3] = T(v)            # s3 = a_i
         else
-            b[3 * i + 1] = T(0.5)          # s1 = t + 1/2
-            b[3 * i + 2] = -T(0.5)         # s2 = t - 1/2
-            b[3 * i + 3] = sqrt(T(2)) * T(v)  # s3 = sqrt(2) a_i
+            b[3 * i + 1] = one(T)          # s1 = t + 1
+            b[3 * i + 2] = -one(T)         # s2 = t - 1
+            b[3 * i + 3] = T(2) * T(v)     # s3 = 2 a_i
         end
     end
     P = spzeros(T, 3, 3)
