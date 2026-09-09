@@ -146,6 +146,7 @@ include("hsd/factor_pair/native_factor_affine_certificate.jl")
 include("hsd/factor_pair/half_power_native_corrector.jl")
 include("hsd/factor_pair/factor_combined_epoch.jl")
 include("hsd/factor_pair/native_half_pair.jl")
+include("hsd/factor_pair/factor_pair_hsd.jl")
 
 include("hsd/native_hsd_public.jl")
 include("public/optimize.jl")
