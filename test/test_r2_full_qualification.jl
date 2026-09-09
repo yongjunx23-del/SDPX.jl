@@ -162,3 +162,80 @@ end
     recovered = SDPX.solve!(prep; objective=c0, rhs=b0)
     @test recovered.status == SDPX.Optimal
 end
+
+@testset "R2-C: multi-task concurrent session isolation and collision" begin
+    prob = _test_lp()
+    options = _test_options()
+    c0 = Float64[1.0, 2.0, 3.0]
+    b0 = Float64[1.5]
+
+    # Part 1 (independent sessions, concurrent): two tasks solve two distinct
+    # prepared sessions from the same problem. Neither task may interfere
+    # with the other.
+    s1 = SDPX.prepare(prob, options)
+    s2 = SDPX.prepare(prob, options)
+    r1_box = Ref{Any}(nothing)
+    r2_box = Ref{Any}(nothing)
+    Base.@sync begin
+        Base.Threads.@spawn begin
+            try
+                r1_box[] = SDPX.solve!(s1; objective=copy(c0), rhs=copy(b0))
+            catch e
+                r1_box[] = e
+            end
+        end
+        Base.Threads.@spawn begin
+            try
+                r2_box[] = SDPX.solve!(s2; objective=copy(c0), rhs=copy(b0))
+            catch e
+                r2_box[] = e
+            end
+        end
+    end
+    @test !(r1_box[] isa Exception)
+    @test !(r2_box[] isa Exception)
+    @test r1_box[].status == SDPX.Optimal
+    @test r2_box[].status == SDPX.Optimal
+    # Bit-identical solutions across independent concurrent sessions.
+    @test r1_box[].x == r2_box[].x
+    # Distinct slot entries: no shared mutable factor state.
+    @test s1.state.symbolic_slot !== s2.state.symbolic_slot
+    @test s1.state.symbolic_slot.entry !== s2.state.symbolic_slot.entry
+    @test s1.state.symbolic_slot.entry.cache.factor !== s2.state.symbolic_slot.entry.cache.factor
+
+    # Part 2 (same session collision): two tasks race on the SAME prepared
+    # session. Reaching this point without hanging proves no deadlock. One
+    # task must succeed with `Optimal` and the loser must be rejected with
+    # `ArgumentError` ("PreparedSolver is sequential"), unless the runtime
+    # schedules the tasks strictly one after another, in which case both
+    # report `Optimal`.
+    s_shared = SDPX.prepare(prob, options)
+    outcomes = Vector{Any}(undef, 2)
+    Base.@sync begin
+        Base.Threads.@spawn begin
+            try
+                outcomes[1] = SDPX.solve!(s_shared; objective=copy(c0), rhs=copy(b0))
+            catch e
+                outcomes[1] = e
+            end
+        end
+        Base.Threads.@spawn begin
+            try
+                outcomes[2] = SDPX.solve!(s_shared; objective=copy(c0), rhs=copy(b0))
+            catch e
+                outcomes[2] = e
+            end
+        end
+    end
+    _is_optimal(x) = !(x isa Exception) && hasproperty(x, :status) && x.status == SDPX.Optimal
+    _is_sequential_rejection(x) = (x isa ArgumentError) && occursin("PreparedSolver is sequential", x.msg)
+    n_optimal = count(_is_optimal, outcomes)
+    n_rejected = count(_is_sequential_rejection, outcomes)
+    @test (n_optimal == 1 && n_rejected == 1) || (n_optimal == 2)
+
+    # Part 3 (post-collision recovery): the session must not be stranded and
+    # must remain fully functional.
+    @test s_shared.state.busy == false
+    r_after = SDPX.solve!(s_shared; objective=c0, rhs=b0)
+    @test r_after.status == SDPX.Optimal
+end
