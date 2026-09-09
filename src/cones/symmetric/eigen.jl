@@ -190,8 +190,9 @@ end
     _relative2_offdiag_gate(a, b, c, tau) -> :pass | :fail | :unresolved
 
 Range-safe proof of `|b|/sqrt(a*c) <= tau` for strictly positive `a, c`.
-Uses exponent-separated mantissa bounds so no overflow/underflow occurs at
-any exponent scale. Throws on nonfinite entries or non-positive diagonals.
+Uses exponent-separated mantissa bounds; the e < -1070 region returns
+:pass directly before Float64 exp2 subnormal representation could stop
+being a valid upper bound. Throws on nonfinite entries or non-positive diagonals.
 Returns `:unresolved` when the mantissa interval straddles `tau`.
 """
 function _relative2_offdiag_gate(a::T, b::T, c::T, tau::T) where {T}
@@ -200,14 +201,22 @@ function _relative2_offdiag_gate(a::T, b::T, c::T, tau::T) where {T}
     (a > zero(T) && c > zero(T)) ||
         throw(DomainError((a, c), "experimental_relative2 requires strictly positive diagonals"))
     ma, ea = frexp(a)
-    mb, eb = frexp(b)
+    mb, eb = frexp(abs(b))    # correlation uses |b|; sign enters via the rotation
     mc, ec = frexp(c)
-    e = eb - div(ea + ec, 2)
-    rem = (ea + ec) & 1
+    # floor division: (ea+ec)/2 = fld + rem/2 with rem in {0,1} reconstructs
+    # the exponent sum EXACTLY for negative odd sums too (div truncates and
+    # would halve the interval for negative odd ea+ec).
+    emid = fld(ea + ec, 2)
+    rem = (ea + ec) - 2 * emid
+    e = eb - emid
     f = rem == 1 ? one(T) / sqrt(one(T) + one(T)) : one(T)
     if e > 0
         # rho >= mb * 2^e * f >= 0.5 * 2^e >= 1 > tau (tau ~ 20*eps)
         return :fail
+    elseif e < -1070
+        # rho <= 2 * 2^e <= 2^-1069 << tau ~ 20*eps; subnormal/underflow
+        # region cannot change the outcome, return the proven pass
+        return :pass
     end
     twoe = exp2(T(e))
     lo = mb * twoe * f        # strict lower bound of rho
@@ -261,6 +270,13 @@ function _relative2_jacobi_eigen!(
     beta = b / g
     t = iszero(d) ? one(T) : beta / (d + copysign(hypot(d, beta), d))
     isfinite(t) || throw(ArgumentError("experimental_relative2: nonfinite rotation"))
+    # the gate demanded a rotation (correlation above tau) but the rotation
+    # angle underflowed to zero (e.g. |b| so small relative to d that b/g and
+    # t round to zero). Silently writing zero into the off-diagonal would
+    # report a diagonalization that V'AV does not achieve. Refuse instead.
+    if gate === :fail && iszero(t) && !iszero(b)
+        throw(ArgumentError("experimental_relative2: required rotation unrepresentable"))
+    end
     c1 = one(T) / sqrt(one(T) + t * t)
     s = t * c1
     app = a - t * b

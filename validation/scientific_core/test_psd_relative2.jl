@@ -11,12 +11,45 @@ const tau_off = 10.0 * 2.0 * eps(Float64)
 @testset "psd relative2 gate" begin
     # dyadic correlation is O(1) -> must rotate (fail = above tau_off)
     @test SE._relative2_offdiag_gate(1.0, δ, 2.0*δ^2, tau_off) === :fail
+    # NEGATIVE off-diagonal counterpart: the gate uses |b| (sign must not
+    # turn the interval negative and incorrectly pass)
+    @test SE._relative2_offdiag_gate(1.0, -δ, 2.0*δ^2, tau_off) === :fail
+    # NEGATIVE ODD exponent sum regression (fld reconstruction): with
+    # a=2^-2, c=2^-1 the exact correlation of b=2^-49 is 2^-48.5 ~= 5.02e-15,
+    # just above tau_off ~= 4.44e-15, so the interval straddles and must
+    # refuse (:unresolved), never pass. A truncating div would halve the
+    # interval and INCORRECTLY return :pass (the reviewed defect).
+    @test SE._relative2_offdiag_gate(0.25, 2.0^-49, 0.5, tau_off) === :unresolved
+    # clearer margin above tau: correlation 2^-46.5 ~= 1.0e-14 -> :fail
+    @test SE._relative2_offdiag_gate(0.25, 2.0^-47, 0.5, tau_off) === :fail
+    # extremely separated exponents stay provable (:pass for rho < tau)
+    @test SE._relative2_offdiag_gate(1.0, 2.0^-600, 1.0, tau_off) === :pass
     # tiny correlation -> skip
     @test SE._relative2_offdiag_gate(1.0, 1e-20, 1.0, tau_off) === :pass
     # exactly-at-threshold region stays unresolved (interval straddles)
     # nonfinite / nonpositive refusal
     @test_throws ArgumentError SE._relative2_offdiag_gate(NaN, 1.0, 1.0, tau_off)
     @test_throws DomainError SE._relative2_offdiag_gate(1.0, 1.0, -1.0, tau_off)
+end
+
+@testset "psd relative2 negative off-diagonal eigensolve" begin
+    Mn = [1.0 -δ; -δ 2.0*δ^2]
+    A = copy(Mn); V = Matrix{Float64}(I, 2, 2); w = zeros(2)
+    SE._relative2_jacobi_eigen!(A, V, w; tau_off)
+    @test abs(A[1,2]) == 0.0 && abs(A[2,1]) == 0.0
+    @test V != Matrix{Float64}(I, 2, 2)
+    @test w[2] ≈ δ^2 atol = 1e-3 * δ^2
+    @test sort(w) ≈ sort(eigvals(Symmetric(Mn))) rtol = 1e-6
+end
+
+@testset "psd relative2 unrepresentable-rotation refusal" begin
+    # a=2^1023, c=2^-1074, b=2^-60: correlation 2^-34.5 > tau so the gate
+    # demands rotation, but b/g underflows to zero -> t = s = 0 and the
+    # off-diagonal would silently survive. The route must refuse.
+    Ae = [2.0^1023 2.0^-60; 2.0^-60 2.0^-1074]
+    @test SE._relative2_offdiag_gate(2.0^1023, 2.0^-60, 2.0^-1074, tau_off) === :fail
+    Ve = Matrix{Float64}(I, 2, 2); we = zeros(2)
+    @test_throws ArgumentError SE._relative2_jacobi_eigen!(copy(Ae), Ve, we; tau_off)
 end
 
 @testset "psd relative2 eigensolve" begin
@@ -84,8 +117,8 @@ end
     D0 = V * Hinv * V'
     resid = D0 * M * D0 - Matrix{Float64}(I, 2, 2)
     println("RELATIVE2_DOWNSTREAM norm(D0*M*D0 - I) = ", norm(resid, Inf))
-    # the relative contraction bound rho = 1/sqrt(2) < 1 holds at the operator
-    # level: (1-rho)VHV' <= M <= (1+rho)VHV' in the relative sense
+    # recorded measurement (not a gate): the dyadic data is exactly
+    # representable in powers of two, so the residual is near-exact.
     @test w[1] > 0.0 && w[2] > 0.0
 end
 

@@ -4,7 +4,7 @@ Path: `src/cones/symmetric/eigen.jl` (`_relative2_offdiag_gate`,
 `_relative2_jacobi_eigen!`), `src/cones/symmetric/psd.jl`
 (`_psd_eigen_route!` route `:experimental_relative2`),
 `src/cones/symmetric/types.jl` (constructor selection).
-Test: `validation/scientific_core/test_psd_relative2.jl`. 27 assertions pass.
+Test: `validation/scientific_core/test_psd_relative2.jl`. 37 assertions pass.
 
 ## Question
 
@@ -37,7 +37,7 @@ change the downstream PSD NT scaling?
 |---|---|---|
 | rotation at δ=2^-50 dyadic | skipped (V = I) | performed |
 | small eigenvalue w2 | 2δ² (2× off) | δ² (relative accuracy) |
-| ‖D0·M·D0 − I‖∞, dyadic | **0.7071** (= ρ, destroyed) | 7.9e-31 (exact; powers of 2) |
+| ‖D0·M·D0 − I‖∞, dyadic | **0.7071** (= ρ; production leaves the full relative contraction) | 7.9e-31 (near-exact; dyadic data is power-of-two representable) |
 | ‖D0·M·D0 − I‖∞, δ=1.3·2^-50 | — | 1.1e-16 (eps-level rounding barrier) |
 
 The relative-route D0 attains the relative contraction bound ρ = 1/√2 < 1
@@ -47,6 +47,12 @@ leaves an eps-level residual in D0·M·D0 − I (the rounding barrier the
 design predicted), which is recorded, not gated.
 
 ## Status
+
+All three P1 defects found in review (signed-b gate, truncating-div on
+negative odd exponent sums, silent unrepresentable-rotation zeroing) are
+fixed with regression tests (negative off-diagonal eigensolve, negative odd
+exponent-sum gate, unrepresentable-rotation refusal, extreme-separation
+pass).
 
 This is an opt-in research route (explicit selection only, Float64 n=2).
 Production dispatch is unchanged; the missing production-scale evidence is
