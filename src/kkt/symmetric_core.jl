@@ -2146,12 +2146,17 @@ function _build_float64_core_cache(
     k=symmetric_core_lower_sparse(pattern)
     dsigns=symmetric_core_dsigns(pattern)
     lease = execution_context === nothing ? nothing : execution_context.symbolic_lease
-    if lease === nothing
-        disconnected=DisconnectedLDLTCache(
-            k,dsigns;symbolic_epoch,regularization,max_size=4,
-        )
-        disconnected===nothing || return disconnected
-    end
+    # Ordinary disconnected-provider selection always runs first and is
+    # independent of any session lease.  A lease must not select the
+    # provider: it only authorizes reuse of a compatible CHOLMOD/sparse
+    # entry after the ordinary route has declined.  (Approved
+    # R2_SESSION_SYMBOLIC_REUSE.md: "after ordinary disconnected-provider
+    # selection, authorize a compatible CHOLMOD entry or build a fresh
+    # sparse cache. A lease must not select the provider.")
+    disconnected=DisconnectedLDLTCache(
+        k,dsigns;symbolic_epoch,regularization,max_size=4,
+    )
+    disconnected===nothing || return disconnected
     requirements=SparseSymbolicRequirements(k;
         symbolic_epoch=Int(symbolic_epoch),dsigns,
         regularization=Float64(regularization))
