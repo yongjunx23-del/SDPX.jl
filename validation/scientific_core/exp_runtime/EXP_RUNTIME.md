@@ -107,3 +107,27 @@ Power), the defect is Float64 rounding in the Exp rho-equation/shadow-identity
 and the repair follows the factor-pair pattern adapted to the Exp psi-scale
 (compensated evaluation / re-derived L11=1/psi terms), NOT tolerance widening
 or an extra fallback.
+
+## Precision ladder (parent verification, HEAD 26ab94a)
+
+exp_entropy_small through the identical public path at BigFloat (ambient
+precision, ~256 bits; BFLA/MFLA extensions loaded):
+- **status=optimal, certificate_valid=true,
+  obj = -1.098612288668109691395...** (matches -log(3) =
+  -1.098612288668109691395... to 5e-17), iterations=47.
+- The Float64 breakdown (24 iter, merit 6e-6) **disappears with precision**,
+  confirming the defect is Float64 rounding in the Exp conjugate
+  rho-equation / shadow-identity path (the same precision-ladder closure the
+  Power case exhibited).
+- `expectation_met=false` at BigFloat is a harness artifact of the
+  legacy `:known_solver_finding` contract (`validate_result` requires
+  `!certificate_valid` for those cases): the BigFloat solve now CERTIFIES,
+  which is strictly stronger than the finding the harness expects.
+
+R0-E stage conclusion: the Exp Float64 defect is a near-boundary interior
+nonsymmetric conjugate/scaling construction failure caused by Float64
+rounding in the Exp rho-equation residual and `psi = z - x`-scale shadow
+operations. The repair route (bounded next step) is the factor-pair pattern
+adapted to the Exp psi-scale with compensated evaluation of the analytic
+Exp structural Cholesky (`L11 = 1/psi` terms), NOT tolerance widening or an
+extra fallback; production dispatch unchanged.
