@@ -19,8 +19,11 @@ function _fp_power_model(; alpha=0.5, objective=:minimize, constant=0.0,
             SDPX.PowerCone(alpha))
     end
     sense = objective === :maximize ? SDPX.Maximize() : SDPX.Minimize()
+    # Compare equivalent bounded objectives: min f versus max(-f).
+    # Maximizing +sum(t) would instead create an unbounded problem.
+    coefficient = objective === :maximize ? -scale : scale
     SDPX.objective!(model, sense,
-        scale * (t[1] + t[2] + t[3]) + constant)
+        coefficient * (t[1] + t[2] + t[3]) + constant)
     return model, a
 end
 
@@ -98,7 +101,8 @@ end
     # no optimal claim and no accepted state.
     if !SDPX.FactorPreservingAffine.RG.Phi._runtime_ok()
         for mk in (()->_fp_power_model(), ()->_fp_power_model(constant=3.0),
-            ()->_fp_power_model(scale=4.0))
+            ()->_fp_power_model(scale=4.0),
+            ()->_fp_power_model(objective=:maximize, constant=3.0))
             m, _ = mk()
             r = SDPX.optimize!(m; settings=_fp_experimental_settings())
             @test SDPX.status(r) !== :optimal
@@ -123,11 +127,26 @@ end
     @test isapprox(SDPX.primal_objective(rs),
         SDPX.primal_objective(result) + 3.0; atol=1e-7)
 
-    # Homogeneous data rescaling preserves the certificate decision.
+    @test SDPX.certificate(rs).valid
+    @test isapprox(SDPX.dual_objective(rs),
+        SDPX.dual_objective(result) + 3.0; atol=1e-7)
+
+    maximized, _ = _fp_power_model(objective=:maximize, constant=3.0)
+    rm = SDPX.optimize!(maximized; settings=_fp_experimental_settings())
+    @test SDPX.status(rm) === :optimal
+    @test SDPX.certificate(rm).valid
+    @test isapprox(SDPX.primal_objective(rm), 3.0 - Float64(exact); atol=1e-8)
+    @test isapprox(SDPX.dual_objective(rm), 3.0 - Float64(exact); atol=1e-8)
+
+    # This is a changed problem with a known exact objective, NOT homogeneous
+    # scaling of one HSD point: signals scale by 4 and objective by 4, hence 4^3.
     scaled, _ = _fp_power_model(scale=4.0)
     rsc = SDPX.optimize!(scaled; settings=_fp_experimental_settings())
     @test SDPX.status(rsc) === :optimal
     @test SDPX.certificate(rsc).valid
+    scaled_exact = Float64(64 * exact)
+    @test isapprox(SDPX.primal_objective(rsc), scaled_exact; atol=64e-8, rtol=0)
+    @test isapprox(SDPX.dual_objective(rsc), scaled_exact; atol=64e-8, rtol=0)
 end
 
 @testset "R0-P4 public qualification: source/result mutation isolation" begin
