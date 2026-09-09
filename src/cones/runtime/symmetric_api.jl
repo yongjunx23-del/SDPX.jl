@@ -255,7 +255,128 @@ function _runtime_step_primal!(runtime::ProductConeRuntime, s, ds)
     return best
 end
 
-max_step_primal!(runtime::ProductConeRuntime, s, ds) = _runtime_step_primal!(runtime, s, ds)
+"""
+Threaded exact max-step over runtime blocks (autoresearch optimization).
+
+Each task owns a contiguous slice of the block list and reduces locally;
+`min` is exact, so the ordered merge reproduces the serial result bit for
+bit at any thread count.  Block scratch buffers are exclusive per slice.
+"""
+@inline function _soc3_boundary_step_direct!(
+    cone::SymmetricCones.SOCone, s::AbstractVector, ds::AbstractVector,
+    offset::Int, alpha::Base.RefValue,
+)
+    @inbounds begin
+        t = s[offset]
+        dt = ds[offset]
+        u1 = s[offset + 1]
+        u2 = s[offset + 2]
+        du1 = ds[offset + 1]
+        du2 = ds[offset + 2]
+    end
+    T = eltype(s)
+    z = zero(T)
+    o = one(T)
+    two = o + o
+    four = two + two
+    c0 = t * t - u1 * u1 - u2 * u2
+    c1 = two * (t * dt - u1 * du1 - u2 * du2)
+    c2 = dt * dt - du1 * du1 - du2 * du2
+    if c0 < z || t < z
+        alpha[] = z
+        return z
+    end
+    head_step = dt < z ? -t / dt : T(Inf)
+    if c0 == z
+        if c1 < z
+            det_step = z
+        elseif c1 == z
+            det_step = c2 >= z ? T(Inf) : z
+        else
+            det_step = c2 < z ? -c1 / c2 : T(Inf)
+        end
+    else
+        if c2 == z
+            det_step = c1 < z ? -c0 / c1 : T(Inf)
+        elseif c2 > z
+            disc = c1 * c1 - four * c0 * c2
+            if disc <= z
+                det_step = T(Inf)
+            else
+                sq = sqrt(disc)
+                det_step = c1 < z ? min((-c1 + sq) / (two * c2), (-c1 - sq) / (two * c2)) :
+                    -c0 / (c1 + sq)
+            end
+        else
+            det_step = -c0 / c1
+        end
+    end
+    alpha[] = min(head_step, det_step)
+    return alpha[]
+end
+
+function _runtime_step_threaded!(runtime::ProductConeRuntime, s, ds)
+    total = length(runtime.orthant) + length(runtime.soc) + length(runtime.psd)
+    total < 512 && return _runtime_step_primal!(runtime, s, ds)
+    workers = min(Threads.nthreads(), 8)
+    workers <= 1 && return _runtime_step_primal!(runtime, s, ds)
+    all_blocks = vcat(
+        [(b, :orthant) for b in runtime.orthant],
+        [(b, :soc) for b in runtime.soc],
+        [(b, :psd) for b in runtime.psd],
+    )
+    results = Vector{eltype(s)}(undef, workers)
+    chunk = cld(total, workers)
+    SDPX._q3_foreach(1:workers, workers; min_items=1) do worker
+        lo = (worker - 1) * chunk + 1
+        hi = min(worker * chunk, total)
+        best = eltype(s)(Inf)
+        for idx in lo:hi
+            block, kind = all_blocks[idx]
+            if kind === :orthant || kind === :soc
+                if kind === :soc && block.dim == 3
+                    value = _soc3_boundary_step_direct!(
+                        block.cone, s, ds, block.offset, block.alpha)
+                else
+                    _runtime_copy_in!(block.primal, s, block.offset, block.dim)
+                    _runtime_copy_in!(block.direction, ds, block.offset, block.dim)
+                    value = SymmetricCones.boundary_step!(
+                        block.cone, block.primal, block.alpha, block.direction)
+                end
+            else
+                _runtime_copy_in!(block.primal, s, block.offset, block.len)
+                _runtime_copy_in!(block.direction, ds, block.offset, block.len)
+                @inbounds for i in 1:block.len
+                    block.raw_primal[i] = block.primal[i]
+                    block.raw_direction[i] = block.direction[i]
+                end
+                k = 0
+                invsqrt2 = block.state.invsqrt2
+                @inbounds for j in 1:block.dim
+                    for i in j:block.dim
+                        k += 1
+                        if i > j
+                            block.raw_primal[k] *= invsqrt2
+                            block.raw_direction[k] *= invsqrt2
+                        end
+                    end
+                end
+                value = SymmetricCones.boundary_step!(
+                    block.cone, block.raw_primal, block.alpha,
+                    block.raw_direction)
+            end
+            best = value < best ? value : best
+        end
+        results[worker] = best
+    end
+    best = eltype(s)(Inf)
+    for worker in 1:workers
+        best = results[worker] < best ? results[worker] : best
+    end
+    return best
+end
+
+max_step_primal!(runtime::ProductConeRuntime, s, ds) = _runtime_step_threaded!(runtime, s, ds)
 
 """Global dual boundary step.
 
