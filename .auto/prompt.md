@@ -85,3 +85,11 @@ solve 23ms, corrector solve 24ms, corr_rhs 4.2ms, schur_assembly 8.3ms,
 line_search 12.4ms, residual 10.8ms.
 Next lever is ALGORITHMIC: reduce the 105 iterations (predictor/corrector
 policy, step quality) — that is GPT Pro territory per user directive.
+
+### Thread scaling of the current CSDR solve (wall time)
+1 thread 31.9s | 2 threads 20.0s | 4 threads 17.4s | 8 threads 16.8s
+Serial fraction is large (Amdahl): single-thread kernels (LU42, local
+elimination, small block sweeps) and the serial iteration structure
+dominate. 8 threads only 3% better than 4 — the remaining parallelism is
+in the SYRK/GEMM/dual-gate kernels which saturate around 4 threads on
+this 10-core machine. Cluster (16/64 threads) validation deferred.
