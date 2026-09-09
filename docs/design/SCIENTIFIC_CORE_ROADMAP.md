@@ -14,7 +14,7 @@
 
 | 顺序 | 工作包 | 现在的出口条件 |
 | --- | --- | --- |
-| 1 | T0：MOSEK / Clarabel.jl / 等价锥形式交叉诊断 | 同一原问题、真实精度、原坐标审计及明确失败分类；安装/许可证问题另记 |
+| 1 | T0：MOSEK / Clarabel.jl / 等价锥形式交叉诊断 | **已完成首轮（见下）**：同一原问题、真实精度、原坐标审计及失败分类 |
 | 2 | R0-P：Power原生pair、完整步与有限生产接线 | 根据T0结论选算法；通过真实accepted-step及原五方程，而非只看局部证书 |
 | 并行 | R0-E / R0-S：Exp / PSD | 各自先做外部对照和独立几何诊断，再做有限修复 |
 | 并行 | R1 / R2：算术所有权、Prepared生命周期 | 可以独立验证；不因Power单例阻断整个体系 |
@@ -33,6 +33,16 @@
 - 解析校验：`t_i*=a_i^2`，最优值的精确有理数为 `91209111564668556464635313382413 / 81129638414606681695789005144064`，约 `1.1242390986454483421`。这不是任何外部求解器的运行结果。
 - 严格原始可行点取 `t_i=a_i^2+1`，每个Power determinant为1。严格对偶可行点取orthant分量1/2和Power对偶块 `(1/2,(a_i^2+1)/2,-a_i)`：stationarity精确成立，`4uv-w^2=1`。本例A还满足 `A'A=2I`。因此这里有明确的可行性/有界性/适定性依据，不能把正常边界最优点的barrier病态误称为原问题ill-defined。
 - 输出：可重建canonical输入、精确目标/原始与对偶witness审计、输入文件散列和两份fixture一致性检查。诊断参考不进入SDPX方向或根的生成。
+
+### T0 首轮结果（2026-09-09，已集成 `6a1333c`）
+
+对 trial17/19 同一 canonical问题（精确最优值 `1.124239098645448342103796599...`，有严格原始/对偶内点，`A'A=2I`）：
+
+- MOSEK 11.1.3 Float64在native power与rotated-SOC两形式、默认与1e-12容差下均为optimal，目标误差3.93e-17，complementarity 7.87e-17。
+- Clarabel 0.11.1 Float64默认目标误差2.98e-9，收紧后3.04e-14；BigFloat256/512在1e-30容差下目标误差7.29e-31。SOC形式同数量级通过。
+- SDPX开发分支Float64为`numerical_breakdown`（目标0）；**同一源码BigFloat256/512为optimal**，目标误差1.48e-26（相对1.32e-26），原始/对偶残差1.88e-26/4.07e-26。
+
+**结论：该问题并非ill-defined，也非不可解。** 唯一位于失败侧的样本是SDPX的Float64非对称Power路径；这是精度敏感的算法/实现缺陷。下一步不再向冻结失败态叠加局部证书，而是以BigFloat路径和两个外部求解器为参考，定位Float64首个差异阶段（root区间、scaling/BFGS guard、三阶contraction、projection）。旋转SOC形式仅作交叉验证；只能过SOC不能过native Power不算修好。证据：`cross-solver-power/`与`validation/scientific_core/cross_solver/CROSS_SOLVER_POWER.md`。
 
 ### T0.2 最小对照矩阵
 
@@ -156,7 +166,7 @@
 
 ### R0实施包与具体交付
 
-- **R0-P1 外部差异定位**：完成T0报告，将问题本身、normal boundary conditioning、原生Power和SOC表示差异分开。若参考solver已解决，不再把尚未验证的“模型病态”作为默认解释。
+- **R0-P1 外部差异定位**：T0首轮已完成并集成；问题本身排除ill-defined。下一步用BigFloat路径与MOSEK/Clarabel逐步对比Float64迭代，定位首个偏差阶段，而非继续局部证书。
 - **R0-P2 原生pair/trial**：审阅隔离候选 `44bd368`，补齐被中断的兼容性外层回执；覆盖owner/generation/settings、真实rounded shadow、原生BFGS、拒绝trial不替换anchor、原输入变更隔离。通过后仅作为实验构造器整合，不发布生产有效状态。
 - **R0-P3 完整accepted step**：用真实affine边界和mu_aff选择sigma，不用固定.25/.75样本代替；保留边界.995、默认damping.9、拒绝收缩.5、64次backtrack及当前残差homotopy/merit规则。当前merit高于 `16sqrt(eps)*scale` 时仍要求 `alpha>=2cbrt(eps)`；小于可分辨预测量须有真实可表示下降，其他情形至少实现原预测下降的1/4。逐个记录根、pair、方向、trial、进展门的实际结果。
 - **R0-P4 有限runtime迁移**：映射 `src/cones/runtime/nonsymmetric_api.jl`、`product.jl`、`src/hsd/predictor_corrector.jl`、`linesearch.jl` 及KKT消费者；禁止一个消费者保留因子而另一个重新物化旧Theta。先明确实验one-secant策略，strict double-secant的H(s)义务单独过门；原型审阅不自动授权默认政策改变。
