@@ -111,6 +111,7 @@ mutable struct FactorPairState
     memory_limit_bytes::Union{Nothing,Int}
     memory_estimate_bytes::Int
     max_time_seconds::Float64
+    factorization_ledger::FA.FactorizationLedger
 end
 
 # ---------------------------------------------------------------- boundaries
@@ -342,9 +343,10 @@ function canonical_problem(reduced)
 end
 
 # ------------------------------------------------------------- epoch adapter
-function _admitted_epoch(pair, A, b, c, x, tau, kappa, source_record)
+function _admitted_epoch(pair, A, b, c, x, tau, kappa, source_record;
+    factorization_ledger=nothing)
     admitted = _translate(:epoch, () -> NP.epoch(pair, A, b, c, x, tau, kappa;
-        source_record = source_record))
+        source_record = source_record, factorization_ledger))
     admitted.status === :formed_epoch || throw(FactorPairNumericalRefusal(
         :epoch, admitted.reason,
         "NP.epoch refused the epoch: stage=$(admitted.stage) reason=$(admitted.reason)",
@@ -367,6 +369,7 @@ function cold_start(A::SparseMatrixCSC{Float64,Int}, b::Vector{Float64},
     cert_tol::Float64 = SDPX.default_certificate_tol(Float64),
     memory_limit_bytes::Union{Nothing,Int} = nothing,
     max_time_seconds::Float64 = Inf,
+    factorization_ledger::FA.FactorizationLedger = FA.FactorizationLedger(),
 )
     m, n = size(A)
     length(b) == m && length(c) == n ||
@@ -400,11 +403,11 @@ function cold_start(A::SparseMatrixCSC{Float64,Int}, b::Vector{Float64},
     ))
     NP.anchor!(owner, pair)
     x = zeros(Float64, n)
-    e = _admitted_epoch(pair, A, b, c, x, tau, kappa, 0)
+    e = _admitted_epoch(pair, A, b, c, x, tau, kappa, 0; factorization_ledger)
     rP, rD, rG = current_residuals(e, x, s, y, tau, kappa)
     return FactorPairState(A, b, c, layout, settings, owner, pair, x, tau,
         kappa, rP, rD, rG, 0, AcceptedFactorPairStep[], target, cert_tol, 0,
-        e, 0, pair, memory_limit_bytes, estimate, max_time_seconds)
+        e, 0, pair, memory_limit_bytes, estimate, max_time_seconds, factorization_ledger)
 end
 
 # ---------------------------------------------------------------- one step
@@ -425,7 +428,7 @@ function step!(st::FactorPairState; sigma_override = nothing)
         pending
     else
         _admitted_epoch(st.pair, st.A, st.b, st.c, st.x, st.tau, st.kappa,
-            st.source_record + st.iterations)
+            st.source_record + st.iterations; factorization_ledger=st.factorization_ledger)
     end
     affine = _translate(:affine, () -> FA.solve(e, FA.affine_rhs(e)))
     _translate(:affine_certificate, () -> NC.certify(e, affine)).status === :certified ||
@@ -471,7 +474,8 @@ function step!(st::FactorPairState; sigma_override = nothing)
                 # trial pair BEFORE publishing any state.
                 next_epoch = _translate(:next_epoch,
                     () -> NP.epoch(trial.pair, st.A, st.b, st.c, tr.xt, tr.tt,
-                        tr.kt; source_record = st.source_record + st.iterations + 1))
+                        tr.kt; source_record = st.source_record + st.iterations + 1,
+                        factorization_ledger=st.factorization_ledger))
                 if next_epoch.status === :formed_epoch
                     next_affine = _translate(:next_epoch_affine,
                         () -> FA.solve(next_epoch.epoch, FA.affine_rhs(next_epoch.epoch)))
@@ -524,6 +528,53 @@ function step!(st::FactorPairState; sigma_override = nothing)
             "line search exhausted 64 backtracks (last stage=$last_stage)",
         ))
     end
+end
+
+# ------------------------------------------------------- public failure boundary
+# This is a failure snapshot, not a certificate attempt: a failed audit must
+# not be required to succeed just to report the last accepted point.
+function _refusal_receipt(st::FactorPairState, err::FactorPairNumericalRefusal)
+    merit = max(maxinf(st.rP), maxinf(st.rD), abs(st.rG))
+    inv_tau = inv(st.tau)
+    pr = maxinf(st.rP) * inv_tau
+    dr = maxinf(st.rD) * inv_tau
+    gr = abs(st.rG) * inv_tau
+    data_norm = maximum(sum(abs, st.A; dims=2)) + maximum(abs, st.b) +
+                maximum(abs, st.c) + 1.0
+    audit = (; mu=st.pair.mu, primal_feas=pr, dual_feas=dr, homo_gap=gr,
+        norm_resid=max(pr, dr, gr)/data_norm, cert_ok=false)
+    return (; status=:refused, iterations=st.iterations, merit, audit,
+        x=copy(st.x), s=copy(st.pair.s), y=copy(st.pair.y),
+        tau=st.tau, kappa=st.kappa, pair_generation=st.owner.generation,
+        history=copy(st.history), refusal_stage=err.stage,
+        refusal_reason=err.reason, refusal_detail=err.detail,
+        accepted_state_available=true)
+end
+
+"""Capture only typed numerical refusals across startup and iteration.
+Callbacks are internal seams used by the public adapter and deterministic
+failure tests. Programming errors and unsupported-backend exceptions propagate.
+"""
+function execute_with_refusal(start, iterate;
+    ledger::FA.FactorizationLedger=FA.FactorizationLedger())
+    st = nothing
+    terminal = try
+        st = start(ledger)
+        iterate(st)
+    catch err
+        err isa FactorPairNumericalRefusal || rethrow()
+        if st === nothing
+            (; status=:refused, iterations=0, merit=Inf, audit=nothing,
+                x=Float64[], s=Float64[], y=Float64[], tau=NaN, kappa=NaN,
+                pair_generation=nothing, history=AcceptedFactorPairStep[],
+                refusal_stage=err.stage, refusal_reason=err.reason,
+                refusal_detail=err.detail, accepted_state_available=false)
+        else
+            _refusal_receipt(st, err)
+        end
+    end
+    return (; terminal..., factorization_attempts=ledger.attempts,
+        factorizations=ledger.completed)
 end
 
 # ------------------------------------------------------- terminal authority

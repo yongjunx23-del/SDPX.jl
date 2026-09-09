@@ -1030,6 +1030,7 @@ function _native_hsd_diagnostics(
     factor_owner::Symbol=:none,
     owner_current::Bool=false,
     owner_unused::Tuple=(),
+    factor_pair_execution::Union{Nothing,NamedTuple}=nothing,
 ) where {T<:AbstractFloat}
     payload = plan.payload::NativeHSDPlan
     descriptor = payload.formulation
@@ -1202,6 +1203,9 @@ function _native_hsd_diagnostics(
         step_size,
         backtracking,
     )
+    if factor_pair_execution !== nothing
+        termination = (; termination..., factor_pair_execution)
+    end
     selected = (
         solver=:native_hsd,
         engine=:native_hsd,
@@ -1371,6 +1375,7 @@ function _native_hsd_core_result(
     factor_owner::Symbol=:none,
     owner_current::Bool=false,
     owner_unused::Tuple=(),
+    factor_pair_execution::Union{Nothing,NamedTuple}=nothing,
 ) where {T<:AbstractFloat}
     diagnostics = _native_hsd_diagnostics(
         plan,
@@ -1387,6 +1392,7 @@ function _native_hsd_core_result(
         state,
         product,
         factor_pair_terminal,
+        factor_pair_execution,
         equilibration,
         core_estimate_bytes,
         core_dimension,
@@ -1453,24 +1459,14 @@ function _factor_pair_public_core(
     cert_tol = min(tp, td, tg)
     target = max(tp, td, tg)
     core_started = time_ns()
-    state = FactorPairHSD.cold_start(A, b, c, layout;
-        settings=NativeHalfPair.RootSettings(),
-        target=target,
-        cert_tol=cert_tol,
-        memory_limit_bytes=FACTOR_PAIR_MAX_LIVE_BYTES,
-        max_time_seconds=Float64(settings.limits.time),
-    )
-    terminal = try
-        FactorPairHSD.solve!(state;
-            max_iterations=_native_hsd_max_iterations(settings))
-    catch err
-        err isa FactorPairHSD.FactorPairNumericalRefusal || rethrow()
-        (; status=:refused, iterations=0, merit=Inf, audit=nothing,
-            x=copy(state.x), s=copy(state.pair.s), y=copy(state.pair.y),
-            tau=state.tau, kappa=state.kappa, history=Any[],
-            refusal_stage=err.stage, refusal_reason=err.reason,
-            refusal_detail=err.detail)
-    end
+    terminal = FactorPairHSD.execute_with_refusal(
+        ledger -> FactorPairHSD.cold_start(A, b, c, layout;
+            settings=NativeHalfPair.RootSettings(), target=target, cert_tol=cert_tol,
+            memory_limit_bytes=FACTOR_PAIR_MAX_LIVE_BYTES,
+            max_time_seconds=Float64(settings.limits.time),
+            factorization_ledger=ledger),
+        state -> FactorPairHSD.solve!(state;
+            max_iterations=_native_hsd_max_iterations(settings)))
     core_seconds = Float64(time_ns() - core_started) * 1.0e-9
 
     n = canonical_num_variables(canonical)
@@ -1570,7 +1566,7 @@ function _factor_pair_public_core(
         plan,
         reduction,
         terminal.iterations,
-        terminal.status === :refused ? 0 : terminal.iterations + 1,
+        terminal.factorizations,
         nothing,
         recovery_valid,
         x_full,
@@ -1581,6 +1577,16 @@ function _factor_pair_public_core(
         recovery_seconds;
         executed_kkt_route=:factor_pair,
         executed_kkt_attempts=(:factor_pair,),
+        factor_pair_execution=(
+            status=terminal.status,
+            refusal_stage=get(terminal, :refusal_stage, :none),
+            refusal_reason=get(terminal, :refusal_reason, :none),
+            refusal_detail=get(terminal, :refusal_detail, ""),
+            factorization_attempts=terminal.factorization_attempts,
+            accepted_state_available=get(terminal, :accepted_state_available, true),
+            pair_generation=terminal.pair_generation,
+            accepted_steps=length(terminal.history),
+        ),
         factor_pair_terminal=terminal.audit === nothing ? nothing : (
             tau=terminal.tau,
             kappa=terminal.kappa,

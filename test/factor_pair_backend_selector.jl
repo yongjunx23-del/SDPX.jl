@@ -144,6 +144,10 @@ end
           SDPX.ExperimentalHalfPowerFactorPairBackend
     @test d.selected_algorithms.executed_kkt_route === :factor_pair
     @test d.selected_algorithms.planned_kkt_storage === :dense_factor_pair_core
+    @test d.termination.factor_pair_execution.refusal_stage === :none
+    @test d.termination.factor_pair_execution.accepted_state_available
+    @test d.termination.factor_pair_execution.accepted_steps == d.termination.iterations
+    @test d.termination.factor_pair_execution.factorization_attempts >= d.termination.factorizations > 0
 
     # The default path still executes and records the native backend choice.
     result = SDPX.optimize!(model; settings=SDPX.Settings(Float64;

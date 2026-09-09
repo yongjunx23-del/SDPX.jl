@@ -218,7 +218,8 @@ function build(s,y,mu,layout;policy,settings,owner=Owner(),warm=nothing)
         rethrow()
     end
 end
-function epoch(pair::PairReceipt,A,b,c,x,tau,kappa;source_record::Int=0)
+function epoch(pair::PairReceipt,A,b,c,x,tau,kappa;source_record::Int=0,
+    factorization_ledger::Union{Nothing,FA.FactorizationLedger}=nothing)
     verify(pair);reports=Any[]
     A isa SparseMatrixCSC{Float64,Int} && all(v->v isa Vector{Float64},(b,c,x)) &&
         tau isa Float64 && kappa isa Float64 || return refuse(:epoch_input,:type,reports)
@@ -238,7 +239,8 @@ function epoch(pair::PairReceipt,A,b,c,x,tau,kappa;source_record::Int=0)
     certificate=certify(pair);certificate.status===:certified || return certificate
     try
         e=FA._assemble_epoch(copy(A),copy(b),copy(c),copy(x),copy(pair.s),copy(pair.y),tau,kappa,pair.mu,
-            deepcopy(pair.cone),source_record,:native_half_pair,deepcopy(pair.reports),deepcopy(pair.reports))
+            deepcopy(pair.cone),source_record,:native_half_pair,deepcopy(pair.reports),deepcopy(pair.reports);
+            factorization_ledger)
         (;status=:formed_epoch,epoch=e,production_admitted=false)
     catch err
         if err isa SingularException || err isa DomainError || err isa PosDefException ||

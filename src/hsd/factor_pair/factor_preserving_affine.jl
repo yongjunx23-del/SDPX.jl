@@ -224,7 +224,15 @@ function build(row;factor_mode::Symbol=:stored_native)
 end
 # Shared numerical assembly; callers own/validate the native inputs and cone.
 # Capture reconstruction is confined to build above, not this numerical seam.
-function _assemble_epoch(A,b,c,x,s,y,tau,kappa,mu,cone,source_record,factor_mode,reports,construction)
+# Optional solve-owned accounting at the actual LU call (not inferred from steps).
+mutable struct FactorizationLedger
+    attempts::Int
+    completed::Int
+end
+FactorizationLedger() = FactorizationLedger(0, 0)
+
+function _assemble_epoch(A,b,c,x,s,y,tau,kappa,mu,cone,source_record,factor_mode,reports,construction;
+    factorization_ledger::Union{Nothing,FactorizationLedger}=nothing)
     m,n=size(A)
     Ahat=hcat([transform(cone,Vector(A[:,j]),:W) for j in 1:n]...)
     bhat=transform(cone,b,:W)
@@ -237,7 +245,9 @@ function _assemble_epoch(A,b,c,x,s,y,tau,kappa,mu,cone,source_record,factor_mode
     K[n+m+1,1:n]=c;K[n+m+1,n+1:n+m]=bhat;K[n+m+1,n+m+2]=1
     K[n+m+2,n+m+1]=kappa;K[n+m+2,n+m+2]=tau
     all(isfinite,K) || throw(FactorSeamNumericalFailure("nonfinite affine core"))
+    factorization_ledger === nothing || (factorization_ledger.attempts += 1)
     factor=lu(K;check=true)
+    factorization_ledger === nothing || (factorization_ledger.completed += 1)
     frozen=fingerprint(A.nzval,b,c,x,s,y,tau,kappa,mu,Ahat,bhat,K,factor.factors)
     structural=(size(A),Tuple(A.colptr),Tuple(A.rowval),Tuple(factor.ipiv),
         Tuple((b.offset,b.frozen) for b in cone.blocks),cone.frozen_lp,factor_mode)
