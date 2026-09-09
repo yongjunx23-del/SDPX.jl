@@ -37,6 +37,7 @@
 - **R6-D 可重建交付**（`ced85ce`）：`check_reproducible_delivery.jl` 现如实记录 `manifest_sha1=absent` 与 active env Manifest，PASS/exit 0。
 - **R4-B MFLA panel SIMD 候选**（provider 分支 `f482be7`）：opt-in 4-lane Cholesky panel，位等价，blocked Cholesky 端到端 1.14–1.42×；SDPX 侧实验开关 `c5cb2c3`（默认关、版本鲁棒）。仅对 equality-Gram 较大问题有效；CSDR α3（42 等式）收益有限。
 - **CSDR 算法层调研**（`75ae7a7`，`docs/design/CSDR_ALGORITHM_OPTIONS.md`）：排序机会与“不再重查”清单；冻结指纹冲突裁决（roadmap 管辖，旧 guard 不变，105/`3a7833` 为未资格观察基线）。
+- **R4/CSDR 批量仿射装配已实现**（`2cfa6af`）：`_AffineBuilder` + `_affine_sum` 替代 dot/PSD-dot/A*block 的逐步 `+` 折叠；精确等价回归（Float64/BigFloat 重复索引、消去后重加、零系数、路由路径）通过；三分区 3776/196/4622+1 全过；CSDR 全模型构建 **1.411s/15.93GB → 0.185s/0.724GB（7.6×，分配 22×）**。
 - **集群并行实测**：LP random_large 内层线程平坦（T1–T16），T32 −18%；进程级并行 282→559→893 solves/node-hr（ppn 8/16/32）。CSDR α3 本地 1/4 线程 41.3s→23.1s（1.79×），集群 1/8/16/32 战役进行中。
 
 ## 架构选择与不可越过的门（保持不变）
