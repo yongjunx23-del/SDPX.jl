@@ -273,7 +273,7 @@ function _expected_model_receipt(a::PowerArtifact, ::Type{T}, precision_bits::In
         for i in 1:n
             push!(constraints, _receipt_fix(Symbol(:fix_x_, i), n + i,
                 a.fixed_values[i], T))
-            domain = string(SDPX.PowerCone(_Tq(T, a.alphas[i])))
+            domain = _canonical_power_token(_Tq(T, a.alphas[i]))
             push!(constraints, (Symbol(:power_, i), domain, 3,
                 (_receipt_expr((i,), (one(T),), zero(T)),
                  _receipt_expr((), (), one(T)),
@@ -287,7 +287,7 @@ function _expected_model_receipt(a::PowerArtifact, ::Type{T}, precision_bits::In
                      (:z, "SDPX.Reals()", 1, 3, 1))
         push!(constraints, _receipt_fix(:fix_left, 1, a.weighted_values[1], T))
         push!(constraints, _receipt_fix(:fix_right, 2, a.weighted_values[2], T))
-        domain = string(SDPX.PowerCone(_Tq(T, a.alphas[1])))
+        domain = _canonical_power_token(_Tq(T, a.alphas[1]))
         push!(constraints, (:weighted_mean, domain, 3,
             (_receipt_expr((1,), (one(T),), zero(T)),
              _receipt_expr((2,), (one(T),), zero(T)),
@@ -319,7 +319,7 @@ function _expected_model_receipt(a::MixedArtifact, ::Type{T}, precision_bits::In
         Tuple(_receipt_expr((rsoc_o + i - 1,), (one(T),), zero(T)) for i in 1:rsoc_n)))
     push!(constraints, (:mixed_exp, "SDPX.ExponentialCone()", exp_n,
         Tuple(_receipt_expr((exp_o + i - 1,), (one(T),), zero(T)) for i in 1:exp_n)))
-    power_domain = string(SDPX.PowerCone(T(1//2)))
+    power_domain = _canonical_power_token(T(1//2))
     push!(constraints, (:mixed_power, power_domain, power_n,
         Tuple(_receipt_expr((power_o + i - 1,), (one(T),), zero(T)) for i in 1:power_n)))
     for i in 1:nn_n

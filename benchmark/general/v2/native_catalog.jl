@@ -389,16 +389,44 @@ function _numeric_token(x)
     return repr(x)
 end
 
+# Canonical module-qualified token for a mathematical domain value.  The
+# expected receipts (see independence_contracts.jl / native_catalog.jl) hard-
+# code the `SDPX.`-qualified spelling, so the actual receipt and witness
+# checks must produce the same token instead of relying on the ambient
+# `string`/`show` (which may or may not include the module prefix depending
+# on Julia's name-resolution heuristics).  This keeps the identity contract
+# deterministic and independent of how the types happen to print.
+_domain_token(::SDPX.Reals) = "SDPX.Reals()"
+_domain_token(::SDPX.Nonnegative) = "SDPX.Nonnegative()"
+_domain_token(::SDPX.Nonpositive) = "SDPX.Nonpositive()"
+_domain_token(::SDPX.ZeroCone) = "SDPX.ZeroCone()"
+_domain_token(::SDPX.LorentzCone) = "SDPX.LorentzCone()"
+_domain_token(::SDPX.RotatedLorentzCone) = "SDPX.RotatedLorentzCone()"
+_domain_token(::SDPX.PSDCone) = "SDPX.PSDCone()"
+_domain_token(::SDPX.ExponentialCone) = "SDPX.ExponentialCone()"
+_domain_token(domain::SDPX.PowerCone) =
+    "SDPX.PowerCone{$(typeof(domain.alpha))}($(repr(domain.alpha)))"
+
+# Canonical module-qualified token for a power-cone exponent value, matching
+# `_domain_token(::PowerCone)` and the native expected-receipt spelling.  This
+# keeps the source-reconstructed Power receipts consistent with the actual
+# model receipt regardless of how `string`/`show` print the cone value.
+_canonical_power_token(alpha) =
+    "SDPX.PowerCone{$(typeof(alpha))}($(repr(alpha)))"
+
+_sense_token(::SDPX.Minimize) = "SDPX.Minimize"
+_sense_token(::SDPX.Maximize) = "SDPX.Maximize"
+
 function _actual_model_receipt(model)
     # Read the nominal model precision from the actual arithmetic spec; a
     # caller-supplied stamp must never be able to forge this identity.
     actual_precision_bits = SDPX.precision_bits(model)
-    variables = Tuple((v.name, string(v.domain), v.shape, v.offset, v.length) for v in model.variable_blocks)
-    constraints = Tuple((c.name, string(c.domain), c.shape,
+    variables = Tuple((v.name, _domain_token(v.domain), v.shape, v.offset, v.length) for v in model.variable_blocks)
+    constraints = Tuple((c.name, _domain_token(c.domain), c.shape,
         Tuple((Tuple(e.indices), Tuple(_numeric_token.(e.coefficients)), _numeric_token(e.constant))
               for e in c.expressions)) for c in model.constraint_blocks)
     objective = model.objective === nothing ? nothing :
-        (string(typeof(model.objective.sense)), Tuple(model.objective.expression.indices),
+        (_sense_token(model.objective.sense), Tuple(model.objective.expression.indices),
          Tuple(_numeric_token.(model.objective.expression.coefficients)),
          _numeric_token(model.objective.expression.constant))
     return (precision_bits=actual_precision_bits, variables=variables,
@@ -513,7 +541,7 @@ function _actual_witness_check(artifact::V2ConicArtifact, built)
     length(witness)==total || return false
     for v in built.problem.variable_blocks
         w=witness[v.offset:v.offset+v.length-1]
-        ds=string(v.domain)
+        ds=_domain_token(v.domain)
         ds=="SDPX.Nonnegative()" && !all(>=(0),w) && return false
         ds=="SDPX.Nonpositive()" && !all(<=(0),w) && return false
         if ds=="SDPX.PSDCone()"
@@ -523,7 +551,7 @@ function _actual_witness_check(artifact::V2ConicArtifact, built)
     end
     for c in built.problem.constraint_blocks
         vals=[_eval_actual_expr(e,witness) for e in c.expressions]
-        ds=string(c.domain)
+        ds=_domain_token(c.domain)
         if ds=="SDPX.ZeroCone()"
             all(iszero, vals) || return false
         elseif ds=="SDPX.LorentzCone()"
@@ -616,7 +644,7 @@ function _actual_lower_bound_certificate(built, witness)
     end
     equality_multipliers = BigFloat[]
     for block in model.constraint_blocks
-        string(block.domain) == "SDPX.ZeroCone()" || continue
+        _domain_token(block.domain) == "SDPX.ZeroCone()" || continue
         for expr in block.expressions
             length(expr.indices) == 1 || continue
             index = only(expr.indices)
@@ -637,14 +665,14 @@ function _actual_lower_bound_certificate(built, witness)
     end
     row_dual_slacks = BigFloat[]
     for block in model.constraint_blocks
-        string(block.domain) == "SDPX.ZeroCone()" && continue
+        _domain_token(block.domain) == "SDPX.ZeroCone()" && continue
         for _ in 1:block.shape
             push!(row_dual_slacks, zero(BigFloat))
         end
     end
     bound = zero(BigFloat)
     for block in model.constraint_blocks
-        string(block.domain) == "SDPX.ZeroCone()" || continue
+        _domain_token(block.domain) == "SDPX.ZeroCone()" || continue
         for expr in block.expressions
             length(expr.indices) == 1 || continue
             index = only(expr.indices)
@@ -673,7 +701,7 @@ function _actual_equality_multipliers(model)
     end
     multipliers = Rational{Int}[]
     for block in model.constraint_blocks
-        string(block.domain) == "SDPX.ZeroCone()" || continue
+        _domain_token(block.domain) == "SDPX.ZeroCone()" || continue
         for expression in block.expressions
             length(expression.indices) == 1 || return nothing
             index = only(expression.indices)
@@ -690,12 +718,12 @@ function _actual_cone_dual_slacks(model)
     out = Rational{Int}[]
     # Variable-cone slacks are represented in the packed model coordinates.
     for block in model.variable_blocks
-        string(block.domain) == "SDPX.Reals()" && continue
+        _domain_token(block.domain) == "SDPX.Reals()" && continue
         append!(out, fill(0//1, block.length))
     end
     # Explicit cone-constraint slacks are row-indexed by their block shape.
     for block in model.constraint_blocks
-        string(block.domain) == "SDPX.ZeroCone()" && continue
+        _domain_token(block.domain) == "SDPX.ZeroCone()" && continue
         append!(out, fill(0//1, block.shape))
     end
     out
