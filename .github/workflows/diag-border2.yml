@@ -1,0 +1,54 @@
+name: Diagnose bordered LP x86 v2
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diag:
+    name: ${{ matrix.os }} / ${{ matrix.threads }}t
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            threads: '1'
+          - os: ubuntu-latest
+            threads: '4'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+      - uses: julia-actions/cache@v2
+        with:
+          cache-name: julia-depot
+      - uses: julia-actions/julia-buildpkg@v1
+      - name: Telemetry probe
+        shell: bash
+        run: |
+          cat > probe.jl <<'JLEOF'
+          using SDPX
+          model = SDPX.Model(Float64)
+          y = SDPX.variable!(model, :y, 2; domain=SDPX.Reals())
+          SDPX.constraint!(model, :b1, y[1], SDPX.Nonnegative())
+          SDPX.constraint!(model, :b2, y[2], SDPX.Nonnegative())
+          SDPX.constraint!(model, :b3, 5.0 - y[1], SDPX.Nonnegative())
+          SDPX.constraint!(model, :b4, 5.0 - y[2], SDPX.Nonnegative())
+          for i in 1:8
+              SDPX.constraint!(model, Symbol(:c, i), (10.0 + i) - y[1] - y[2],
+                  SDPX.Nonnegative())
+          end
+          SDPX.objective!(model, SDPX.Minimize(), y[1] + y[2])
+          settings = SDPX.Settings(Float64; verbosity=3, kkt_route=:bordered)
+          result = SDPX.optimize!(model; settings)
+          println("FINAL_STATUS=", SDPX.status(result))
+          d = SDPX.diagnostics(result)
+          t = d.termination
+          println("reason=", t.reason, " iters=", t.iterations, " last_step=", t.last_step)
+          println("tau=", t.tau, " kappa=", t.kappa, " mu=", t.mu)
+          JLEOF
+          OPENBLAS_NUM_THREADS=1 julia --project=. --threads=${{ matrix.threads }} probe.jl
