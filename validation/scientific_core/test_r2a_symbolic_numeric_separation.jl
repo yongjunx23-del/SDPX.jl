@@ -148,22 +148,26 @@ end
     SDPX.factorize!(cache2, lower, 1)
     @test SDPX.symbolic_analysis_count() == base + 2
 
-    # A singular operator: the `ldlt` analysis still EXECUTES (counted),
-    # then reports failure via `issuccess`.  Recovery presents the same
-    # pattern again and re-runs the analysis (counted again, truthfully).
+    # A singular operator against a cache that already holds a factor goes
+    # through the NUMERIC `ldlt!` refactor on the retained object (no new
+    # symbolic analysis exists to count) and fails closed with the typed
+    # zero-pivot error.  The failed object is detached; recovery presents
+    # the same pattern again, re-runs the real `ldlt` analysis (counted
+    # again, truthfully), and returns to Fresh.
     singular = copy(lower)
     fill!(singular.nzval, 0.0)
     @test_throws ArgumentError SDPX.factorize!(cache2, singular, 2)
     @test SDPX.factor_status(cache2) === SDPX.Failed
-    @test SDPX.symbolic_analysis_count() == base + 3
+    @test SDPX.symbolic_analysis_count() == base + 2
+    @test SDPX.factor_diagnostics(cache2).symbolic_count == 1
     # Failed never solves stale data.
     @test_throws SDPX.FactorCacheStateError SDPX.solve!(
         cache2, zeros(2), Float64[3.0, -1.0],
     )
     SDPX.factorize!(cache2, lower, 2)
     @test SDPX.factor_status(cache2) === SDPX.Fresh
-    @test SDPX.symbolic_analysis_count() == base + 4
-    @test SDPX.factor_diagnostics(cache2).symbolic_count == 3
+    @test SDPX.symbolic_analysis_count() == base + 3
+    @test SDPX.factor_diagnostics(cache2).symbolic_count == 2
     @test SDPX.factor_diagnostics(cache2).numeric_count == 2
 
     println("R2-A-direct-cache: base=", base,
