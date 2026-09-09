@@ -116,6 +116,7 @@ jobs:
               "hkm_vec4_offset_metric.jl",
               "hkm_vec4_parity.jl",
               "q3_worker_budget.jl",
+              "accuracy_contract.jl",
           ])
           unmounted = String[]
           for f in readdir("test")
