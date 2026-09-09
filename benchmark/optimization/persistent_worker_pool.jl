@@ -265,8 +265,12 @@ function worker_main()
     _atomic_toml(joinpath(result_dir, "warmup_$(worker_id).toml"), Dict{String,Any}(
         "protocol_version" => PROTOCOL_VERSION,
         "worker_id" => worker_id,
+        "run_id" => RUN_ID,
+        "source_commit" => SOURCE_COMMIT,
+        "script_sha256" => SCRIPT_SHA,
         "pid" => Libc.getpid(),
         "seed" => Int(warmup_spec_seed),
+        "expectation_met" => warmup_result.expectation_met,
         "status" => String(warmup_result.status),
         "certificate_valid" => warmup_result.certificate_valid,
         "objective" => Float64(warmup_result.objective),
@@ -325,6 +329,9 @@ function worker_main()
     summary = Dict{String,Any}(
         "protocol_version" => PROTOCOL_VERSION,
         "worker_id" => worker_id,
+        "run_id" => RUN_ID,
+        "source_commit" => SOURCE_COMMIT,
+        "script_sha256" => SCRIPT_SHA,
         "pid" => Libc.getpid(),
         "claimed_items" => claimed,
         "failed_items" => failures,
@@ -456,6 +463,8 @@ function valid_receipt(r, index::Integer)
         get(r, "run_id", "") == RUN_ID || return false
         get(r, "loaded_sdpx", "") == realpath(ROOT) || return false
         r["item_index"] == index && r["seed"] == Int(item_seed(index)) || return false
+        r["workload"] == "lp_random_large" || return false
+        r["iterations"] isa Integer && r["iterations"] >= 0 || return false
         r["source_commit"] == readchomp(`git -C $ROOT rev-parse HEAD`) || return false
         r["script_sha256"] == bytes2hex(sha256(read(SCRIPT))) || return false
         r["status"] == "optimal" && r["certificate_valid"] === true &&
@@ -466,6 +475,39 @@ function valid_receipt(r, index::Integer)
             "solve_seconds", "item_wall_seconds")) || return false
         return isapprox(r["objective"], spec.known_objective;
             atol=spec.objective_tolerance, rtol=spec.objective_tolerance)
+    catch
+        return false
+    end
+end
+
+function valid_worker_artifacts(warmups, summaries, receipts, n_items, n_workers)
+    try
+        sort!(collect(keys(warmups))) == collect(0:(n_workers - 1)) || return false
+        sort!(collect(keys(summaries))) == collect(0:(n_workers - 1)) || return false
+        claimed = Int[]
+        for k in 0:(n_workers - 1)
+            w, s = warmups[k], summaries[k]
+            for r in (w, s)
+                r["protocol_version"] == PROTOCOL_VERSION && r["run_id"] == RUN_ID &&
+                    r["source_commit"] == SOURCE_COMMIT && r["script_sha256"] == SCRIPT_SHA &&
+                    r["worker_id"] == k || return false
+            end
+            seed = BASE_SEED + WARMUP_SALT + UInt32(k)
+            known = Base.invokelatest(getproperty(G, :_planted_lp_objective), seed, WORKLOAD_M, WORKLOAD_N)
+            tol = item_spec(0).objective_tolerance
+            w["seed"] == Int(seed) && w["status"] == "optimal" &&
+                w["certificate_valid"] === true && w["expectation_met"] === true &&
+                isfinite(w["objective"]) && isapprox(w["objective"], known; atol=tol, rtol=tol) &&
+                w["iterations"] isa Integer && w["iterations"] >= 0 || return false
+            isempty(s["failed_items"]) && isempty(s["missing_items"]) || return false
+            w["pid"] == s["pid"] || return false
+            for i in s["claimed_items"]
+                haskey(receipts, i) && receipts[i]["worker_id"] == k &&
+                    receipts[i]["pid"] == s["pid"] || return false
+                push!(claimed, i)
+            end
+        end
+        return sort!(claimed) == collect(0:(n_items - 1))
     catch
         return false
     end
@@ -485,7 +527,8 @@ function aggregate_batch(mode::AbstractString, batch_dir::AbstractString,
     missing = [i for i in 0:(n_items-1) if !haskey(receipts, i)]
     solve_times = [Float64(receipts[i]["solve_seconds"]) for i in certified]
     item_walls = [Float64(receipts[i]["item_wall_seconds"]) for i in certified]
-    throughput = isempty(certified) ? 0.0 : length(certified) / (wall_seconds / 3600)
+    wall_valid = isfinite(wall_seconds) && wall_seconds > 0
+    throughput = isempty(certified) || !wall_valid ? 0.0 : length(certified) / (wall_seconds / 3600)
     warmups = Dict{Int,Dict{String,Any}}()
     for name in readdir(result_dir)
         m = match(r"^warmup_(\d+)\.toml$", name)
@@ -498,12 +541,9 @@ function aggregate_batch(mode::AbstractString, batch_dir::AbstractString,
         m === nothing && continue
         worker_summaries[parse(Int, m.captures[1])] = TOML.parsefile(joinpath(result_dir, name))
     end
-    workers_valid = mode == "fresh" ||
-        (length(warmups) == n_workers && length(worker_summaries) == n_workers &&
-         all(get(w, "certificate_valid", false) === true && get(w, "status", "") == "optimal"
-             for w in values(warmups)) &&
-         all(isempty(w["failed_items"]) && isempty(w["missing_items"])
-             for w in values(worker_summaries)))
+    workers_valid = mode == "fresh" || valid_worker_artifacts(
+        warmups, worker_summaries, receipts, n_items, n_workers,
+    )
     peak_samples = Int[r["maxrss_bytes"] for r in values(receipts)]
     append!(peak_samples, Int[w["maxrss_bytes"] for w in values(warmups)])
     append!(peak_samples, Int[w["peak_rss_bytes"] for w in values(worker_summaries)])
@@ -529,7 +569,10 @@ function aggregate_batch(mode::AbstractString, batch_dir::AbstractString,
         "solve_seconds" => solve_times,
         "peak_rss_bytes" => peak_rss,
         "post_batch_rss_bytes" => retained_rss,
-        "batch_valid" => workers_valid && isempty(failed) && isempty(missing) && isempty(child_failures),
+        "batch_valid" => wall_valid && workers_valid && isempty(failed) && isempty(missing) && isempty(child_failures),
+        "rss_samples_valid" => all(r["maxrss_bytes"] > 0 && r["rss_bytes"] > 0 for r in values(receipts)) &&
+            all(w["maxrss_bytes"] > 0 for w in values(warmups)) &&
+            all(w["peak_rss_bytes"] > 0 && w["post_batch_rss_bytes"] > 0 for w in values(worker_summaries)),
         "objectives" => Dict(string(i) => string(receipts[i]["objective"]) for i in keys(receipts)),
         "numerical_fingerprints" => Dict(string(i) => join((repr(receipts[i][k]) for k in
             ("status", "objective", "dual_objective", "primal_residual", "dual_residual",
@@ -619,7 +662,7 @@ function parent_compare(n_items::Integer, n_workers::Integer, outdir::AbstractSt
     all_valid = all(s["batch_valid"] for s in summaries)
     rss_limit = parse(Int, _arg("rss-limit-bytes", "3221225472"))
     rss_limit > 0 || throw(ArgumentError("RSS limit must be positive"))
-    memory_ok = all(0 < s["peak_rss_bytes"] <= rss_limit for s in summaries) &&
+    memory_ok = all(s["rss_samples_valid"] && 0 < s["peak_rss_bytes"] <= rss_limit for s in summaries) &&
         all(0 < s["post_batch_rss_bytes"] <= rss_limit for s in summaries if s["mode"] == "persistent")
     comparison = Dict{String,Any}(
         "protocol_version" => PROTOCOL_VERSION,
