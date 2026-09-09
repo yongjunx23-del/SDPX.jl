@@ -1,22 +1,12 @@
 # Activated HKM vec4 refusal / type / layout parity regression.
 #
-# The 4-lane HKM metric kernel promises bit-for-bit identical arithmetic to
-# the scalar `_soc_fixed_trace_hkm_full_metric!` and must refuse exactly when
-# the scalar path refuses.  Captured defects (base f1c5df4):
-#   * Refusal parity: the vec4 kernel never checks cone interior (neither
-#     `x0 > xtail` nor the dual `z0 > ztail`; it does not even compute the
-#     dual tail) and never checks determinant positivity, so primal- and
-#     dual-noninterior inputs that the scalar path refuses are accepted.
-#   * Limb parity: the kernel always computes in `MultiFloatVec{4,Float64,4}`
-#     (x4) lanes, so x2/x3 inputs are rounded from x4 instead of computed in
-#     their own arithmetic; the result is not bit-identical to the scalar
-#     path.  Only x4 enjoys the promised parity.
-#   * Dispatch gap: `MultiFloatVec{4,Float64,3}` exists, but `_mfv4` has no
-#     x3 method, so the x3 sweep paths silently fall back to scalar while
-#     x2/x4 take the vec4 path.
-#   * Counter concurrency: `worker_batch` increments `_VEC4_METRIC_HITS`
-#     with a non-atomic read-modify-write while the caller dispatches
-#     batches across `Threads.@spawn` workers, so counts are lost.
+# Supported metric-SIMD contract is x4-only: `_hkm_vec4_full_metric!`
+# serves `Float64x4` inputs with bit-for-bit identical arithmetic to the
+# scalar `_soc_fixed_trace_hkm_full_metric!` and refuses exactly when the
+# scalar path refuses.  x2/x3 inputs must return false WITHOUT writing to
+# the destination; the scalar route remains usable for those limbs.
+# `_mfv4` is likewise x2/x4-only: x3 has no 4-lane helper and its sweep
+# paths stay on the guarded scalar fallback.
 using Test, SDPX, MultiFloats, MultiFloatLinearAlgebra, LinearAlgebra
 
 const _VEC4_EXT = Base.get_extension(SDPX, :SDPXMultiFloatLinearAlgebraExt)
@@ -54,18 +44,25 @@ function _vec4_parity_case(::Type{ST}, svals, yvals; offsets=nothing) where {ST}
         push!(lanes_identical, all(
             i -> all(j -> M4[i, j, 1 + k] === Ms[i, j], 1:3), 1:3))
     end
-    return (; ok4, oks, lanes_identical)
+    return (; ok4, oks, lanes_identical, M4)
 end
 
 @testset "hkm vec4 parity" begin
 @testset "hkm vec4 metric limb parity (interior)" begin
     svals = [_interior_s() for _ in 1:4]
     yvals = [_interior_y() for _ in 1:4]
-    for ST in (Float64x2, Float64x3, Float64x4)
+    # x4 is the supported SIMD limb: success plus full bit parity.
+    outcome = _vec4_parity_case(Float64x4, svals, yvals)
+    @test outcome.ok4
+    @test all(outcome.oks)
+    @test all(outcome.lanes_identical)
+    # x2/x3 are not served by the vec4 kernel: refusal without writing,
+    # while the scalar route still succeeds on the same interior data.
+    for ST in (Float64x2, Float64x3)
         outcome = _vec4_parity_case(ST, svals, yvals)
-        @test outcome.ok4
+        @test !outcome.ok4
+        @test all(iszero, outcome.M4)
         @test all(outcome.oks)
-        @test all(outcome.lanes_identical)
     end
 end
 
@@ -73,13 +70,13 @@ end
     for ST in (Float64x2, Float64x3, Float64x4)
         interior_s = [_interior_s() for _ in 1:4]
         interior_y = [_interior_y() for _ in 1:4]
-        # Primal outside the cone: scalar refuses every lane.
+        # Primal outside the cone: scalar refuses every lane; x4 vec4
+        # refuses via its per-lane interior check, x2/x3 via the type gate.
         bad_primal = [(0.01, 1.0, 0.0) for _ in 1:4]
         outcome = _vec4_parity_case(ST, bad_primal, interior_y)
         @test !any(outcome.oks)
         @test !outcome.ok4
-        # Dual outside the cone: the vec4 kernel does not even compute the
-        # dual tail, so it must still refuse like the scalar path.
+        # Dual outside the cone: both paths must refuse.
         bad_dual = [(0.01, 1.0, 0.0) for _ in 1:4]
         outcome = _vec4_parity_case(ST, interior_s, bad_dual)
         @test !any(outcome.oks)
@@ -114,19 +111,19 @@ end
     @test all(outcome.lanes_identical)
 end
 
-@testset "hkm vec4 x3 lane dispatch" begin
-    # `MultiFloatVec{4,Float64,3}` exists, so x3 must resolve a 4-lane
-    # vector type exactly like x2/x4 instead of falling back to scalar.
+@testset "hkm vec4 lane dispatch" begin
+    # The 4-lane helpers exist for x2/x4 only.  x3 has no helper and stays
+    # on the guarded scalar fallback; calling it directly must throw.
     @test _VEC4_EXT._mfv4(Float64x2) === MultiFloatVec{4,Float64,2}
     @test _VEC4_EXT._mfv4(Float64x4) === MultiFloatVec{4,Float64,4}
-    @test _VEC4_EXT._mfv4(Float64x3) === MultiFloatVec{4,Float64,3}
+    @test_throws MethodError _VEC4_EXT._mfv4(Float64x3)
 end
 
-# Threaded `worker_batch` harness reusing the production threaded-dispatch
-# pattern (disjoint row blocks per batch, shared idempotent inputs).  Every
-# call with `refresh_metric=true` on a compact batch performs exactly one
-# `_VEC4_METRIC_HITS` increment, so the final count must equal the number of
-# calls even under saturation.
+# Threaded `worker_batch` harness (x4 fixture).  Every call with
+# `refresh_metric=true` on a compact batch performs exactly one atomic
+# `_VEC4_METRIC_HITS` increment, so the final count must equal the number
+# of calls.  Each spawned task owns disjoint storage; only the atomic
+# diagnostic counter is shared.
 function _vec4_counter_harness(::Type{ST}, nb::Int) where {ST}
     nrows = 3 * nb
     blocks = [(offset = 1 + 3 * (b - 1), length = 3) for b in 1:nb]
@@ -164,8 +161,7 @@ function _vec4_counter_harness(::Type{ST}, nb::Int) where {ST}
 end
 
 @testset "hkm vec4 metric counter concurrency" begin
-    harness = _vec4_counter_harness(Float64x2, 16)
-    batches = 16 ÷ 4
+    harness = _vec4_counter_harness(Float64x4, 16)
     failed = Threads.Atomic{Bool}(false)
     # Serial contract: one increment per compact batch.
     _VEC4_EXT._VEC4_METRIC_HITS[] = 0
@@ -177,28 +173,34 @@ end
         @test !failed[]
     end
     @test _VEC4_EXT._VEC4_METRIC_HITS[] == 4
-    # Threaded saturation: the production `@sync`/`@spawn` dispatch pulls
-    # batches through a shared atomic cursor; the diagnostic counter must
-    # still count every batch exactly once.
+    # Threaded check: one private harness per spawned task (disjoint
+    # theta/operators/h/corrector storage); only the atomic counter is
+    # shared, so its final value must equal the number of batch calls.
     if Threads.nthreads() >= 2
-        total = 40000
+        per_task = 100
+        ntasks = Threads.nthreads()
+        total = per_task * ntasks
         _VEC4_EXT._VEC4_METRIC_HITS[] = 0
-        next_item = Threads.Atomic{Int}(0)
-        @sync for _ in 1:Threads.nthreads()
+        task_ok = Vector{Bool}(undef, ntasks)
+        @sync for slot in 1:ntasks
             Threads.@spawn begin
-                while !failed[]
-                    item = Threads.atomic_add!(next_item, 1)
-                    item >= total && break
-                    b0 = (item % batches) * 4 + 1
+                local_harness = _vec4_counter_harness(Float64x4, 16)
+                local_failed = Threads.Atomic{Bool}(false)
+                for rep in 1:per_task
+                    b0 = ((rep - 1) % 4) * 4 + 1
                     _VEC4_EXT.worker_batch(
-                        harness.state, nothing, harness.cone, harness.plan,
-                        harness.base, harness.s_all, harness.y_all,
-                        harness.ds_all, harness.dy_all, harness.theta,
-                        harness.rhs, harness.target, true, true, b0, failed)
+                        local_harness.state, nothing, local_harness.cone,
+                        local_harness.plan, local_harness.base,
+                        local_harness.s_all, local_harness.y_all,
+                        local_harness.ds_all, local_harness.dy_all,
+                        local_harness.theta, local_harness.rhs,
+                        local_harness.target, true, true, b0, local_failed)
+                    local_failed[] && break
                 end
+                task_ok[slot] = !local_failed[]
             end
         end
-        @test !failed[]
+        @test all(task_ok)
         @test _VEC4_EXT._VEC4_METRIC_HITS[] == total
     end
 end
