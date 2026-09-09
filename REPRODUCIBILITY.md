@@ -3,9 +3,13 @@
 prints the delivery fingerprint, one `name=value` line each:
 git `HEAD`, Julia `VERSION`, SDPX version (`Project.toml`),
 MPFR/GMP versions (`Base.MPFR`/`Base.GMP`), SDPX extension load
-state (`Base.get_extension`), SHA1 of `Project.toml`/`Manifest.toml`.
-Any failed read prints `name=READ_FAILED ...` and the script exits
-non-zero (`reproducible_delivery_check=FAIL`); all green prints `PASS`.
+state (`Base.get_extension`), SHA1 of `Project.toml`, and the
+`Manifest.toml` SHA1 (committed and active project) when present.
+A library checkout legitimately has no committed `Manifest.toml`, so an
+absent one is reported as `manifest_sha1=absent` (and `none`/`absent` for
+the active project) instead of failing. Any failed read of an existing
+file prints `name=READ_FAILED ...` and the script exits non-zero
+(`reproducible_delivery_check=FAIL`); all green prints `PASS`.
 Run (single bounded process, ≤180 s):
 ```
 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
@@ -18,5 +22,6 @@ Evidence the fingerprint points at:
 - `docs/evidence/` — committed qualification records.
 - `local-archives/high-precision-ecosystem-20260908/` — frozen
   high-precision ecosystem records (outside git; verify presence locally).
-Known release blocker: `Manifest.toml` is not committed, so the
-script fail-closes on `manifest_sha1` until a manifest is committed.
+The active environment's Manifest is recorded separately
+(`active_project`, `active_manifest_sha1`); this is the environment
+actually used by the run, distinct from the (uncommitted) repo Manifest.

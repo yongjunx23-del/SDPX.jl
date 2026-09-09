@@ -6,7 +6,10 @@
 #   3. SDPX version from Project.toml
 #   4. MPFR / GMP versions from Base.MPFR / Base.GMP
 #   5. loaded SDPX extension list via Base.get_extension
-#   6. SHA1 of Project.toml and Manifest.toml
+#   6. SHA1 of Project.toml (and Manifest.toml when present)
+#   7. the active project and its Manifest SHA1 when present
+# An absent committed Manifest.toml or active Manifest is reported as
+# `absent`/`none`, not as a failure: library checkouts do not commit one.
 #
 # Run with the bounded-process contract, e.g.:
 #   OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
@@ -69,9 +72,25 @@ function main()
     report!("project_sha1", () -> bytes2hex(SHA.sha1(
         read(joinpath(REPO_ROOT, "Project.toml")),
     )))
-    report!("manifest_sha1", () -> bytes2hex(SHA.sha1(
-        read(joinpath(REPO_ROOT, "Manifest.toml")),
-    )))
+    # A library checkout legitimately has no committed Manifest.toml; report
+    # that honestly instead of failing.  The environment actually used is
+    # recorded separately from the active project.
+    report!("manifest_sha1", () -> begin
+        path = joinpath(REPO_ROOT, "Manifest.toml")
+        isfile(path) || return "absent"
+        bytes2hex(SHA.sha1(read(path)))
+    end)
+    report!("active_project", () -> begin
+        project = Base.active_project()
+        project === nothing ? "none" : project
+    end)
+    report!("active_manifest_sha1", () -> begin
+        project = Base.active_project()
+        project === nothing && return "none"
+        manifest = joinpath(dirname(project), "Manifest.toml")
+        isfile(manifest) || return "absent"
+        bytes2hex(SHA.sha1(read(manifest)))
+    end)
     if isempty(FAILURES)
         println("reproducible_delivery_check=PASS")
         return 0
