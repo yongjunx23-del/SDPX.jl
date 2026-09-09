@@ -914,6 +914,20 @@ mutable struct FixedTraceQ3CoreWorkspace{T,S,C,E,P}
     epoch_timing::Q3EpochTimings  # exclusive sub-phase timing, zero-allocation
 end
 
+"""Reset solve-local telemetry without changing factor epochs or numerical state."""
+function _reset_q3_phase_timings!(workspace::FixedTraceQ3CoreWorkspace)
+    timing = workspace.epoch_timing
+    timing.metric_seconds = 0.0
+    timing.factor_seconds = 0.0
+    timing.homogeneous_seconds = 0.0
+    timing.workers = 0
+    timing.epochs = 0
+    workspace.equality.local_elimination_seconds = 0.0
+    workspace.equality.panel_transform_seconds = 0.0
+    workspace.equality.gram_seconds = 0.0
+    return workspace
+end
+
 function fixed_trace_q3_core_prepare_bytes(::Type{T}, plan) where {T<:AbstractFloat}
     scalar_bytes = ExtendedPrecisionBLAS._element_storage_bytes(T)
     variables = size(plan.equality_panel, 2)
