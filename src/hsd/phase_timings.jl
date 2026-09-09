@@ -56,7 +56,11 @@ Base.@kwdef mutable struct ProductHSDPhaseTimings
     q3_factor_seconds::Float64 = 0.0
     q3_homogeneous_seconds::Float64 = 0.0
     q3_epochs::Int = 0
-    q3_workers::Int = 0
+    q3_workers::Int = 0 # compatibility name: admitted budget, NOT measured CPU/tasks
+    # Children of q3_metric_seconds; never sum them with that parent.
+    q3_local_elimination_seconds::Float64 = 0.0
+    q3_panel_transform_seconds::Float64 = 0.0
+    q3_gram_seconds::Float64 = 0.0
 end
 
 """Reset every phase accumulator to zero (used at solve start)."""
@@ -79,6 +83,9 @@ function reset_phase_timings!(timings::ProductHSDPhaseTimings)
     timings.q3_homogeneous_seconds = 0.0
     timings.q3_epochs = 0
     timings.q3_workers = 0
+    timings.q3_local_elimination_seconds = 0.0
+    timings.q3_panel_transform_seconds = 0.0
+    timings.q3_gram_seconds = 0.0
     return timings
 end
 
@@ -103,5 +110,9 @@ function phase_timings_snapshot(timings::ProductHSDPhaseTimings)
         q3_homogeneous_seconds=timings.q3_homogeneous_seconds,
         q3_epochs=timings.q3_epochs,
         q3_workers=timings.q3_workers,
+        q3_worker_budget=timings.q3_workers,
+        q3_local_elimination_seconds=timings.q3_local_elimination_seconds,
+        q3_panel_transform_seconds=timings.q3_panel_transform_seconds,
+        q3_gram_seconds=timings.q3_gram_seconds,
     )
 end

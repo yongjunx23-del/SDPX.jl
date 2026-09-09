@@ -581,6 +581,9 @@ mutable struct FixedTraceQ3EqualitySchurWorkspace{T,B<:AbstractLABackend}
     local_solution::Vector{T}
     equality_work::Vector{T}
     worker_budget::Int
+    local_elimination_seconds::Float64
+    panel_transform_seconds::Float64
+    gram_seconds::Float64
 end
 
 function FixedTraceQ3EqualitySchurWorkspace(
@@ -635,6 +638,7 @@ function FixedTraceQ3EqualitySchurWorkspace(
         alloc_zeros(T, variables),
         alloc_zeros(T, equalities),
         _q3_worker_limit(workers),
+        0.0, 0.0, 0.0,
     )
 end
 
@@ -642,9 +646,13 @@ function prepare_fixed_trace_q3_equality_schur!(
     workspace::FixedTraceQ3EqualitySchurWorkspace{T},
     local_metric::AbstractMatrix{T}, regularization::T=zero(T),
 ) where {T}
-    assemble_fixed_trace_q3_contribution!(
+    phase_start = time_ns()
+    local_ok = assemble_fixed_trace_q3_contribution!(
         workspace.local_elimination, local_metric, regularization,
-    ) || return false
+    )
+    workspace.local_elimination_seconds += (time_ns() - phase_start) * 1e-9
+    local_ok || return false
+    phase_start = time_ns()
     fixed_trace_q3_copy_trsm_lower!(
         workspace.transformed_panel,
         workspace.panel,
@@ -653,10 +661,13 @@ function prepare_fixed_trace_q3_equality_schur!(
         workspace.local_elimination.inverse_pivots;
         workers=workspace.worker_budget,
     )
+    workspace.panel_transform_seconds += (time_ns() - phase_start) * 1e-9
+    phase_start = time_ns()
     la_syrk!(
         workspace.backend, workspace.schur, workspace.transformed_panel,
         one(T), zero(T),
     )
+    workspace.gram_seconds += (time_ns() - phase_start) * 1e-9
     @inbounds for column in axes(workspace.schur, 2)
         for row in (column + 1):size(workspace.schur, 1)
             workspace.schur[column,row] = workspace.schur[row,column]
@@ -815,8 +826,8 @@ end
 # `factor_symmetric_core_epoch!` and accumulated by the HSD loop so the
 # inclusive `kkt_factorization_seconds` bucket can be split into metric
 # preparation, numeric factorization and the homogeneous solve.  `workers`
-# records the effective worker count used by the Q3 loops (currently the
-# Julia pool; a budget enforcement change makes it the admitted budget).
+# records the admitted per-workspace worker maximum, not task participation
+# or CPU utilization. Provider execution may use fewer workers.
 mutable struct Q3EpochTimings
     metric_seconds::Float64
     factor_seconds::Float64
@@ -1222,7 +1233,10 @@ function _fixed_trace_core_prepare_metric!(
     ))
     reduction = workspace.plan.reduction
     metric = workspace.local_metric
-    @inbounds for block_index in axes(reduction.active_ids, 2)
+    # Disjoint per-block destinations; preserve each expression tree. Keep
+    # mutable-scalar arithmetic on its existing serial preparation path.
+    workers = isbitstype(T) ? workspace.worker_budget : 1
+    _q3_foreach(axes(reduction.active_ids, 2), workers) do block_index
         a11 = reduction.tail_map[1,1,block_index]
         a12 = reduction.tail_map[1,2,block_index]
         a21 = reduction.tail_map[2,1,block_index]

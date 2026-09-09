@@ -960,13 +960,16 @@ function _product_hsd_symmetric_core_direction!(
     if core isa FixedTraceQ3CoreWorkspace
         # Exclusive Q3 sub-buckets (children of kkt_factorization_seconds),
         # accumulated in the workspace across epochs.  Assign cumulative
-        # values and keep the widest effective worker count seen.
+        # values. Worker metadata is an admitted maximum, not utilization.
         q3 = core.epoch_timing
         timings.q3_metric_seconds = q3.metric_seconds
         timings.q3_factor_seconds = q3.factor_seconds
         timings.q3_homogeneous_seconds = q3.homogeneous_seconds
         timings.q3_epochs = q3.epochs
         timings.q3_workers = max(timings.q3_workers, q3.workers)
+        timings.q3_local_elimination_seconds = core.equality.local_elimination_seconds
+        timings.q3_panel_transform_seconds = core.equality.panel_transform_seconds
+        timings.q3_gram_seconds = core.equality.gram_seconds
     end
     t0 = time_ns()
     refinement_wall0 = timings.refinement_seconds
