@@ -178,7 +178,10 @@ end
     @test d.selected_algorithms.nonsymmetric_backend ===
           SDPX.ExperimentalHalfPowerFactorPairBackend
     @test d.selected_algorithms.executed_kkt_route === :factor_pair
-    @test d.selected_algorithms.planned_kkt_storage === :dense_factor_pair_core
+    @test d.selected_algorithms.planned_kkt_storage === :dense
+    @test d.selected_algorithms.planned_kkt_formulation === :dense_factor_pair_lu
+    @test d.selected_algorithms.matrix_structure === :general_nonsymmetric
+    @test d.selected_algorithms.border_dimension == 2
     @test d.termination.factor_pair_execution.refusal_stage === :none
     @test d.termination.factor_pair_execution.accepted_state_available
     @test d.termination.factor_pair_execution.accepted_steps == d.termination.iterations

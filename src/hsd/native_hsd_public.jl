@@ -62,7 +62,7 @@ function _native_hsd_kkt_descriptor(
             "factor_pair requires Float64 arithmetic",
         ))
         return NativeHSDKKTDescriptor(
-            route, :dense_factor_pair_lu, :dense_factor_pair_core, :native,
+            route, :dense_factor_pair_lu, :dense, :native,
             :lu_dense, :affine_combined_same_factor, :dense_lu, :dense_lu, (),
         )
     elseif route === :bordered
@@ -233,7 +233,7 @@ end
 
 """Authoritative family payload for one direct native-HSD execution."""
 struct NativeHSDPlan <: AbstractExecutionPlanPayload
-    formulation::Union{DenseHomogeneousBordered,DenseHybridCoupled,SymmetricAugmentedHSD}
+    formulation::Union{DenseHomogeneousBordered,DenseHybridCoupled,SymmetricAugmentedHSD,DenseFactorPairHSD}
     storage::Symbol
     factorization::Symbol
     factorization_reuse::Symbol
@@ -608,8 +608,27 @@ function _native_hsd_plan(
     full_core_dimension::Integer=0,
     compact_dimension::Integer=0,
     use_compact_schur::Bool=false,
+    factor_pair_formulation::Union{Nothing,DenseFactorPairHSD}=nothing,
 ) where {T<:AbstractFloat}
+    fp = factor_pair_formulation !== nothing
     reduced = reduction.reduced
+    planned_route = fp ? :factor_pair : settings.kkt_route
+    if fp
+        settings.nonsymmetric_backend === ExperimentalHalfPowerFactorPairBackend &&
+            reduction.status === HSDEqualityReady && reduced !== nothing ||
+            throw(ArgumentError("factor-pair plan requires admitted experimental reduction"))
+        factor_pair_formulation.reduced_variables == canonical_num_variables(reduced) &&
+            factor_pair_formulation.active_rows == canonical_num_slack(reduced) ||
+            throw(ArgumentError("factor-pair descriptor dimensions do not match reduction"))
+        FactorPairHSD.reduced_layout(reduced) === nothing &&
+            throw(ArgumentError("unsupported factor-pair layout"))
+        product_rank = 0 # compatibility sentinel, never a numerical rank claim
+        product_rank_reason = :not_computed_factor_pair
+        product_rank_ambiguous = product_rank_incompatible = false
+        core_dimension = factor_pair_formulation.dimension
+        fixed_trace_applicable = use_compact_schur = false
+        full_core_dimension = compact_dimension = 0
+    end
     reduced_variables = reduced === nothing ? 0 : canonical_num_variables(reduced)
     active_rows = length(reduction.reduced_to_full)
     active_blocks = reduced === nothing ? 0 : length(reduced.cone_layout.blocks)
@@ -628,7 +647,7 @@ function _native_hsd_plan(
             Int(compact_dimension),
             use_compact_schur,
             _native_hsd_compact_selection_reason(
-                settings.kkt_route,
+                planned_route,
                 fixed_trace_applicable,
                 active_rows,
                 Int(full_core_dimension),
@@ -641,8 +660,8 @@ function _native_hsd_plan(
         )
     else
         _native_hsd_empty_structure(
-            settings.kkt_route === :bordered && fixed_trace_applicable,
-            settings.kkt_route,
+            planned_route === :bordered && fixed_trace_applicable,
+            planned_route,
             reduction.status === HSDEqualityReady,
             active_rows,
             psd_block_count,
@@ -650,7 +669,7 @@ function _native_hsd_plan(
             psd_storage_status,
         )
     end
-    descriptor = _native_hsd_formulation_descriptor(
+    descriptor = fp ? factor_pair_formulation : _native_hsd_formulation_descriptor(
         canonical,
         reduction,
         product_rank,
@@ -658,7 +677,7 @@ function _native_hsd_plan(
         product_rank_incompatible,
         product_rank_reason,
     )
-    if settings.kkt_route === :bordered && descriptor.available
+    if !fp && settings.kkt_route === :bordered && descriptor.available
         descriptor = SymmetricAugmentedHSD(
             product_rank,
             active_rows,
@@ -668,6 +687,7 @@ function _native_hsd_plan(
         )
     end
     factor_dimension = !descriptor.available ? 0 :
+        fp ? descriptor.dimension :
         settings.kkt_route === :sparse_schur ? product_rank + 1 :
         settings.kkt_route === :bordered ?
             core_dimension :
@@ -675,7 +695,7 @@ function _native_hsd_plan(
     mathematical_formulation = descriptor.available ?
         formulation_symbol(descriptor) : :not_applicable
     kkt_execution = _native_hsd_kkt_descriptor(
-        settings.kkt_route, mathematical_formulation, T,
+        planned_route, mathematical_formulation, T,
     )
     payload = NativeHSDPlan(
         descriptor,
@@ -699,7 +719,7 @@ function _native_hsd_plan(
         reduction.status,
         product_rank_ambiguous,
         product_rank_incompatible,
-        settings.kkt_route,
+        planned_route,
         kkt_execution,
         structure,
         settings.nonsymmetric_backend,
@@ -741,8 +761,8 @@ function _native_hsd_plan(
         rank_revealing_qr=true,
         factor_solve=descriptor.available,
         multi_rhs=descriptor.available,
-        iterative_refinement=descriptor.available,
-        sparse_factorization=descriptor.available &&
+        iterative_refinement=!fp && descriptor.available,
+        sparse_factorization=!fp && descriptor.available &&
             (settings.kkt_route === :sparse_schur ||
              (settings.kkt_route === :bordered && T === Float64)),
     )
@@ -755,7 +775,7 @@ function _native_hsd_plan(
         capability_symbols,
         capabilities,
         descriptor.available ?
-            (settings.kkt_route === :sparse_schur ?
+            (fp ? (:lu, :factor_solve) : settings.kkt_route === :sparse_schur ?
                 (:sparse_factorization, :factor_solve) :
                 settings.kkt_route === :bordered ?
                     (T === Float64 ? (:sparse_factorization, :factor_solve) :
@@ -792,8 +812,8 @@ function _native_hsd_plan(
         requested_threads=settings.limits.threads,
         executed_threads=1,
         fallback_chain=kkt_execution.fallback_chain,
-        symmetric_core_dimension=factor_dimension,
-        symmetric_core_storage=kkt_execution.storage,
+        symmetric_core_dimension=fp ? 0 : factor_dimension,
+        symmetric_core_storage=fp ? :not_applicable : kkt_execution.storage,
         core_estimate_bytes=Int(core_estimate_bytes),
         current_rss_bytes=Int(current_rss_bytes === nothing ? 0 : current_rss_bytes),
         requested_precision_bits=canonical.precision_bits,
@@ -806,6 +826,9 @@ function _native_hsd_plan(
         psd_hypothetical_triangular_scalars=structure.psd_hypothetical_triangular_scalars,
         psd_storage_status=structure.psd_storage_status,
     )
+    if fp
+        parameters = (; parameters..., core_dimension=descriptor.dimension)
+    end
     return ExecutionPlan(
         classification,
         :native_hsd,
@@ -813,8 +836,8 @@ function _native_hsd_plan(
         backend,
         FormulationPlan(
             descriptor,
-            :native_hsd_typed_formulation,
-            :native_hsd,
+            fp ? :native_hsd_factor_pair_formulation : :native_hsd_typed_formulation,
+            fp ? :factor_pair : :native_hsd,
         ),
         la,
         storage,
@@ -1269,7 +1292,8 @@ function _native_hsd_diagnostics(
             psd_block_count=payload.structure.psd_block_count,
             psd_hypothetical_triangular_scalars=payload.structure.psd_hypothetical_triangular_scalars,
             psd_storage_status=payload.structure.psd_storage_status,
-            planned_core_dimension=plan.parameters.symmetric_core_dimension,
+            planned_core_dimension=descriptor isa DenseFactorPairHSD ?
+                plan.parameters.core_dimension : plan.parameters.symmetric_core_dimension,
             # `prepared`/`executed` come from the actual factor-owning
             # workspace for the terminal active route (see
             # _native_hsd_factor_owner_dims): a prepared but never-stepped
@@ -1288,6 +1312,11 @@ function _native_hsd_diagnostics(
             dual_infeasible=(:primal,),
         ),
     )
+    if descriptor isa DenseFactorPairHSD
+        selected = (; selected..., matrix_structure=descriptor.matrix_structure,
+            coordinate_system=descriptor.coordinate_system,
+            border_dimension=descriptor.border_dimension)
+    end
     equality = (
         status=reduction.status,
         original_rows=payload.original_rows,
@@ -1298,12 +1327,12 @@ function _native_hsd_diagnostics(
         dependent=Tuple(reduction.dependent),
     )
     rank = (
-        rank=payload.product_rank,
+        rank=descriptor isa DenseFactorPairHSD ? nothing : payload.product_rank,
         reason=payload.product_rank_reason,
         variables=payload.reduced_variables,
         ambiguous=payload.product_rank_ambiguous,
         incompatible=payload.product_rank_incompatible,
-        basis=:orthogonal_rowspace,
+        basis=descriptor isa DenseFactorPairHSD ? :not_applicable : :orthogonal_rowspace,
     )
     timings = if state !== nothing
         merge(
@@ -1333,8 +1362,8 @@ function _native_hsd_diagnostics(
         estimated_workspace_bytes=core_estimate_bytes,
         process_peak_rss_bytes=process_peak,
         memory_budget_bytes=plan.memory_budget_bytes,
-        symmetric_core_dimension=core_dimension,
-        symmetric_core_estimate_bytes=core_estimate_bytes,
+        symmetric_core_dimension=descriptor isa DenseFactorPairHSD ? 0 : core_dimension,
+        symmetric_core_estimate_bytes=descriptor isa DenseFactorPairHSD ? 0 : core_estimate_bytes,
         symmetric_core_actual_provider=executed_provider_fact,
         symmetric_core_actual_precision=executed_precision_fact,
         symmetric_core_actual_regularization=executed_regularization_fact,
@@ -1507,64 +1536,11 @@ function _factor_pair_public_core(
     end
     recovery_seconds = Float64(time_ns() - recovery_started) * 1.0e-9
 
-    base_exec = _native_hsd_plan(program, canonical, reduction, route, settings)
-    base_plan = base_exec.payload
-    kkt = NativeHSDKKTDescriptor(:factor_pair, :dense_factor_pair_lu,
-        :dense_factor_pair_core, :native, :lu_dense,
-        :affine_combined_same_factor, :dense_lu, :dense_lu, ())
-    core_dim = canonical_num_variables(reduced) + canonical_num_slack(reduced) + 2
-    payload = NativeHSDPlan(
-        base_plan.formulation,
-        :dense_factor_pair_core,
-        :lu_dense,
-        :affine_combined_same_factor,
-        :serial,
-        :dense_lu,
-        (),
-        base_plan.original_variables,
-        base_plan.reduced_variables,
-        base_plan.original_rows,
-        base_plan.equality_rows,
-        base_plan.active_rows,
-        base_plan.equality_rank,
-        base_plan.product_rank,
-        base_plan.product_rank_reason,
-        base_plan.zero_blocks,
-        base_plan.active_blocks,
-        base_plan.cones,
-        base_plan.equality_status,
-        base_plan.product_rank_ambiguous,
-        base_plan.product_rank_incompatible,
-        :factor_pair,
-        kkt,
-        base_plan.structure,
-        settings.nonsymmetric_backend,
-    )
-    plan = ExecutionPlan(
-        base_exec.classification,
-        base_exec.algorithm,
-        base_exec.scaling,
-        base_exec.backend_config,
-        FormulationPlan(payload.formulation,
-            :native_hsd_factor_pair_formulation, :factor_pair),
-        LABackendConfiguration(:float64, :dense_lu, :dense_lu, :native_lu,
-            (:dense_factorization,), (), :factor_pair, :solve_owned),
-        KKTStoragePlan(:dense;
-            dimension=core_dim,
-            input_nnz=length(A.nzval),
-            density=Float64(length(A.nzval)) / Float64(max(1, size(A, 1) * size(A, 2))),
-            reason=:factor_pair_dense_core,
-            provenance=:factor_pair,
-            requested=:dense,
-        ),
-        :none,
-        :serial,
-        1,
-        :factor_pair,
-        live_estimate,
-        base_exec.parameters,
-        payload,
-    )
+    descriptor = DenseFactorPairHSD(size(A, 2), size(A, 1))
+    core_dim = descriptor.dimension
+    plan = _native_hsd_plan(program, canonical, reduction, route, settings;
+        factor_pair_formulation=descriptor, memory_limit_bytes=live_estimate,
+        core_estimate_bytes=live_estimate)
     return canonical, reduction, _native_hsd_core_result(
         Float64,
         status,

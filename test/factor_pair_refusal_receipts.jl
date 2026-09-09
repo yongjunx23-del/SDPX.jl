@@ -1,5 +1,25 @@
 using SparseArrays
 
+@testset "factor-pair formulation describes structure, not rank" begin
+    d = SDPX.DenseFactorPairHSD(3,12)
+    @test d.dimension == d.matrix_dimension == 17
+    @test d.reduced_variables == 3 && d.active_rows == 12
+    @test d.border_dimension == 2
+    @test d.matrix_structure === :general_nonsymmetric
+    @test d.pivoting === d.pivoting_strategy === :partial
+    @test d.factorization === :lu_dense
+    @test d.coordinate_system === :factor_pair_coordinates
+    @test d.border === :two_scalar_homogeneous_border
+    @test d.metric === :factor_pair_actions
+    @test d.reuse === d.factorization_reuse === :affine_combined_same_factor
+    @test !hasproperty(d,:reduced_rank)
+    @test SDPX.formulation_symbol(d) === :dense_factor_pair_lu
+    @test SDPX.kkt_backend_from_formulation(SDPX.FormulationPlan(d,:test,:test),:native_hsd,0) === :native
+    @test_throws ArgumentError SDPX.DenseFactorPairHSD(-1,12)
+    @test_throws ArgumentError SDPX.DenseFactorPairHSD(3,-1)
+    @test_throws OverflowError SDPX.DenseFactorPairHSD(typemax(Int),12)
+end
+
 @testset "factor-pair startup and accepted-state refusal receipts" begin
     FPH = SDPX.FactorPairHSD
     FA = SDPX.FactorPreservingAffine
@@ -55,8 +75,19 @@ using SparseArrays
     reduction = SDPX.hsd_equality_reduce(canonical)
     settings = SDPX.Settings(Float64;
         nonsymmetric_backend=SDPX.ExperimentalHalfPowerFactorPairBackend)
+    descriptor = SDPX.DenseFactorPairHSD(size(reduction.reduced.A,2), size(reduction.reduced.A,1))
     plan = SDPX._native_hsd_plan(program, canonical, reduction,
-        SDPX.NativeConeRoute(:bordered), settings)
+        SDPX.NativeConeRoute(:bordered), settings; factor_pair_formulation=descriptor)
+    @test plan.payload.formulation === descriptor
+    @test plan.formulation_plan.formulation === descriptor
+    @test plan.storage_plan.dimension == descriptor.dimension == 17
+    @test plan.kkt_formulation === :dense_factor_pair_lu
+    @test plan.la_config.provider === :dense_lu
+    @test plan.parameters.core_dimension == 17
+    @test plan.parameters.symmetric_core_dimension == 0
+    @test plan.payload.product_rank_reason === :not_computed_factor_pair
+    @test !plan.la_config.capability_model.iterative_refinement
+    @test !plan.la_config.capability_model.sparse_factorization
     for receipt in (r, singular)
         d = SDPX._native_hsd_diagnostics(plan, reduction, SDPX.NumericalFailure,
             receipt.refusal_reason, receipt.iterations, receipt.factorizations,
@@ -71,6 +102,9 @@ using SparseArrays
         @test !s.structure.factor_current
         @test s.structure.executed_core_dimension == 0
         @test s.executed_factorization === :not_executed
+        @test s.structure.planned_core_dimension == 17
+        @test s.matrix_structure === :general_nonsymmetric
+        @test s.border_dimension == 2
     end
 
     ledger = FA.FactorizationLedger()
