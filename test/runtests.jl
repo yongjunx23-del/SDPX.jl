@@ -684,3 +684,4 @@ include(joinpath(@__DIR__, "..", "benchmark", "bootstrap", "physics",
 include(joinpath(@__DIR__, "hkm_vec4_parity.jl"))
 include(joinpath(@__DIR__, "affine_builder_ownership.jl"))
 include(joinpath(@__DIR__, "q3_worker_budget.jl"))
+include(joinpath(@__DIR__, "blas_controller_diagnostics.jl"))
