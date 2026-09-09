@@ -1,0 +1,31 @@
+# Actual stored native factors, not refactored high-precision substitutes.
+capture_sha256 = "efcda1d27af84f96b401464b25810a59fba65dcc8f09f8954ba57993c80cc031"
+capture_head = "d00149cb899ae8a6ab8acac0641af1428c97c87d"
+unit_scope = "inverse-kernel inputs; not recreated HSD authority"
+
+[[cases]]
+id = "bt0"
+record_index = 18
+expected_selection = 3
+factor_valid = true
+workspace_valid = true
+factor_bits = ["401c52575a8d8b9f", "4011c32ba2d33fa9", "40266dd2d28f2595", "0000000000000000", "3f407d6bf932d769", "3f44d27e1f73f6a0", "0000000000000000", "0000000000000000", "3e6b566aeb784001"]
+midpoint_bits = ["42eb7fae0c5566e4", "42f5ec4a49be670e", "c2f15c968c00db44", "42f5ec4a49be670e", "43017a52b3aa576c", "c2fbaec6bd88bb3c", "c2f15c968c00db44", "c2fbaec6bd88bb3c", "42f5ec4a4c1b06c5"]
+
+[[cases]]
+id = "bt2"
+record_index = 22
+expected_selection = 5
+factor_valid = true
+workspace_valid = true
+factor_bits = ["401c52130dca1873", "4011c30061867f0c", "40266d9c77de35f0", "0000000000000000", "3f3ff089115a8fe1", "3f442a5b5109c072", "0000000000000000", "0000000000000000", "3e69a4218574228a"]
+midpoint_bits = ["42ef41fd663b3544", "42f8eb7b2eedad9e", "c2f3bc27b8ed6272", "42f8eb7b2eedad9e", "4303ddf52641ee11", "c2ff7787559383de", "c2f3bc27b8ed6272", "c2ff7787559383de", "42f8eb7b317253df"]
+
+[[cases]]
+id = "bt14"
+record_index = 46
+expected_selection = 0
+factor_valid = true
+workspace_valid = true
+factor_bits = ["401c51fc474e966f", "4011c2f1f509713a", "40266d8a57e0f4e0", "0000000000000000", "3f3f95d6cab1a57d", "3f43f1183fe64680", "0000000000000000", "0000000000000000", "3e6913656dbfe2ca"]
+midpoint_bits = ["42f05771e751927d", "42fa0e64cc2c5ebe", "c2f4a28a25038762", "42fa0e64cc2c5ebe", "4304c5e26c8b144f", "c300736f91ab3519", "c2f4a28a25038762", "c300736f91ab3519", "42fa0e64cebf9015"]

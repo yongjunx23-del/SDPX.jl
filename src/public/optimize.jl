@@ -286,7 +286,7 @@ function _public_original_certificate(
     end
     dual_residual = max(dual_residual, maximum(abs, stationarity; init=zero(T)))
     relative_gap = abs(primal_objective - dual_objective) /
-                   (one(T) + abs(primal_objective) + abs(dual_objective))
+                   _certificate_objective_scale(primal_objective,dual_objective)
 
     # Normalize original-coordinate residuals by the same conservative data
     # scales used by the numerical certificate.  Raw residuals are retained
@@ -377,6 +377,7 @@ function _optimize_impl(
     settings::Union{Nothing,Settings}=nothing,
     outputs::Outputs=Outputs(),
     warm_start=nothing,
+    execution_context::Union{Nothing,NativeExecutionContext}=nothing,
 ) where {T<:AbstractFloat}
     resolved_settings = _public_normalize_settings(model, settings)
     resolved_outputs = normalize_outputs(outputs)
@@ -395,7 +396,8 @@ function _optimize_impl(
         route,
         resolved_settings,
         resolved_outputs,
-        warm_start,
+        warm_start;
+        execution_context=execution_context,
     )
 end
 

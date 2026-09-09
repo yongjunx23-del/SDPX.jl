@@ -1287,6 +1287,9 @@ function _moi_settings(optimizer::Optimizer{T}) where {T<:AbstractFloat}
         options.timing,
         options.certification,
         nothing,
+        # R0-P4: the MOI bridge exposes the historical native backend only.
+        (; sigma=nothing, beta=nothing, gamma=nothing, predictor=:classic),
+        NativeNonsymmetricBackend,
     )
 end
 

@@ -470,7 +470,7 @@ end
     _product_hsd_trial_residual!(state)
     p2 = _hsd_maxinf(base.rPt)
     d2 = _hsd_maxinf(base.rDt)
-    gap2 = -dot(base.c, base.xt) - dot(base.b, base.yt) + base.kappa_t
+    gap2 = dot(base.c, base.xt) + dot(base.b, base.yt) + base.kappa_t
     (isfinite(p2) && isfinite(d2) && isfinite(gap2)) || return false
     _hsd_residual_homotopy_ok(base, alpha, p2, d2, gap2) || return false
     scale = max(
@@ -588,6 +588,8 @@ function product_hsd_solve!(
     base = state.base
     state.tau_collapse_recoveries = 0
     reset_phase_timings!(state.phase_timings)
+    state.symmetric_core isa FixedTraceQ3CoreWorkspace &&
+        _reset_q3_phase_timings!(state.symmetric_core)
     empty!(state.kkt_route_attempts)
     push!(state.kkt_route_attempts, state.kkt_route)
     x_original = alloc_zeros(T, base.n)

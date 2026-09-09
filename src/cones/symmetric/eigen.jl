@@ -169,3 +169,139 @@ function _eigen!(scratch::PSDEigenScratch{T}, packed::AbstractVector) where {T}
     _orthonormalize!(scratch.V, n)
     return scratch.w, scratch.V
 end
+
+# ---------------------------------------------------------------------------
+# Experimental n=2 SPD-relative eigensolver route (Float64 only).
+#
+# The production cyclic Jacobi uses an ABSOLUTE rotation threshold
+# (eps(T)*scale*max(1,n)*10/off_count). For a matrix with a tiny off-diagonal
+# beside a large diagonal, e.g. M = [1 delta; delta 2*delta^2] with
+# delta = 2^-50, |M12| = 8.9e-16 falls below the absolute threshold and the
+# rotation is SKIPPED even though the relative correlation
+# |M12|/sqrt(M11*M22) = 1/sqrt(2) is O(1). This experimental route (dimension
+# two, Float64 only, explicit selection only) replaces the gate with a
+# RELATIVE one, |b|/sqrt(a*c) <= tau_off, evaluated with a range-safe
+# exponent-separated comparison, and applies a bounded rotation. It exists to
+# measure whether a relative-accuracy eigensolver changes the downstream PSD
+# NT scaling; it is NOT a production route and no fallback is permitted.
+# ---------------------------------------------------------------------------
+
+"""
+    _relative2_offdiag_gate(a, b, c, tau) -> :pass | :fail | :unresolved
+
+Range-safe proof of `|b|/sqrt(a*c) <= tau` for strictly positive `a, c`.
+Uses exponent-separated mantissa bounds; the e < -1070 region returns
+:pass directly before Float64 exp2 subnormal representation could stop
+being a valid upper bound. Throws on nonfinite entries or non-positive diagonals.
+Returns `:unresolved` when the mantissa interval straddles `tau`.
+"""
+function _relative2_offdiag_gate(a::T, b::T, c::T, tau::T) where {T}
+    (isfinite(a) && isfinite(b) && isfinite(c)) ||
+        throw(ArgumentError("experimental_relative2: nonfinite PSD entry"))
+    (a > zero(T) && c > zero(T)) ||
+        throw(DomainError((a, c), "experimental_relative2 requires strictly positive diagonals"))
+    ma, ea = frexp(a)
+    mb, eb = frexp(abs(b))    # correlation uses |b|; sign enters via the rotation
+    mc, ec = frexp(c)
+    # floor division: (ea+ec)/2 = fld + rem/2 with rem in {0,1} reconstructs
+    # the exponent sum EXACTLY for negative odd sums too (div truncates and
+    # would halve the interval for negative odd ea+ec).
+    emid = fld(ea + ec, 2)
+    rem = (ea + ec) - 2 * emid
+    e = eb - emid
+    f = rem == 1 ? one(T) / sqrt(one(T) + one(T)) : one(T)
+    if e > 0
+        # rho >= mb * 2^e * f >= 0.5 * 2^e >= 1 > tau (tau ~ 20*eps)
+        return :fail
+    elseif tau > zero(T) && T(e + 1) <= log2(tau)
+        # rho <= 2 * 2^e * f <= 2^(e+1) <= 2^log2(tau) = tau proven purely in
+        # exponent space, without relying on Float64 exp2 representation
+        return :pass
+    elseif e <= -1021
+        # For e <= -1021 at least one of the interval endpoints
+        # mb*2^e*f, (2mb)*2^e*f falls below the normal range (min endpoint
+        # 0.5*(1/sqrt2)*2^e ~= 2^(e-1.5) < 2^-1022), where Float64 products
+        # are not outward-rounded and can round DOWN to tau even when the
+        # true rho exceeds tau. Without the exponent-space pass above we
+        # refuse instead of concluding.
+        return :unresolved
+    end
+    twoe = exp2(T(e))
+    lo = mb * twoe * f        # strict lower bound of rho (normal range)
+    hi = (mb + mb) * twoe * f # upper bound of rho (ratio_m in (0.5, 2))
+    if hi <= tau
+        return :pass
+    elseif lo > tau
+        return :fail
+    end
+    return :unresolved
+end
+
+"""
+    _relative2_jacobi_eigen!(A, V, w; tau_off=10*n*eps(T))
+
+Experimental dimension-two SPD-relative cyclic-Jacobi route. `A` is the
+2x2 symmetric working matrix, `V` the (identity-initialised) eigenvector
+matrix, `w` the eigenvalue buffer. Uses the relative off-diagonal gate
+`|A12|/sqrt(A11*A22) <= tau_off`; when the correlation is above `tau_off` it
+applies the bounded rotation of the reviewed design
+(`g = max(a,c,|b|)`, `d = (c/g - a/g)/2`, `beta = b/g`,
+`t = beta/(d + copysign(hypot(d,beta), d))`, equal diagonals -> `t = 1`,
+`c1 = 1/sqrt(1+t^2)`, `s = t*c1`). Refuses on nonfinite/nonpositive rotated
+diagonals, unresolved gates, or any non-2x2 / non-Float64 input.
+"""
+function _relative2_jacobi_eigen!(
+    A::AbstractMatrix{T},
+    V::AbstractMatrix{T},
+    w::AbstractVector{T};
+    tau_off::T = T(10) * T(2) * eps(T),
+) where {T}
+    n = size(A, 1)
+    n == 2 || throw(ArgumentError("experimental_relative2 is dimension-two only"))
+    T === Float64 || throw(ArgumentError("experimental_relative2 is Float64-only"))
+    size(A, 2) == 2 || throw(DimensionMismatch("A must be 2x2"))
+    length(w) == 2 || throw(DimensionMismatch("w must have length 2"))
+    a = A[1, 1]
+    b = A[1, 2]
+    c = A[2, 2]
+    gate = _relative2_offdiag_gate(a, b, c, tau_off)
+    if gate === :pass
+        w[1] = a
+        w[2] = c
+        return w, V
+    elseif gate === :unresolved
+        throw(ArgumentError("experimental_relative2: off-diagonal gate unresolved"))
+    end
+    g = max(a, c, abs(b))
+    g > zero(T) || throw(DomainError(g, "experimental_relative2: zero diagonal"))
+    d = (c / g - a / g) / 2
+    beta = b / g
+    t = iszero(d) ? one(T) : beta / (d + copysign(hypot(d, beta), d))
+    isfinite(t) || throw(ArgumentError("experimental_relative2: nonfinite rotation"))
+    # the gate demanded a rotation (correlation above tau) but the rotation
+    # angle underflowed to zero (e.g. |b| so small relative to d that b/g and
+    # t round to zero). Silently writing zero into the off-diagonal would
+    # report a diagonalization that V'AV does not achieve. Refuse instead.
+    if gate === :fail && iszero(t) && !iszero(b)
+        throw(ArgumentError("experimental_relative2: required rotation unrepresentable"))
+    end
+    c1 = one(T) / sqrt(one(T) + t * t)
+    s = t * c1
+    app = a - t * b
+    aqq = c + t * b
+    (isfinite(app) && isfinite(aqq) && app > zero(T) && aqq > zero(T)) ||
+        throw(ArgumentError("experimental_relative2: nonfinite/nonpositive rotated diagonal"))
+    A[1, 1] = app
+    A[2, 2] = aqq
+    A[1, 2] = zero(T)
+    A[2, 1] = zero(T)
+    v11, v12 = V[1, 1], V[1, 2]
+    v21, v22 = V[2, 1], V[2, 2]
+    V[1, 1] = c1 * v11 - s * v12
+    V[1, 2] = s * v11 + c1 * v12
+    V[2, 1] = c1 * v21 - s * v22
+    V[2, 2] = s * v21 + c1 * v22
+    w[1] = app
+    w[2] = aqq
+    return w, V
+end

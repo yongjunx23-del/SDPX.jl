@@ -15,9 +15,11 @@ julia --project=docs -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'
 julia --project=docs docs/make.jl
 ```
 
-## Active implementation & handover plan
+## Active scientific-core implementation plan
 
-`HANDOVER.md` is the consolidated roadmap and engineering handover document. It unifies all prior implementation plans and details the architecture, zero-allocation breakthrough, and next steps.
+[`design/SCIENTIFIC_CORE_ROADMAP.md`](design/SCIENTIFIC_CORE_ROADMAP.md) is the single current R0–R6 execution plan. It records qualified work, unresolved gates, cross-solver/precision diagnostics, implementation packages, and acceptance criteria. No full R0–R6 stage is closed.
+
+The obsolete root and mirrored handover documents have been removed from the active tree; their historical contents remain recoverable from Git. Numerical evidence, failure records, and independent mathematical contracts are preserved.
 
 ## Frozen design contracts
 

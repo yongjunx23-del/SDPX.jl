@@ -153,10 +153,16 @@ end
     values::AbstractVector,
     route::Symbol,
 )
-    route === :setup_jacobi || throw(ArgumentError(
+    if route === :setup_jacobi
+        return _jacobi_eigen!(A, V, values)
+    elseif route === :experimental_relative2
+        # experimental dimension-two Float64-only SPD-relative route; all
+        # other shapes/types refuse below (no fallback is permitted).
+        return _relative2_jacobi_eigen!(A, V, values)
+    end
+    throw(ArgumentError(
         "PSD NT eigensolver route $(repr(route)) is unavailable; no fallback is permitted",
     ))
-    return _jacobi_eigen!(A, V, values)
 end
 
 @inline function _psd_nt_close(A::AbstractMatrix{T}, B::AbstractMatrix, n::Int) where {T}
@@ -165,7 +171,12 @@ end
     @inbounds for j in 1:n, i in 1:n
         aij = T(A[i, j])
         bij = T(B[i, j])
+        # NaN comparisons can leave the maxima unchanged; Inf <= Inf can
+        # otherwise accept an invalid inverse. Nonfinite arithmetic is not
+        # evidence that a same-precision orientation identity holds.
+        (isfinite(aij) && isfinite(bij)) || return false
         rij = abs(aij - bij)
+        isfinite(rij) || return false
         residual = rij > residual ? rij : residual
         aa = abs(aij)
         ab = abs(bij)
@@ -176,7 +187,8 @@ end
     # certificate tolerance.  The factor covers the three eigensolver/
     # congruence stages used to construct P and Pinv; final Newton equations
     # and original-coordinate certificates remain independently verified.
-    return residual <= eps(T) * scale * T(10000 * n)
+    tolerance = eps(T) * scale * T(10000 * n)
+    return isfinite(tolerance) && residual <= tolerance
 end
 
 """In-place unpivoted Cholesky `L` with `L*L' = X` (lower factor stored in

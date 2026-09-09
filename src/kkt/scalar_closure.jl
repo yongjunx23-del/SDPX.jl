@@ -4,8 +4,12 @@
 #    The homogeneous self-dual scalar recovery solves
 #
 #        D * d_tau = N
-#        D = kappa + tau * eta_u
-#        N = rhs.tau_kappa - tau * (rhs.homogeneous_gap + eta_w)
+#        D = kappa - tau * eta_u
+#        N = rhs.tau_kappa - tau * (rhs.homogeneous_gap - eta_w)
+#
+#    In the standard interior PSD-metric case, D>0 analytically. The
+#    numerical classifications below do not establish algebraic rank:
+#    an unresolved denominator requires a certified direction or failure.
 #
 #    D=0 with N=0 describes a compatible rank-zero scalar closure: d_tau is
 #    a gauge coordinate and the five-equation system has a family of valid

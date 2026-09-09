@@ -383,7 +383,10 @@ function owned_arithmetic_copy(
 )
     precision_bits >= 2 ||
         throw(ArgumentError("BigFloat copy requires precision_bits >= 2, got $precision_bits"))
-    return BigFloat(value; precision=precision_bits)
+    # Same-precision BigFloat construction may share its mutable MPFR buffer.
+    # The existing owned-scalar helper copies those limbs without changing the
+    # explicitly requested precision or the conversion's rounding semantics.
+    return _coo_owned_scalar(BigFloat(value; precision=precision_bits))
 end
 
 """

@@ -40,7 +40,9 @@ original coordinates: all three contain the recovered optimum, only `y`
 contains a normalized primal-infeasibility ray, and `x`/`s` contain a
 normalized dual-infeasibility ray.  The `hsd_*` buffers preserve the exact
 canonical homogeneous point which produced the status, so callers can load
-it into a fresh state and invoke the strict verifier a second time.
+it into a fresh state and invoke the strict verifier a second time. For a
+normalized certificate candidate, these buffers and tau/kappa/mu retain the
+certified gauge rather than the unchanged live Newton state's gauge.
 
 For a verified terminal Newton trial, the result owns the trial buffers while
 the mutable input state is restored to its last runtime-consistent accepted
@@ -94,17 +96,26 @@ end
     terminal_alpha::T,
     x_original::Vector{T},
     s_original::Vector{T},
-    y_original::Vector{T},
+    y_original::Vector{T};
+    verified_candidate=nothing,
 ) where {T}
-    base = state.base
-    _product_hsd_residual!(state)
-    normalized_residual = status === ProductHSDOptimal ?
-        _product_hsd_recovered_residual(state) : hsd_normalized_residual(base)
+    verified_candidate === nothing && _product_hsd_residual!(state)
+    base = verified_candidate === nothing ? state.base : verified_candidate
+    normalized_residual = if verified_candidate !== nothing
+        # Retain the exact gauge that passed the unchanged verifier, including
+        # for subnormal live tau. The live Newton iterate is not rescaled.
+        _cert_normalized_residual(base)
+    elseif status === ProductHSDOptimal
+        _product_hsd_recovered_residual(state)
+    else
+        hsd_normalized_residual(base)
+    end
+    copy_vector = verified_candidate === nothing ? copy : _owned_certificate_vector
     return ProductHSDSolveResult{T}(
         status,
         reason,
         last_step,
-        base.record.iterations,
+        state.base.record.iterations,
         product_hsd_factor_count(state),
         terminal_alpha,
         base.tau,
@@ -112,12 +123,12 @@ end
         base.mu,
         normalized_residual,
         state.tau_collapse_recoveries,
-        copy(x_original),
-        copy(s_original),
-        copy(y_original),
-        copy(base.x),
-        copy(base.s),
-        copy(base.y),
+        copy_vector(x_original),
+        copy_vector(s_original),
+        copy_vector(y_original),
+        copy_vector(base.x),
+        copy_vector(base.s),
+        copy_vector(base.y),
     )
 end
 
@@ -161,6 +172,20 @@ function _product_hsd_verified_result(
             state, ProductHSDOptimal, reason, last_step, terminal_alpha,
             x_original, s_original, y_original,
         )
+    end
+    if check_optimal && isfinite(base.tau) && zero(T) < base.tau <= tau_floor &&
+       isfinite(base.mu / base.tau / base.tau) &&
+       zero(T) <= base.mu / base.tau / base.tau <= tol * T(1 + base.nu)
+        candidate = _normalized_optimality_candidate(base)
+        if candidate !== nothing && verify_optimal!(
+            canonical, candidate, x_original, s_original, y_original; tol=tol,
+        )
+            timings.certification_seconds += Float64(time_ns() - t_cert) * 1.0e-9
+            return _product_hsd_make_result(
+                state, ProductHSDOptimal, reason, last_step, terminal_alpha,
+                x_original, s_original, y_original; verified_candidate=candidate,
+            )
+        end
     end
     ray_probe_ready = !(state.symmetric_core isa FixedTraceQ3CoreWorkspace) ||
                       _product_hsd_tau_collapsed(base, tol)

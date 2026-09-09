@@ -7,12 +7,14 @@ include("cone_algebra.jl")
 include("cones/symmetric/SymmetricCones.jl")
 include("cones/nonsymmetric/dense3.jl")
 include("cones/exponential.jl")
+include("cones/exp_logarithmic.jl")
 include("cones/power.jl")
 # Internal Phase-3 nonsymmetric references. The line search is
 # production-shaped and allocation-free for fixed-width arithmetic; the full
 # Newton routine is deliberately a cold, independent sign/direction oracle.
 include("cones/nonsymmetric/linesearch3.jl")
 include("cones/nonsymmetric/types.jl")
+include("cones/nonsymmetric/exact_spd3.jl")
 include("cones/nonsymmetric/conjugate3.jl")
 include("cones/nonsymmetric/scaling3.jl")
 include("cones/nonsymmetric/corrector3.jl")
@@ -53,6 +55,7 @@ include("memory_utils.jl")
 include("frontend/solve_options.jl")
 include("midend/resolve_options.jl")
 include("public/settings.jl")
+include("hsd/factor_pair_admission.jl")
 include("public/outputs.jl")
 include("kernels/api.jl")
 include("kernels/generic.jl")
@@ -64,7 +67,10 @@ include("blas_backend.jl")
 include("factor_cache/state.jl")
 include("factor_cache/requirements.jl")
 include("factor_cache/api.jl")
+include("factor_cache/symbolic_analysis_counter.jl")
 include("factor_cache/routes.jl")
+include("factor_cache/session_symbolic_lease.jl")
+include("types/execution_context.jl")
 include("kkt_route.jl")
 include("kkt/system.jl")
 include("kkt/scalar_closure.jl")
@@ -76,6 +82,10 @@ include("kkt/factor_receipt.jl")
 include("hsd/phase_timings.jl")
 include("factor_cache/structure_cache.jl")
 include("kkt/symmetric_core.jl")
+# Thin INTERNAL EXPERIMENTAL sparse-core wrapper (R3 bounded).  Included
+# after `kkt/symmetric_core.jl` because the wrapper constructor consumes
+# `SymmetricCorePattern`; it is not part of any public/native route.
+include("factor_cache/routes/experimental_sparse_core.jl")
 include("kkt/expanded_quasidefinite.jl")
 include("kkt/psd_panels.jl")
 include("kkt/reduced_schur.jl")
@@ -118,6 +128,7 @@ include("pipeline/timing.jl")
 include("stagnation.jl")
 include("kernels/mixed_precision_kkt.jl")
 include("kernels/sparse_coo.jl")
+include("kernels/constraint_contractions.jl")
 include("sparse_la.jl")
 include("nullspace.jl")
 include("chordal.jl")
@@ -128,8 +139,21 @@ include("spectrum.jl")
 include("frontend/high_level_solve.jl")
 include("performance_trace.jl")
 include("public/result.jl")
+# R0-P4 opt-in half-Power factor-pair backend: reviewed arithmetic ported into
+# an internal package namespace (design step 4).  These modules are internal
+# implementation details; they are not exported and they do not change the
+# default dense-metric route.  Independent research oracles stay in
+# validation/scientific_core/.
+include("hsd/factor_pair/factor_preserving_affine.jl")
+include("hsd/factor_pair/native_factor_affine_certificate.jl")
+include("hsd/factor_pair/half_power_native_corrector.jl")
+include("hsd/factor_pair/factor_combined_epoch.jl")
+include("hsd/factor_pair/native_half_pair.jl")
+include("hsd/factor_pair/factor_pair_hsd.jl")
+
 include("hsd/native_hsd_public.jl")
 include("public/optimize.jl")
+include("accuracy_contract.jl")
 include("entrypoint_bridge.jl")
 include("moi_wrapper.jl")
 
@@ -139,9 +163,23 @@ include("moi_wrapper.jl")
 export optimize!, execution_plan
 export status, value, dual, dual_slack
 export primal_objective, dual_objective
+export objective_value, dual_objective_value
+export primal_residual, dual_residual, relative_gap
+export iterations, solve_time
+export is_optimal, is_primal_infeasible, is_dual_infeasible
+export primal_status, dual_status, termination_status
+export num_variables, num_constraints
+export variable_by_name, constraint_by_name, variable_names, constraint_names
 export certificate, diagnostics, iteration_history, performance_trace
 export Optimizer
 export clear_structure_cache!, set_structure_cache_enabled!
+export symbolic_analysis_count, symbolic_analysis_counts, symbolic_analysis_delta
+export NonsymmetricBackendChoice, NativeNonsymmetricBackend
+export ExperimentalHalfPowerFactorPairBackend, UnsupportedBackendError
+export AccuracyContract, AccuracyClass, UnsupportedAccuracyContext
+export AccuracyVerified, AccuracyUnsupported, AccuracyNumericalFailure
+export AccuracyInfrastructureFailure
+export accuracy_contract, accuracy_class
 
 # Symmetric-cone algebra (Subagent I) lives in the nested module
 # `SymmetricCones` (Nonnegative / SOC / PSDTriangle kernels). It is not part of

@@ -1,29 +1,23 @@
 #=====================================================================#
-#    Exponential-cone primal/dual degree-3 barrier oracle.
+#    Exponential-cone membership and public degree-3 barrier interface.
 #
-#    K_exp = { (x, y, z) : y * exp(x / y) <= z, y > 0 }
-#           ∪ { (x, 0, z) : x <= 0, z >= 0 }
-#
-#    Primal 3-logarithmically-homogeneous self-concordant barrier:
-#        f(x, y, z) = -log(z - y*exp(x/y)) - log(y) - log(z)
-#
-#    Evaluation uses rho = exp(log(y)+x/y-log(z)) and delta = 1-rho,
-#    avoiding direct formation of exp(x/y).  The exact map
-#        L(u,v,w) = (u-v,-u,w)
-#    sends the dual exponential cone to the primal cone, so the dual
-#    barrier and derivatives are F o L, L'grad(F), and L'H L.
+#    Membership uses the logarithmic cone inequality without forming exp(x/y).
+#    The production barrier, gradient and Hessian below delegate to the
+#    proved logarithmic LHSCB in exp_logarithmic.jl.  The linear dual map is
+#    retained only for the public pulled-back dual-oracle compatibility API;
+#    nonsymmetric scaling uses the actual Fenchel inverse.
 #=====================================================================#
 
 const EXPONENTIAL_BARRIER_DEGREE = 3
 
 @inline _exp_finite3(x, y, z) = isfinite(x) && isfinite(y) && isfinite(z)
 
-# MultiFloats deliberately does not provide `Base.expm1`.  The generic branch
-# therefore evaluates the cancellation-sensitive small-argument regime with a
-# type-native Taylor recurrence and uses `exp(x)-1` only away from zero.  The
-# fixed bound is a fail-safe; normal convergence stops when the target type can
-# no longer distinguish the next partial sum.  All state is scalar/isbits for
-# fixed-width arithmetic.
+@inline _nonsymmetric_stable_fma(a::Float16,b::Float16,c::Float16) = fma(a,b,c)
+@inline _nonsymmetric_stable_fma(a::Float32,b::Float32,c::Float32) = fma(a,b,c)
+@inline _nonsymmetric_stable_fma(a::Float64,b::Float64,c::Float64) = fma(a,b,c)
+@inline _nonsymmetric_stable_fma(a::BigFloat,b::BigFloat,c::BigFloat) = fma(a,b,c)
+@inline _nonsymmetric_stable_fma(a,b,c) = a*b+c
+
 @inline _nonsymmetric_stable_expm1(x::Float16) = Base.expm1(x)
 @inline _nonsymmetric_stable_expm1(x::Float32) = Base.expm1(x)
 @inline _nonsymmetric_stable_expm1(x::Float64) = Base.expm1(x)
@@ -60,24 +54,31 @@ end
     return total
 end
 
+# Subtraction can destroy relative information when numerator << denominator:
+# e.g. Float64 numerator=3*2^-54, denominator=1 produces -1+2^-52, so log1p
+# returns log(2^-52), not log(3*2^-54). Keep the computed argument away from -1;
+# the bounds are exact binary constants, approximately operand ratios [1/2,2].
+@inline _nonsymmetric_log_ratio_uses_log1p(relative) =
+    isfinite(relative) && oftype(relative, -0.5) <= relative <= one(relative)
+
 @inline function _nonsymmetric_positive_log_ratio(numerator, denominator)
     relative = (numerator - denominator) / denominator
-    if isfinite(relative) && relative > -one(relative)
+    if _nonsymmetric_log_ratio_uses_log1p(relative)
         return _nonsymmetric_stable_log1p(relative)
     end
     return log(numerator) - log(denominator)
 end
 
-# The value and its arithmetic-work certificate deliberately travel together.
-# A small logarithm can be the result of subtracting two O(1) positive
-# quantities, so `abs(value)` alone is not a backward-error scale.  The first
-# branch records the work in `(numerator-denominator)/denominator`; the second
-# records the two logarithms whose difference is returned.
+# Value and arithmetic-work accounting deliberately use the same branch.
+# `abs(value)` alone misses cancellation. The first branch records the work
+# in `(numerator-denominator)/denominator`; the second records the two logs
+# whose difference is returned. These quantities alone are NOT a rigorous
+# transcendental-error or complete Phi-enclosure certificate.
 @inline function _nonsymmetric_positive_log_ratio_terms(
     numerator, denominator,
 )
     relative = (numerator - denominator) / denominator
-    if isfinite(relative) && relative > -one(relative)
+    if _nonsymmetric_log_ratio_uses_log1p(relative)
         value = _nonsymmetric_stable_log1p(relative)
         ratio = numerator / denominator
         arithmetic_work = abs(ratio) + one(ratio)
@@ -145,27 +146,6 @@ end
     return value
 end
 
-@inline function _exp_primal_terms(x, y, z)
-    _exp_finite3(x, y, z) || throw(ArgumentError(
-        "exponential-cone oracle requires finite coordinates",
-    ))
-    y > zero(y) && z > zero(z) || throw(ArgumentError(
-        "exponential-cone oracle requires y > 0 and z > 0",
-    ))
-    t = x / y
-    log_ratio = _exp_log_ratio(x, y, z)
-    margin_tolerance = _nonsymmetric_log_tolerance(log_ratio, zero(log_ratio))
-    isfinite(t) && isfinite(log_ratio) && log_ratio < -margin_tolerance ||
-        throw(ArgumentError(
-            "exponential-cone oracle requires a resolvable y*exp(x/y) < z gap",
-        ))
-    rho = exp(log_ratio)
-    delta = -_nonsymmetric_stable_expm1(log_ratio)
-    isfinite(rho) && delta > zero(delta) || throw(ArgumentError(
-        "exponential-cone oracle could not resolve a strict interior gap",
-    ))
-    return t, rho, delta
-end
 
 """
     exp_primal_residual(x, y, z)
@@ -235,15 +215,9 @@ function exp_primal_interior(x, y, z)
     return !isnan(log_ratio) && log_ratio < -tolerance
 end
 
-"""
-    exp_barrier(x, y, z)
-
-Value of the self-concordant barrier of the exponential cone at an
-interior point `(x, y, z)` (i.e. `y > 0` and `y*exp(x/y) < z`).
-"""
+"""The degree-three logarithmic barrier on the primal exponential cone."""
 function exp_primal_barrier(x, y, z)
-    _, _, delta = _exp_primal_terms(x, y, z)
-    return -log(delta) - log(y) - (one(z) + one(z)) * log(z)
+    return exp_logarithmic_barrier((x, y, z))
 end
 
 exp_barrier(x, y, z) = exp_primal_barrier(x, y, z)
@@ -254,27 +228,15 @@ exp_barrier(x, y, z) = exp_primal_barrier(x, y, z)
 Gradient of the exponential-cone barrier.
 """
 function exp_barrier_gradient(x, y, z)
-    t, rho, delta = _exp_primal_terms(x, y, z)
-    c = rho / delta
-    inv_y = inv(y)
-    inv_z = inv(z)
-    result = (
-        c * inv_y,
-        (c * (one(t) - t) - one(t)) * inv_y,
-        -(inv(delta) + one(delta)) * inv_z,
-    )
-    all(isfinite, result) || throw(ArgumentError(
-        "exponential-cone gradient is non-finite",
-    ))
-    return result
+    return _exp_logarithmic_gradient_values((x, y, z))
 end
 
 function exp_primal_gradient!(gradient, x, y, z)
     _require_dense3_vector(gradient, "gradient")
-    gx, gy, gz = exp_barrier_gradient(x, y, z)
-    gradient[1] = gx
-    gradient[2] = gy
-    gradient[3] = gz
+    values = _exp_logarithmic_gradient_values((x, y, z))
+    for i in 1:3
+        _owned_setindex!(gradient, i, values[i])
+    end
     return gradient
 end
 
@@ -323,46 +285,12 @@ end
 """
     exp_barrier_hessian!(H, x, y, z)
 
-In-place 3×3 Hessian of the exponential-cone barrier at interior point `(x, y, z)`.
+In-place 3×3 Hessian of the logarithmic exponential-cone barrier at interior point `(x, y, z)`.
 """
-@inline function _exp_primal_hessian_from_terms!(
-    hessian, t, rho, delta, y, z,
-)
-    c = rho / delta
-    c2 = c * c
-    inv_y = inv(y)
-    inv_z = inv(z)
-    inv_y2 = inv_y * inv_y
-    inv_z2 = inv_z * inv_z
-    inv_delta = inv(delta)
-    omt = one(t) - t
-    h11 = (c + c2) * inv_y2
-    h12 = (-c * t + c2 * omt) * inv_y2
-    h13 = -c * inv_delta * inv_y * inv_z
-    h22 = (c * t * t + c2 * omt * omt + one(t)) * inv_y2
-    h23 = -c * omt * inv_delta * inv_y * inv_z
-    h33 = (inv_delta * inv_delta + one(delta)) * inv_z2
-    all(isfinite, (h11, h12, h13, h22, h23, h33)) || throw(ArgumentError(
-        "exponential-cone Hessian is non-finite",
-    ))
-    hessian[1, 1] = h11
-    hessian[1, 2] = h12
-    hessian[1, 3] = h13
-    hessian[2, 1] = h12
-    hessian[2, 2] = h22
-    hessian[2, 3] = h23
-    hessian[3, 1] = h13
-    hessian[3, 2] = h23
-    hessian[3, 3] = h33
-    return hessian
-end
 
 function exp_primal_hessian!(hessian, x, y, z)
     _require_dense3_matrix(hessian, "hessian")
-    t, rho, delta = _exp_primal_terms(x, y, z)
-    return _exp_primal_hessian_from_terms!(
-        hessian, t, rho, delta, y, z,
-    )
+    return exp_logarithmic_hessian!(hessian, (x, y, z))
 end
 
 exp_barrier_hessian!(hessian, x, y, z) =
@@ -379,9 +307,9 @@ end
 function exp_dual_gradient!(gradient, u, v, w)
     _require_dense3_vector(gradient, "gradient")
     gu, gv, gw = exp_dual_gradient(u, v, w)
-    gradient[1] = gu
-    gradient[2] = gv
-    gradient[3] = gw
+    _owned_setindex!(gradient, 1, gu)
+    _owned_setindex!(gradient, 2, gv)
+    _owned_setindex!(gradient, 3, gw)
     return gradient
 end
 
@@ -399,15 +327,15 @@ function exp_dual_hessian!(hessian, u, v, w)
     h13 = hxz - hyz
     h22 = hxx
     h23 = -hxz
-    hessian[1, 1] = h11
-    hessian[1, 2] = h12
-    hessian[1, 3] = h13
-    hessian[2, 1] = h12
-    hessian[2, 2] = h22
-    hessian[2, 3] = h23
-    hessian[3, 1] = h13
-    hessian[3, 2] = h23
-    hessian[3, 3] = hzz
+    _owned_setindex!(hessian, CartesianIndex(1, 1), h11)
+    _owned_setindex!(hessian, CartesianIndex(1, 2), h12)
+    _owned_setindex!(hessian, CartesianIndex(1, 3), h13)
+    _owned_setindex!(hessian, CartesianIndex(2, 1), h12)
+    _owned_setindex!(hessian, CartesianIndex(2, 2), h22)
+    _owned_setindex!(hessian, CartesianIndex(2, 3), h23)
+    _owned_setindex!(hessian, CartesianIndex(3, 1), h13)
+    _owned_setindex!(hessian, CartesianIndex(3, 2), h23)
+    _owned_setindex!(hessian, CartesianIndex(3, 3), hzz)
     return hessian
 end
 

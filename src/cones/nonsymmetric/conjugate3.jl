@@ -134,32 +134,28 @@ end
 @inline function _ns_structural_hessian_factor!(
     factor, ::ExpConjugateTag, s1, s2, s3,
 )
-    t, rho, delta = _exp_primal_terms(s1, s2, s3)
-    rho > zero(rho) && delta > zero(delta) || return false
-    sqrt_rho = sqrt(rho)
-    A = rho + delta * delta
-    A > zero(A) || return false
-    sqrt_A_over_delta = sqrt(A / delta)
-    sqrt_rho_over_delta = sqrt_rho / delta
-    b11 = sqrt_rho_over_delta
-    b21 = sqrt_rho * (rho - t) / delta
-    b31 = -sqrt_rho_over_delta
-    b22 = sqrt_A_over_delta
-    b32 = -(rho / delta) / b22
-    b33 = sqrt((A + one(A)) / A)
-    _ns_conjugate_finite3(b11, b21, b31) &&
-        _ns_conjugate_finite3(b22, b32, b33) || return false
-
-    z = zero(s1)
-    factor[1, 1] = b11 / s2
-    factor[1, 2] = z
-    factor[1, 3] = z
-    factor[2, 1] = b21 / s2
-    factor[2, 2] = b22 / s2
-    factor[2, 3] = z
-    factor[3, 1] = b31 / s3
-    factor[3, 2] = b32 / s3
-    factor[3, 3] = b33 / s3
+    # This is the analytic Cholesky factor of the logarithmic Exp Hessian.
+    # Writing H=L*L' symbolically and substituting q=y/psi gives
+    #   L11=1/psi, L21=-(l-1)/psi, L31=-q/z,
+    #   L22=sqrt(1+q)/y, L32=-q/(z*sqrt(1+q)),
+    #   L33=sqrt(1+q/(1+q))/z.
+    # It avoids the nearly equal Schur-complement subtractions in a dense
+    # Cholesky, which are precisely the unstable operations at small psi.
+    y, z, l, psi = _exp_logarithmic_terms((s1, s2, s3))
+    q = y / psi
+    one_plus_q = one(q) + q
+    sqrt_one_plus_q = sqrt(one_plus_q)
+    l11 = inv(psi)
+    l21 = -(l - one(l)) * l11
+    l31 = -q / z
+    l22 = sqrt_one_plus_q / y
+    l32 = -q / (z * sqrt_one_plus_q)
+    l33 = sqrt(one(q) + q / one_plus_q) / z
+    entries = (l11, l21, l31, zero(s1), l22, l32, zero(s1), zero(s1), l33)
+    all(isfinite, entries) || return false
+    for i in 1:9
+        _store_owned_scalar!(factor, i, entries[i])
+    end
     return _ns_structural_factor_finite_lower(factor)
 end
 
@@ -228,63 +224,25 @@ end
     factor, ::ExpConjugateTag, s1::T, s2::T, s3::T,
 ) where {T}
     _ns_structural_factor_finite_lower(factor) || return false, T(Inf)
-    t, rho, delta = _exp_primal_terms(s1, s2, s3)
-    rho > zero(T) && delta > zero(T) || return false, T(Inf)
+    values = _exp_logarithmic_hessian_values((s1, s2, s3))
     gamma = _ns_structural_factor_gamma(T)
     isfinite(gamma) || return false, T(Inf)
     forcing = T(8) * gamma
-    sqrt_rho = sqrt(rho)
-    A = rho + delta * delta
-    b11 = s2 * factor[1, 1]
-    b21 = s2 * factor[2, 1]
-    b22 = s2 * factor[2, 2]
-    b31 = s3 * factor[3, 1]
-    b32 = s3 * factor[3, 2]
-    b33 = s3 * factor[3, 3]
     worst = zero(T)
-
-    lhs = delta * delta * b11 * b11
-    ok, error = _ns_structural_identity_error(
-        lhs - rho, abs(lhs) + abs(rho), forcing,
-    )
-    ok || return false, error
-    worst = max(worst, error)
-    lhs = delta * b21
-    rhs = sqrt_rho * (rho - t)
-    ok, error = _ns_structural_identity_error(
-        lhs - rhs,
-        abs(lhs) + abs(sqrt_rho * rho) + abs(sqrt_rho * t),
-        forcing,
-    )
-    ok || return false, error
-    worst = max(worst, error)
-    lhs = delta * b31
-    rhs = -sqrt_rho
-    ok, error = _ns_structural_identity_error(
-        lhs - rhs, abs(lhs) + abs(rhs), forcing,
-    )
-    ok || return false, error
-    worst = max(worst, error)
-    lhs = delta * b22 * b22
-    ok, error = _ns_structural_identity_error(
-        lhs - A, abs(lhs) + abs(A), forcing,
-    )
-    ok || return false, error
-    worst = max(worst, error)
-    lhs = delta * b22 * b32
-    rhs = -rho
-    ok, error = _ns_structural_identity_error(
-        lhs - rhs, abs(lhs) + abs(rhs), forcing,
-    )
-    ok || return false, error
-    worst = max(worst, error)
-    lhs = A * b33 * b33
-    residual = lhs - A - one(T)
-    ok, error = _ns_structural_identity_error(
-        residual, abs(lhs) + abs(A) + one(T), forcing,
-    )
-    ok || return false, error
-    return true, max(worst, error)
+    @inbounds for j in 1:3, i in 1:3
+        reconstructed = zero(T)
+        for k in 1:min(i,j)
+            reconstructed += factor[i,k] * factor[j,k]
+        end
+        expected = values[(j-1)*3+i]
+        ok, error = _ns_structural_identity_error(
+            reconstructed - expected,
+            abs(reconstructed) + abs(expected), forcing,
+        )
+        ok || return false, error
+        worst = max(worst, error)
+    end
+    return true, worst
 end
 
 @inline function _ns_structural_hessian_factor_certificate!(
@@ -725,12 +683,12 @@ end
     # off-diagonal entry differently.  Averaging those copies is not always
     # backward stable: near a cone face, changing the sensitive column by
     # half an ulp from the other solve can violate its otherwise tiny solve
-    # residual.  Preserve the historical midpoint when it certifies.  Only
-    # mutable BigFloat storage then enumerates the eight exact symmetric
-    # selections of the already-computed upper/lower entries.  Accept only a
-    # matrix whose three columns all pass the existing componentwise solve
-    # certificate and which is itself SPD.  This changes no tolerance and
-    # introduces no unverified regularization.
+    # residual. Preserve historical midpoint arithmetic and return behavior.
+    # BigFloat retains its eight upper/lower selections. Float64 now admits
+    # those same stored-entry selections only after ALL existing native gates
+    # and an additional exact stored-value SPD veto. Rounded Cholesky alone
+    # does not prove stored-matrix SPD; the new veto does not qualify the
+    # unchanged midpoint/BigFloat paths. No tolerance or regularization changes.
     upper12 = _coo_owned_scalar(inverse_hessian[1, 2])
     lower12 = _coo_owned_scalar(inverse_hessian[2, 1])
     upper13 = _coo_owned_scalar(inverse_hessian[1, 3])
@@ -738,7 +696,7 @@ end
     upper23 = _coo_owned_scalar(inverse_hessian[2, 3])
     lower23 = _coo_owned_scalar(inverse_hessian[3, 2])
     half = inv(o + o)
-    candidate_limit = T === BigFloat ? 8 : 0
+    candidate_limit = (T === BigFloat || T === Float64) ? 8 : 0
     @inbounds for candidate in 0:candidate_limit
         if iszero(candidate)
             # Preserve the historical midpoint whenever it remains fully
@@ -781,9 +739,16 @@ end
         # allocation-free factorization gate and does not impose a fragile
         # output-relative H*Hinv-I test on a strongly conditioned metric.
         zero_distinct!(rhs)
-        _ns_conjugate_spd_solve!(
+        if _ns_conjugate_spd_solve!(
             solution, inverse_hessian, rhs, workspace.factor,
-        ) && return true
+        )
+            # Verification-only exact arithmetic: no matrix entries are formed
+            # here, and a positive exact sign can never waive a native failure.
+            if T === Float64 && !iszero(candidate)
+                _ns_float64_exact_spd3_veto(inverse_hessian) || continue
+            end
+            return true
+        end
     end
     return false
 end
@@ -1066,33 +1031,6 @@ end
 end
 
 @inline function _ns_conjugate_gap_evaluation(
-    ::ExpConjugateTag, u::T, v::T, w::T, q::T,
-) where {T}
-    one_t = one(T)
-    one_minus_q = one_t - q
-    im = inv(one_minus_q)
-    phi0, phi0_arithmetic_work, phi0_kernel_work =
-        _exp_dual_log_ratio_terms(u, v, w)
-    log_one_plus_q = _nonsymmetric_stable_log1p(q)
-    q_over_one_minus_q = q * im
-    phi = phi0 + log_one_plus_q + q_over_one_minus_q
-    derivative = inv(one_t + q) + im * im
-    log_one_plus_kernel_work = abs(q) + abs(log_one_plus_q)
-    quotient_work = abs(q) * (one_t + abs(q)) * abs(im) * abs(im) +
-                    abs(q_over_one_minus_q)
-    summation_work = abs(phi0) + abs(log_one_plus_q) +
-                     abs(q_over_one_minus_q)
-    arithmetic_work =
-        phi0_arithmetic_work + quotient_work + summation_work
-    kernel_work = phi0_kernel_work + log_one_plus_kernel_work
-    work = arithmetic_work + kernel_work
-    roundoff = _ns_conjugate_phi_roundoff(
-        T, arithmetic_work, kernel_work,
-    )
-    return phi, derivative, work, roundoff
-end
-
-@inline function _ns_conjugate_gap_evaluation(
     tag::PowerConjugateTag{T}, u::T, v::T, w::T, delta::T,
 ) where {T}
     a = tag.alpha
@@ -1142,19 +1080,8 @@ end
 end
 
 @inline _ns_conjugate_gap_derivative_lower_bound(
-    ::ExpConjugateTag, ::Type{T},
-) where {T} = one(T) + one(T)
-
-@inline _ns_conjugate_gap_derivative_lower_bound(
     ::PowerConjugateTag, ::Type{T},
 ) where {T} = inv(one(T) + one(T))
-
-@inline function _ns_conjugate_gap_interval_derivative_lower_bound(
-    ::ExpConjugateTag, lower::T, upper::T,
-) where {T}
-    zero(T) <= lower <= upper < one(T) || return T(NaN)
-    return inv(one(T) + lower) + inv(one(T) - lower)^2
-end
 
 @inline function _ns_conjugate_gap_interval_derivative_lower_bound(
     tag::PowerConjugateTag{T}, lower::T, upper::T,
@@ -1363,50 +1290,6 @@ end
 
 @inline function _ns_conjugate_reconstruct!(
     workspace::NonsymmetricConjugateWorkspace{T},
-    ::ExpConjugateTag,
-    u::T, v::T, w::T, q::T,
-) where {T}
-    one_t = one(T)
-    inv_one_minus_q = inv(one_t - q)
-    c = (one_t - q) / q
-    t = (one_t - q * inv_one_minus_q) - v / u
-    s2 = -(one_t - q) / (q * u)
-    s1 = t * s2
-    s3 = (one_t + q) / (q * w)
-    rho = one_t - q
-    _ns_conjugate_finite3(s1, s2, s3) || return false
-    zero(T) < q < one_t && s2 > zero(T) && s3 > zero(T) || return false
-
-    identity1 = u * s2 + c
-    identity1_work = abs(u * s2) + abs(c)
-    z_factor = (one_t + q) / q
-    identity2 = w * s3 - z_factor
-    identity2_work = abs(w * s3) + abs(z_factor)
-    pairing = u * s1 + v * s2 + w * s3
-    pairing_work = abs(u * s1) + abs(v * s2) + abs(w * s3) + T(3)
-    _ns_conjugate_identity_gate(identity1, identity1_work) &&
-        _ns_conjugate_identity_gate(identity2, identity2_work) &&
-        _ns_conjugate_identity_gate(pairing - T(3), pairing_work) ||
-        return false
-
-    workspace.shadow[1] = s1
-    workspace.shadow[2] = s2
-    workspace.shadow[3] = s3
-    _exp_primal_hessian_from_terms!(
-        workspace.hessian, t, rho, q, s2, s3,
-    )
-
-    inv_s2 = inv(s2)
-    inv_s3 = inv(s3)
-    workspace.gradient[1] = c * inv_s2
-    workspace.gradient[2] =
-        (c * (one_t - t) - one_t) * inv_s2
-    workspace.gradient[3] = -(inv(q) + one_t) * inv_s3
-    return true
-end
-
-@inline function _ns_conjugate_reconstruct!(
-    workspace::NonsymmetricConjugateWorkspace{T},
     tag::PowerConjugateTag{T},
     u::T, v::T, w::T, delta::T,
 ) where {T}
@@ -1562,6 +1445,80 @@ function _ns_conjugate_shadow_hessian_candidate!(
         return _ns_conjugate_failure(
             workspace, NS_CONJUGATE_DUAL_NOT_INTERIOR, 0, 0, T(Inf),
         )
+
+    # The logarithmic Exp barrier has a distinct Fenchel conjugate.  Its
+    # monotone rho equation and Cartesian replay are implemented by the
+    # independently qualified kernel; do not route Exp through the former
+    # exp-gap normalized-gap identities below (which remain Power-only).
+    if tag isa ExpConjugateTag
+        inverse = try
+            exp_logarithmic_conjugate!(
+                workspace.shadow, (y1, y2, y3),
+                max_iterations=settings.max_iterations,
+            )
+        catch exception
+            (exception isa ArgumentError || exception isa DomainError) ||
+                rethrow(exception)
+            return _ns_conjugate_failure(
+                workspace, NS_CONJUGATE_BARRIER_FAILED, 0, 0, T(Inf),
+            )
+        end
+        s1, s2, s3 = workspace.shadow[1], workspace.shadow[2], workspace.shadow[3]
+        barrier_ok = try
+            exp_logarithmic_gradient!(workspace.gradient, (s1, s2, s3))
+            exp_logarithmic_hessian!(workspace.hessian, (s1, s2, s3))
+            true
+        catch exception
+            (exception isa ArgumentError || exception isa DomainError) ||
+                rethrow(exception)
+            false
+        end
+        barrier_ok || return _ns_conjugate_failure(
+            workspace, NS_CONJUGATE_BARRIER_FAILED,
+            inverse.iterations, 0, inverse.root_residual, inverse.root,
+        )
+        factor_built = try
+            _ns_structural_hessian_factor!(
+                workspace.hessian_factor, tag, s1, s2, s3,
+            )
+        catch exception
+            (exception isa ArgumentError || exception isa DomainError) ||
+                rethrow(exception)
+            false
+        end
+        factor_built || return _ns_conjugate_failure(
+            workspace, NS_CONJUGATE_FACTOR_FAILED,
+            inverse.iterations, 0, inverse.root_residual, inverse.root,
+        )
+        factor_ok, factor_error = try
+            _ns_structural_hessian_factor_certificate!(
+                workspace.hessian_factor, tag, s1, s2, s3,
+            )
+        catch exception
+            (exception isa ArgumentError || exception isa DomainError) ||
+                rethrow(exception)
+            false, T(Inf)
+        end
+        workspace.hessian_factor_error = factor_error
+        factor_ok || return _ns_conjugate_failure(
+            workspace, NS_CONJUGATE_FACTOR_MISMATCH,
+            inverse.iterations, 0, inverse.root_residual, inverse.root,
+        )
+        workspace.hessian_factor_valid = true
+        _ns_conjugate_cartesian_diagnostic!(workspace, y1, y2, y3) ||
+            return _ns_conjugate_failure(
+                workspace, NS_CONJUGATE_HESSIAN_NOT_SPD,
+                inverse.iterations, 0, inverse.root_residual, inverse.root,
+            )
+        workspace.gap = inverse.root / (one(T) + inverse.root)
+        workspace.valid = true
+        workspace.inverse_valid = false
+        return _ns_conjugate_result(
+            T, NS_CONJUGATE_SUCCESS, NS_CONJUGATE_CONVERGED,
+            inverse.iterations, 0, inverse.root_residual, inverse.root,
+            workspace.last_seed_mode, false,
+        )
+    end
 
     if tag isa PowerConjugateTag && iszero(y3)
         workspace.last_seed_mode = workspace.accepted_valid ?

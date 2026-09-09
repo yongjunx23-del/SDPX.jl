@@ -1,5 +1,11 @@
 # Frozen Canonical Conic Form & HSD Convention (v2)
 
+> Historical scope: the canonical primal/dual pair is retained, but the HSD
+> scalar convention below is not the standard embedding. For experimental
+> standard-v1 execution, use
+> [STANDARD_CONIC_MATH_V1.md](STANDARD_CONIC_MATH_V1.md). The frozen text is
+> preserved below for interpretation of legacy receipts.
+
 **Status: FROZEN.** This document fixes the mathematical conventions that all
 SDPX and PMP2SDP work must follow. Do not change it without a Lead review.
 Authoritative for: canonical conic form, HSD equations, certificates, and the

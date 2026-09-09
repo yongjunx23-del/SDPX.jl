@@ -5,14 +5,16 @@
 
 SDPX.jl is a high-performance Julia product-cone optimizer for Linear Programming (LP), Second-Order Cone Programming (SOCP), Rotated Second-Order Cone (RSOC), Semidefinite Programming (SDP), Exponential Cone (EXP), and Power Cone models.
 
-A single unified Homogeneous Self-Dual (HSD) predictor-corrector engine powers all formulations with original-coordinate mathematical certificates, extended-precision arithmetic, column-owned parallel Schur assembly, and zero hot-loop allocations.
+A unified Homogeneous Self-Dual (HSD) predictor-corrector engine combines original-coordinate mathematical certificates, extended-precision arithmetic, and column-owned parallel Schur assembly.
+
+**Qualification is ongoing.** See the [scientific-core R0–R6 roadmap](docs/design/SCIENTIFIC_CORE_ROADMAP.md) for the current implementation plan, supported experimental scopes, and unresolved numerical failures. Local kernel or frozen-Newton checks do not establish full production qualification.
 
 ## Features
 
-- **Unified Conic Engine**: LP, SOCP, RSOC, SDP, EXP, Power, and arbitrary mixed product cones run through a single homogeneous interior-point state machine ($Ax + s - b\tau = 0$, $A^\top y + c\tau = 0$, $-c^\top x - b^\top y + \kappa = 0$).
+- **Unified Conic Engine**: LP, SOCP, RSOC, SDP, EXP, Power, and arbitrary mixed product cones run through a single homogeneous interior-point state machine ($Ax + s - b\tau = 0$, $A^\top y + c\tau = 0$, $c^\top x + b^\top y + \kappa = 0$).
 - **Multi-Precision Support**:
   - `Float64` (standard hardware precision, BLAS/LAPACK accelerated)
-  - `Float64x2` (Double64 ~106 bits) and `Float64x4` (QuadFloat ~212 bits) via [MultiFloats.jl](https://github.com/JuliaArrays/MultiFloats.jl) and [MultiFloatLinearAlgebra.jl](https://github.com/yongjunx23-del/MultiFloatLinearAlgebra.jl)
+  - `Float64x2` (105 bits) and `Float64x4` (209 bits in MultiFloats 3.2.6) via [MultiFloats.jl](https://github.com/JuliaArrays/MultiFloats.jl) and [MultiFloatLinearAlgebra.jl](https://github.com/yongjunx23-del/MultiFloatLinearAlgebra.jl)
   - `BigFloat` (arbitrary-precision MPFR) via [BigFloatLinearAlgebra.jl](https://github.com/yongjunx23-del/BigFloatLinearAlgebra.jl)
 - **High-Performance Architecture**:
   - Compact $(nr+1)$-dimensional Schur border for tall symmetric systems

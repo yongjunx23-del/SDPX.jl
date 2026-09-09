@@ -358,9 +358,14 @@ function factorize!(
         if cache.factor === nothing
             # First numeric factor: also performs the sole symbolic analysis.
             # `check=false` reports failure via `issuccess` without throwing.
+            # R2-A: this public `ldlt` call IS the real CHOLMOD
+            # symbolic-analysis entry for the symmetric-core path.  Count
+            # it in the process-local provider counter (numeric `ldlt!`
+            # refactors below reuse the retained object and must not count).
             factor = ldlt(Symmetric(cache.factor_view, :L); check=false)
             cache.factor = factor
             cache.symbolic_count += 1
+            _record_symbolic_analysis!(:cholmod)
         else
             # Same pattern: reuse the same CHOLMOD factor object.  Public
             # `ldlt!` throws `ZeroPivotException` on a genuine zero pivot;

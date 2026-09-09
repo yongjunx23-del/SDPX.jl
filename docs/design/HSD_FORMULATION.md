@@ -1,5 +1,9 @@
 # HSD_FORMULATION.md — Homogeneous Self-Dual (Nesterov–Todd) formulation for SDPX
 
+> Historical legacy formulation, retained for old receipts. Its relative
+> kappa sign is not the standard embedding. The experimental standard-v1
+> engine follows [STANDARD_CONIC_MATH_V1.md](STANDARD_CONIC_MATH_V1.md).
+
 **Status:** Math / design reference (Subagent B). Companion to
 `CANONICAL_FORM.md` (frozen). This document is **not** production code; it is
 the review-ready derivation of the HSD formulation used by the SDPX conic

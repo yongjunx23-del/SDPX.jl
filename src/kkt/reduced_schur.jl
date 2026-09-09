@@ -4,7 +4,7 @@
 #
 #   primal : A*dx + ds - b*dτ = rP
 #   dual   : A'*dy + c*dτ     = rD
-#   gap    : -c'*dx - b'*dy + dκ = rG
+#   gap    : c'*dx + b'*dy + dκ = rG
 #   cone   : ds + H*dy        = rC
 #   tau    : κ*dτ + τ*dκ      = rT
 #
@@ -478,10 +478,10 @@ function assemble_sparse_schur_operator!(
         schur_nzval[plan.border_column_slots[column]] =
             system.c[column] - atb[column]
         schur_nzval[plan.border_row_slots[column]] =
-            system.c[column] + atb[column]
+            -(system.c[column] + atb[column])
     end
     schur_nzval[plan.border_diagonal_slot] =
-        system.kappa / system.tau - btHb
+        system.kappa / system.tau + btHb
     all(isfinite, session.schur.nzval) ||
         return _invalidate_sparse_schur_factor!(
             session, SPARSE_SCHUR_FACTOR_FAILED,
@@ -589,10 +589,10 @@ function assemble_sparse_schur_operator_reference!(
         schur_nzval[plan.border_column_slots[column]] =
             system.c[column] - atb[column]
         schur_nzval[plan.border_row_slots[column]] =
-            system.c[column] + atb[column]
+            -(system.c[column] + atb[column])
     end
     schur_nzval[plan.border_diagonal_slot] =
-        system.kappa / system.tau - btHb
+        system.kappa / system.tau + btHb
     all(isfinite, session.schur.nzval) ||
         return _invalidate_sparse_schur_factor!(
             session, SPARSE_SCHUR_FACTOR_FAILED,
@@ -678,7 +678,7 @@ function assemble_sparse_schur_rhs!(
     @inbounds for column in 1:n
         session.rhs[column] = system.rhs.dual_affine[column] - at_delta[column]
     end
-    session.rhs[n + 1] = -system.rhs.homogeneous_gap - bt_delta +
+    session.rhs[n + 1] = -system.rhs.homogeneous_gap + bt_delta +
                          system.rhs.tau_kappa / system.tau
     all(isfinite, session.rhs) || begin
         _invalidate_sparse_schur_factor!(

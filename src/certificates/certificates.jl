@@ -65,13 +65,15 @@ end
 # sr = −A v (m-vector)
 function _at_negmul(A::SparseMatrixCSC{T}, v::AbstractVector) where {T}
     m = size(A, 1)
-    out = zeros(T, m)
+    out = alloc_zeros(T, m)
     _at_negmul!(out, A, v)
     return out
 end
 
 function _at_negmul!(out::AbstractVector{T}, A::SparseMatrixCSC{T}, v::AbstractVector) where {T}
-    fill!(out, zero(T))
+    # `out` has independently owned, initialized entries. A failed ray check
+    # returns this scratch to Newton, which writes its coordinates in place.
+    zero_owned!(out)
     n = size(A, 2)
     vals = nonzeros(A)
     rows = rowvals(A)
@@ -95,6 +97,10 @@ end
 # complementarity, `mu`, and the data-normalized residual from the raw
 # iterate fields with file-local loops only.  The mathematics mirror the
 # frozen HSD equations; no function defined outside this file participates.
+# Shared by canonical candidate verification and the public original-coordinate audit.
+@inline _certificate_objective_scale(p::T,d::T) where {T} =
+    max(one(T),(abs(p)+abs(d))/T(2))
+
 @inline function _cert_maxabs(v::AbstractVector{T}) where {T}
     a = zero(T)
     @inbounds for i in eachindex(v)
@@ -114,7 +120,59 @@ end
     return maximum(row_sums; init=zero(T))
 end
 
-function _cert_residual!(state::HSDState{T}) where {T}
+# Certificate-only normalized point. Problem data are borrowed read-only;
+# all iterate and verifier scratch vectors are independently owned. No factor,
+# Newton direction, runtime cone state or route workspace is copied.
+mutable struct _OptimalityCandidate{T<:AbstractFloat}
+    A::SparseMatrixCSC{T,Int}
+    b::Vector{T}
+    c::Vector{T}
+    n::Int
+    m::Int
+    nu::Int
+    x::Vector{T}
+    y::Vector{T}
+    s::Vector{T}
+    tau::T
+    kappa::T
+    rP::Vector{T}
+    rD::Vector{T}
+    rG::T
+    complementarity::T
+    mu::T
+    xt::Vector{T}
+    yt::Vector{T}
+    st::Vector{T}
+end
+
+_owned_certificate_vector(v::AbstractVector{T}) where {T} =
+    copy_owned!(alloc_zeros(T,length(v)),v)
+
+function _normalized_optimality_candidate(base::HSDState{T}) where {T<:AbstractFloat}
+    isfinite(base.tau) && base.tau > zero(T) &&
+        isfinite(base.kappa) && base.kappa >= zero(T) || return nothing
+    n,m=base.n,base.m
+    size(base.A)==(m,n) && length(base.b)==m && length(base.c)==n &&
+        length(base.x)==n && length(base.s)==m && length(base.y)==m || return nothing
+    _all_finite(base.x) && _all_finite(base.s) && _all_finite(base.y) || return nothing
+    scale=inv(base.tau)
+    multiply=isfinite(scale)
+    x=alloc_zeros(T,n); s=alloc_zeros(T,m); y=alloc_zeros(T,m)
+    for (out,input) in ((x,base.x),(s,base.s),(y,base.y))
+        for i in eachindex(out)
+            value=multiply ? input[i]*scale : input[i]/base.tau
+            isfinite(value) || return nothing
+            _store_owned_scalar!(out,i,value)
+        end
+    end
+    kappa=multiply ? base.kappa*scale : base.kappa/base.tau
+    isfinite(kappa) || return nothing
+    return _OptimalityCandidate{T}(base.A,base.b,base.c,n,m,base.nu,
+        x,y,s,one(T),kappa,alloc_zeros(T,m),alloc_zeros(T,n),
+        zero(T),zero(T),zero(T),alloc_zeros(T,n),alloc_zeros(T,m),alloc_zeros(T,m))
+end
+
+function _cert_residual!(state::Union{HSDState{T},_OptimalityCandidate{T}}) where {T}
     A, x, y, svec = state.A, state.x, state.y, state.s
     b, c, tau, kappa = state.b, state.c, state.tau, state.kappa
     m, n = state.m, state.n
@@ -134,13 +192,13 @@ function _cert_residual!(state::HSDState{T}) where {T}
         end
         state.rD[j] = acc
     end
-    state.rG = dot(c, x) * -one(T) - dot(b, y) + kappa
+    state.rG = dot(c, x) + dot(b, y) + kappa
     state.complementarity = dot(svec, y) + tau * kappa
     state.mu = state.complementarity / T(state.nu + 1)
     return nothing
 end
 
-function _cert_normalized_residual(state::HSDState{T}) where {T}
+function _cert_normalized_residual(state::Union{HSDState{T},_OptimalityCandidate{T}}) where {T}
     p = zero(T)
     @inbounds for k in 1:state.m
         v = state.rP[k]
@@ -329,10 +387,16 @@ function in_canonical_cone(canonical::CanonicalConicProgram, v;
     tol = convert(T, tol)
     _valid_certificate_tolerance(tol) || return false
     _all_finite(v) || return false
+    return _in_canonical_blocks(layout_blocks(canonical.cone_layout), v, tol, dual)
+end
+
+# CanonicalConicProgram deliberately erases the layout storage type. Dispatch
+# once on that storage, rather than dynamically boxing each block and view.
+Base.@noinline function _in_canonical_blocks(blocks, v, tol, dual::Bool)
     # Certificate checks stay serial: they short-circuit on the first invalid
     # block, allocate no task/atomic state, and avoid compiling a second
     # threaded copy of every cone-membership kernel for each arithmetic type.
-    for block in layout_blocks(canonical.cone_layout)
+    for block in blocks
         off = block_offset(block); len = block_length(block)
         _block_in_cone(block, view(v, off:(off + len - 1)), tol, dual) || return false
     end
@@ -346,14 +410,14 @@ end
     verify_optimal!(canonical, state, x_orig, s_orig, y_orig; tol) -> Bool
 
 Verify an optimality certificate in original coordinates: the normalized
-HSD residual (`A x + s − b τ`, `A'y + c τ`, `−c'x − b'y + κ`) is small,
+HSD residual (`A x + s − b τ`, `A'y + c τ`, `c'x + b'y + κ`) is small,
 `s/τ ∈ K` and `y/τ ∈ K*` blockwise, and the complementarity `μ` is small.
 On success, writes the original-coordinate recoveries `x_orig = x/τ`,
 `s_orig = s/τ`, `y_orig = y/τ` (pushed through the reconstruction chain)
 and returns `true`.
 """
 function verify_optimal!(
-    canonical::CanonicalConicProgram, state::HSDState,
+    canonical::CanonicalConicProgram, state::Union{HSDState,_OptimalityCandidate},
     x_orig, s_orig, y_orig; tol=nothing,
 )
     T = eltype(state.x)
@@ -390,6 +454,18 @@ function verify_optimal!(
     end
     _all_finite(state.xt) && _all_finite(state.st) && _all_finite(state.yt) ||
         return false
+    # The combined embedding scale also contains ||A|| and can hide a failed
+    # recovered affine equation. Require data-scaled canonical equations
+    # independently; reconstruction and the public audit remain authoritative.
+    primal_scale=max(one(T),_cert_maxabs(state.xt),_cert_maxabs(state.st),_cert_maxabs(canonical.b))
+    dual_scale=max(one(T),_cert_maxabs(state.yt),_cert_maxabs(canonical.c))
+    recovered_primal_residual=_cert_maxabs(state.rP)*inv_tau
+    recovered_dual_residual=_cert_maxabs(state.rD)*inv_tau
+    primal_limit=tol*primal_scale;dual_limit=tol*dual_scale
+    all(isfinite,(primal_scale,dual_scale,recovered_primal_residual,
+                  recovered_dual_residual,primal_limit,dual_limit)) || return false
+    recovered_primal_residual <= primal_limit || return false
+    recovered_dual_residual <= dual_limit || return false
     in_canonical_cone(canonical, state.st; dual=false, tol=tol) || return false
     in_canonical_cone(canonical, state.yt; dual=true, tol=tol) || return false
     # Check the recovered primal-dual gap explicitly.  The old absolute-mu
@@ -398,7 +474,10 @@ function verify_optimal!(
     primal_objective = dot(canonical_objective(canonical), state.xt)
     dual_pairing = dot(canonical_rhs(canonical), state.yt)
     isfinite(primal_objective) && isfinite(dual_pairing) || return false
-    gap_scale = one(T) + abs(primal_objective) + abs(dual_pairing)
+    chain=canonical.reconstruction_chain
+    original_primal=chain.objective_sign*primal_objective+chain.objective_constant
+    original_dual=-chain.objective_sign*dual_pairing+chain.objective_constant
+    gap_scale = _certificate_objective_scale(original_primal,original_dual)
     isfinite(gap_scale) || return false
     gap_residual = abs(primal_objective + dual_pairing)
     gap_limit = tol * gap_scale

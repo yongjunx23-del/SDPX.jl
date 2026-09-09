@@ -617,11 +617,23 @@ end
     return runtime_result
 end
 
+@inline function _runtime_ns_optional_corrector_failure(reason)
+    return reason === NS_CORRECTOR_THIRD_DERIVATIVE_FAILED ||
+           reason === NS_CORRECTOR_EULER_MISMATCH ||
+           reason === NS_CORRECTOR_LINEAR_SOLVE_MISMATCH ||
+           reason === NS_CORRECTOR_THIRD_SYMMETRY_MISMATCH ||
+           reason === NS_CORRECTOR_PROJECTION_TOO_LARGE
+end
+
 @inline function _runtime_ns_corrector_result!(
     runtime::_NonsymmetricProductRuntime{T},
     block::_NonsymmetricRuntimeBlock{T},
     result::NonsymmetricCorrectorResult{T},
 ) where {T}
+    optional_failure = result.status === NS_CORRECTOR_FAILED &&
+                       _runtime_ns_optional_corrector_failure(result.reason) &&
+                       runtime.valid &&
+                       _runtime_ns_live_block_preflight(block, runtime.last_mu)
     status = result.status === NS_CORRECTOR_FAILED ?
              NS_RUNTIME_FAILED : NS_RUNTIME_READY
     reason = status === NS_RUNTIME_READY ?
@@ -640,8 +652,54 @@ end
         result.euler_error,
     )
     runtime.last_nonsymmetric = runtime_result
-    status === NS_RUNTIME_READY || (runtime.valid = false)
+    # A higher-order check is optional only after the live pair/metric has
+    # been independently recertified.  Never turn an unrelated failure into
+    # a usable runtime, and never mark the failed corrector as converged here.
+    optional_failure || status === NS_RUNTIME_READY || (runtime.valid = false)
     return runtime_result
+end
+
+@inline function _runtime_ns_affine_fallback_certified(runtime)
+    result = runtime.last_nonsymmetric
+    return runtime.valid && result.status === NS_RUNTIME_FAILED &&
+           result.reason === NS_RUNTIME_CORRECTOR_FAILED &&
+           _runtime_ns_optional_corrector_failure(result.corrector_reason)
+end
+
+@inline function _runtime_ns_affine_fallback_reported(runtime)
+    result = runtime.last_nonsymmetric
+    return runtime.valid && result.status === NS_RUNTIME_READY &&
+           result.reason === NS_RUNTIME_CONVERGED &&
+           _runtime_ns_optional_corrector_failure(result.corrector_reason)
+end
+
+@inline function _runtime_ns_restore_affine_fallback_report!(
+    runtime, failed_result,
+)
+    runtime.last_nonsymmetric = NonsymmetricRuntimeResult(
+        NS_RUNTIME_READY,
+        NS_RUNTIME_CONVERGED,
+        failed_result.block_offset,
+        failed_result.initialization_reason,
+        failed_result.scaling_status,
+        failed_result.scaling_reason,
+        failed_result.fallback_reason,
+        failed_result.conjugate_reason,
+        failed_result.corrector_reason,
+        failed_result.step_status,
+        failed_result.value,
+    )
+    return runtime.last_nonsymmetric
+end
+
+function _runtime_ns_affine_fallback!(runtime, h, s, y)
+    _runtime_ns_affine_fallback_certified(runtime) || return false
+    failed_result = runtime.last_nonsymmetric
+    # Rebuild every cone RHS from the frozen affine equations.  This also
+    # revalidates pair ownership for every block before the fallback is used.
+    affine_shift!(runtime, h, s, y)
+    _runtime_ns_restore_affine_fallback_report!(runtime, failed_result)
+    return true
 end
 
 @inline function _runtime_ns_step_result!(
@@ -1308,6 +1366,7 @@ end
         block.direction,
     )
     runtime_result = _runtime_ns_corrector_result!(runtime, block, result)
+    result.status === NS_CORRECTOR_FAILED && return false
     runtime_result.status === NS_RUNTIME_READY || return false
 
     workspace = block.corrector
@@ -1378,11 +1437,14 @@ function corrector_shift!(
                 (s, y), "exponential corrector pair does not match scaling",
             ))
         end
-        _runtime_ns_corrector_shift!(
+        if !_runtime_ns_corrector_shift!(
             runtime, h, ds_aff, dy_aff, target, block,
-        ) || throw(DomainError(
-            runtime.last_nonsymmetric, "exponential corrector shift failed",
-        ))
+        )
+            _runtime_ns_affine_fallback!(runtime, h, s, y) || throw(DomainError(
+                runtime.last_nonsymmetric, "exponential corrector shift failed",
+            ))
+            return h
+        end
     end
     for block in runtime.power
         if !_runtime_ns_pair_matches(block, s, y)
@@ -1391,11 +1453,14 @@ function corrector_shift!(
                 (s, y), "power corrector pair does not match scaling",
             ))
         end
-        _runtime_ns_corrector_shift!(
+        if !_runtime_ns_corrector_shift!(
             runtime, h, ds_aff, dy_aff, target, block,
-        ) || throw(DomainError(
-            runtime.last_nonsymmetric, "power corrector shift failed",
-        ))
+        )
+            _runtime_ns_affine_fallback!(runtime, h, s, y) || throw(DomainError(
+                runtime.last_nonsymmetric, "power corrector shift failed",
+            ))
+            return h
+        end
     end
     _runtime_finite(h) || throw(DomainError(h, "corrector shift is non-finite"))
     return h

@@ -1,15 +1,13 @@
 # Robust expanded HSD route.
 #
-# The frozen HSD signs make the exactly condensed operator nonsymmetric:
+# Standard-HSD scalar elimination gives the nonsymmetric operator:
 #
 #   [ 0    A'    c ]
 #   [ A    -H   -b ]
-#   [-c'   -b'  -κ/τ].
+#   [ c'    b'  -κ/τ].
 #
-# In particular the (x,tau) blocks are skew adjoints. The symmetric matrix in
-# the architecture review was schematic; forcing its row-three sign would
-# change the frozen homogeneous-gap equation. We therefore solve the exact
-# operator with generic pivoted LU, while certifying the expected inertia of
+# The (y,tau) blocks are skew adjoints. We solve this exact operator
+# with generic pivoted LU, while certifying the expected inertia of
 # its signed-regularized symmetric quasidefinite companion. The companion
 # inertia is an additional protection only when its block-congruence premises
 # are proven for the current `NewtonSystem` (typed `InertiaApplicability`
@@ -689,14 +687,14 @@ function assemble_expanded_kkt!(
             K[n + i, j] = value
         end
         K[j, tau_index] = system.c[j]
-        K[tau_index, j] = -system.c[j]
+        K[tau_index, j] = system.c[j]
     end
     @inbounds for j in 1:m
         for i in 1:m
             K[n + i, n + j] = -system.cone.operator[i, j]
         end
         K[n + j, tau_index] = -system.b[j]
-        K[tau_index, n + j] = -system.b[j]
+        K[tau_index, n + j] = system.b[j]
     end
     K[tau_index, tau_index] = -system.kappa / system.tau
     all(isfinite, K) || throw(ArgumentError(
@@ -726,9 +724,9 @@ function expanded_rhs!(
 end
 
 function _freeze_symmetric_companion!(session::ExpandedKKTSession)
-    # The symmetric companion mirrors the upper x/tau coupling. It is an
-    # inertia diagnostic for signed regularization, not the solved frozen-sign
-    # operator (whose lower x/tau block has the opposite sign). It is frozen
+    # Mirror the upper tau couplings. The standard operator's y/tau pair
+    # has opposite signs; the companion is an inertia diagnostic, not the
+    # solved unregularized operator. It is frozen
     # into the inertia-factor LDL workspace (standard route) or the
     # provider-owned inertia scratch (provider route); no long-lived duplicate
     # dimension-by-dimension matrix is retained.
@@ -736,7 +734,7 @@ function _freeze_symmetric_companion!(session::ExpandedKKTSession)
         session.inertia_factor.schur : session.provider_inertia_matrix
     copy_owned!(target, session.regularized)
     tau_index = session.dimension
-    @inbounds for index in 1:session.n
+    @inbounds for index in 1:(session.n + session.m)
         target[tau_index, index] = target[index, tau_index]
     end
     return target

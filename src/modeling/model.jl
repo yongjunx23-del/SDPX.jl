@@ -180,3 +180,49 @@ function Base.show(io::IO, block::VariableBlockRef{T}) where {T}
 end
 
 Base.show(io::IO, entry::VariableEntry) = print(io, entry.ref)
+
+"""
+    variable_by_name(model, name) -> VariableBlockRef
+
+Return the variable block registered as `name`. Throws `ArgumentError` when
+`name` is not registered in `model`.
+"""
+function variable_by_name(model::Model{T}, name::Symbol) where {T}
+    index = get(model.block_names, name, nothing)
+    index === nothing && throw(ArgumentError(
+        "variable block $(repr(name)) not found",
+    ))
+    return VariableBlockRef{T}(model, index)
+end
+
+"""
+    constraint_by_name(model, name) -> ConstraintBlockRef
+
+Return the constraint block registered as `name`. Throws `ArgumentError`
+when `name` is not registered in `model`.
+"""
+function constraint_by_name(model::Model{T}, name::Symbol) where {T}
+    index = get(model.constraint_names, name, nothing)
+    index === nothing && throw(ArgumentError(
+        "constraint block $(repr(name)) not found",
+    ))
+    return ConstraintBlockRef{T}(model, index)
+end
+
+"""
+    variable_names(model) -> Vector{Symbol}
+
+Names of registered variable blocks in registration order.
+"""
+function variable_names(model::Model)
+    return [record.name for record in model.variable_blocks]
+end
+
+"""
+    constraint_names(model) -> Vector{Symbol}
+
+Names of registered constraint blocks in registration order.
+"""
+function constraint_names(model::Model)
+    return [record.name for record in model.constraint_blocks]
+end

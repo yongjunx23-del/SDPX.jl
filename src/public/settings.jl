@@ -175,10 +175,33 @@ Fields
   integrator may apply the value through the existing
   `SDPX.set_blas_threads!` seam without this file mutating global state.
 
+- `nonsymmetric_backend::NonsymmetricBackendChoice` — whole-epoch backend
+  selector.  `NativeNonsymmetricBackend` (default) is exactly the historical
+  behavior.  `ExperimentalHalfPowerFactorPairBackend` is an explicit opt-in
+  research backend (R0-P4) for Float64 orthant + exactly-half-Power products;
+  it fails closed with a typed refusal until its implementation is admitted,
+  and it never falls back to the default path.  It selects a backend, not a
+  cone metric preference; `scaling`, `engine`, `provider`, `kkt_route` and
+  `formulation` keep their own meanings.
+
 Construct with `Settings{Float64}()` / `Settings{Float64}(...)`, or
 `Settings(model; ...)` where the model is any object whose element type
 selects the arithmetic (`SDPProblem`, `ConicProblem`, `Model`).
 """
+
+"""
+    NonsymmetricBackendChoice
+
+Whole-epoch backend selector for nonsymmetric cone products.  The default
+`NativeNonsymmetricBackend` is the historical dense-metric runtime; the
+experimental value is an explicit, fail-closed opt-in and never implies a
+fallback to the default path.
+"""
+@enum NonsymmetricBackendChoice::UInt8 begin
+    NativeNonsymmetricBackend = 0
+    ExperimentalHalfPowerFactorPairBackend = 1
+end
+
 struct Settings{T<:AbstractFloat}
     tolerances::Tolerances{T}
     limits::Limits
@@ -201,6 +224,9 @@ struct Settings{T<:AbstractFloat}
     # exactly to the historical numeric path; predictor=:classic is the
     # historical predictor policy.
     iteration_knobs::NamedTuple
+    # Whole-epoch nonsymmetric backend selector (R0-P4).  `Native...` keeps
+    # every historical consumer; the experimental value is fail-closed.
+    nonsymmetric_backend::NonsymmetricBackendChoice
 
     function Settings{T}(
         tolerances::Tolerances{T},
@@ -221,6 +247,7 @@ struct Settings{T<:AbstractFloat}
         certification::Bool,
         blas_threads::Union{Nothing,Int},
         iteration_knobs::NamedTuple,
+        nonsymmetric_backend::NonsymmetricBackendChoice=NativeNonsymmetricBackend,
     ) where {T<:AbstractFloat}
         _validate_engine(engine)
         _validate_symbol(scaling, (:auto, :none, :equilibrate), "scaling")
@@ -247,6 +274,9 @@ struct Settings{T<:AbstractFloat}
             throw(ArgumentError("verbosity must be nonnegative, got $verbosity"))
         blas_threads === nothing || blas_threads >= 1 ||
             throw(ArgumentError("blas_threads must be nothing or at least 1, got $blas_threads"))
+        nonsymmetric_backend isa NonsymmetricBackendChoice || throw(ArgumentError(
+            "nonsymmetric_backend must be a NonsymmetricBackendChoice, got $(typeof(nonsymmetric_backend))",
+        ))
         return new{T}(
             tolerances,
             limits,
@@ -266,6 +296,7 @@ struct Settings{T<:AbstractFloat}
             certification,
             blas_threads,
             iteration_knobs,
+            nonsymmetric_backend,
         )
     end
 end
@@ -377,6 +408,7 @@ function Settings(
     iteration_knobs::NamedTuple=(;
         sigma=nothing, beta=nothing, gamma=nothing, predictor=:classic,
     ),
+    nonsymmetric_backend::NonsymmetricBackendChoice=NativeNonsymmetricBackend,
 ) where {T<:AbstractFloat}
     _validate_symbol(equilibration, (:off, :ruiz), "equilibration")
     equilibration === :ruiz && !(scaling in (:auto, :equilibrate)) &&
@@ -402,6 +434,7 @@ function Settings(
         certification,
         blas_threads,
         iteration_knobs,
+        nonsymmetric_backend,
     )
 end
 

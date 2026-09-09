@@ -176,6 +176,6 @@ unavailable certificate data fail closed.
 - No hidden PSD lift or legacy-engine retry is permitted.
 
 Current implementation work and release gates are tracked in
-[`HANDOVER.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/HANDOVER.md).
+[`SCIENTIFIC_CORE_ROADMAP.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/design/SCIENTIFIC_CORE_ROADMAP.md).
 Legacy solver sources have been retired; compatibility entrypoints adapt to the
 same product-HSD engine.

@@ -1,12 +1,12 @@
 #=====================================================================#
-#    Production homogeneous self-dual (HSD) state (Subagent H).
+#    Production homogeneous self-dual (HSD) state: standard v1.
 #
-#    Implements EXACTLY the frozen HSD spec of
-#    docs/design/CANONICAL_FORM.md (corrected gap sign):
+#    Mathematical authority: docs/design/STANDARD_CONIC_MATH_V1.md.
+#    Legacy negative-relative-kappa receipts belong to their pinned commits.
 #
 #        (P)   A x  + s − b·τ      = 0
 #        (D)   A' y + c·τ          = 0
-#        (G)   −c'x − b'y + κ      = 0
+#        (G)    c'x + b'y + κ      = 0
 #        s ∈ K,  y ∈ K*,  τ ≥ 0,  κ ≥ 0
 #        μ = (s'y + τ·κ) / (ν + 1)
 #
@@ -25,6 +25,8 @@
 #    DenseSchurCholeskyCache; SOC/PSD cone scaling slots in by extending
 #    the per-block scaling described in `_nonnegative` and the doc §4).
 #=====================================================================#
+
+const HSD_FORMULATION_VERSION = :standard_hsd_v1
 
 """
     HSDStepCode
@@ -553,10 +555,10 @@ end
 """
     hsd_gap_residual(state) -> T
 
-The frozen gap residual `rG = −c'x − b'y + κ`.
+Standard-HSD v1 gap residual `rG = c'x + b'y + κ`.
 """
 function hsd_gap_residual(state::HSDState{T}) where {T}
-    return dot(state.c, state.x) * -one(T) - dot(state.b, state.y) + state.kappa
+    return dot(state.c, state.x) + dot(state.b, state.y) + state.kappa
 end
 
 """

@@ -301,24 +301,30 @@ end
 
 function _bridge_sdp_solve(
     problem::SDPProblem{T},
-    options::SolverOptions{T},
+    options::SolverOptions{T};
+    execution_context::Union{Nothing,NativeExecutionContext}=nothing,
 ) where {T<:AbstractFloat}
     model = _bridge_sdp_model(problem)
     settings = _bridge_settings(options)
-    result = optimize!(
+    # Internal seam: the public `optimize!` signature stays unchanged and
+    # lease-free; the prepared session threads the session-local symbolic
+    # lease through the common internal implementation only.
+    result = _optimize_impl(
         model;
         settings=settings,
         outputs=_bridge_outputs(settings.diagnostics !== :none),
+        execution_context=execution_context,
     )
     return _bridge_sdp_result(problem, model, result)
 end
 
 function _bridge_sdp_solve(
     problem::SDPProblem{T},
-    options::SolveOptions,
+    options::SolveOptions;
+    execution_context::Union{Nothing,NativeExecutionContext}=nothing,
 ) where {T<:AbstractFloat}
     resolved = resolve_solve_options(T, options)
-    return _bridge_sdp_solve(problem, resolved.core)
+    return _bridge_sdp_solve(problem, resolved.core; execution_context=execution_context)
 end
 
 """Qualified compatibility entrypoint backed exclusively by product HSD."""

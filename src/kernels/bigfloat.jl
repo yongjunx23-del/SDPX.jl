@@ -54,13 +54,14 @@ through.  Bitstype element types keep plain assignment.
 @inline _owned_setindex!(destination, index, value) =
     (destination[index] = value; destination)
 @inline function _owned_setindex!(
-    destination::AbstractArray{BigFloat}, index, value::BigFloat,
+    destination::AbstractArray{BigFloat}, index, value,
 )
     # A fresh MPFR object via mutable_copy: the slot is replaced (breaking
     # any fill!/zeros shared-object aliasing) and never aliases the source
     # (so later in-place provider mutation of the source cannot write
     # through).
-    destination[index] = MA.mutable_copy(value)
+    owned = value isa BigFloat ? value : BigFloat(value)
+    destination[index] = MA.mutable_copy(owned)
     return destination
 end
 

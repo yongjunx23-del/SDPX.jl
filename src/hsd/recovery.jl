@@ -23,8 +23,8 @@ end
 
 """
 Restore one tau-collapsed trajectory to a centered KKT-derived interior point.
-The sign audit found no family-specific border defect: the frozen gap row is
-`-c'dx-b'dy+dκ=-rG` (gap coefficient `+1` on dκ) and the scalar row is
+The standard-v1 gap row is
+`c'dx+b'dy+dκ=-rG` (gap coefficient `+1` on dκ) and the scalar row is
 `κ*dτ+τ*dκ=scalar_rhs`; `_product_hsd_recover_dkappa!` evaluates candidates
 against both equations. Mixed-sign orthants are already canonicalized to the
 same nonnegative pairing, and PSD svec uses the Euclidean trace pairing.

@@ -236,6 +236,8 @@ function _product_cone_hsd_state(
         sigma=nothing, beta=nothing, gamma=nothing, predictor=:classic,
     ),
     allow_expanded_bordered_fallback::Bool=true,
+    execution_context::Union{Nothing,NativeExecutionContext}=nothing,
+    prepared_key_context::Union{Nothing,NamedTuple}=nothing,
 ) where {T<:AbstractFloat,R<:AbstractFactorCache{T}}
     if kkt_route === :sparse_augmented
         prepare_symmetric_core = true
@@ -256,10 +258,13 @@ function _product_cone_hsd_state(
         prepared_core = _prepare_product_hsd_symmetric_core(
             base;
             fixed_trace_plan,
+            workers=schur_threads,
             precision_bits=Int(symmetric_core_precision_bits),
             memory_limit_bytes=symmetric_core_memory_limit,
             current_rss_bytes=symmetric_core_current_rss,
             regularization=symmetric_core_regularization,
+            execution_context=execution_context,
+            prepared_key_context=prepared_key_context,
         )
         # Review slice 1: attach the timing accumulator to the generic core
         # workspace so `_core_refine!` writes its wall bucket without any
@@ -468,11 +473,14 @@ known (fail closed otherwise) and are checked before any allocation.
 function _prepare_product_hsd_symmetric_core(
     base::HSDState{T,R};
     fixed_trace_plan=nothing,
+    workers::Integer=1,
     precision_bits::Integer=0,
     memory_limit_bytes::Union{Nothing,Integer}=nothing,
     current_rss_bytes::Union{Nothing,Integer}=nothing,
     regularization::Real=0.0,
     symbolic_epoch::Integer=0,
+    execution_context::Union{Nothing,NativeExecutionContext}=nothing,
+    prepared_key_context::Union{Nothing,NamedTuple}=nothing,
 ) where {T<:AbstractFloat,R<:AbstractFactorCache{T}}
     m = base.m
     n = base.n
@@ -538,7 +546,7 @@ function _prepare_product_hsd_symmetric_core(
         base.A, base.b, base.c, cone, one(T), one(T), rhs,
     )
     fixed_trace_plan === nothing || return prepare_fixed_trace_q3_core_state(
-        system, fixed_trace_plan,
+        system, fixed_trace_plan; workers=workers,
     )
     return prepare_symmetric_core_state(
         system,
@@ -551,6 +559,8 @@ function _prepare_product_hsd_symmetric_core(
         regularization;
         symbolic_epoch=symbolic_epoch,
         take_cone_ownership=true,
+        execution_context=execution_context,
+        prepared_key_context=prepared_key_context,
     )
 end
 
@@ -1105,9 +1115,9 @@ Base.@noinline function _product_hsd_form_schur_border!(
         has_nonsymmetric && (atgb += state.ns_at_g_b[j])
         cj = base.workspace.cr[j]
         _store_owned_scalar!(base.workspace.qr, j, cj - atgb)
-        _store_owned_scalar!(base.workspace.rvec, j, base.tau * (cj + atgb))
+        _store_owned_scalar!(base.workspace.rvec, j, -base.tau * (cj + atgb))
     end
-    return base.kappa - base.tau * bgb
+    return base.kappa + base.tau * bgb
 end
 
 @inline function _product_bordered_gamma(
@@ -1548,7 +1558,7 @@ inverse.
             K, CartesianIndex(local_row, dtau_column), base.b[row],
         )
         _store_owned_scalar!(
-            K, CartesianIndex(gap_row, dy_col0 + local_row), -base.b[row],
+            K, CartesianIndex(gap_row, dy_col0 + local_row), base.b[row],
         )
     end
 
@@ -1618,10 +1628,10 @@ inverse.
             base.workspace.cr[j] - dj,
         )
         _store_owned_scalar!(
-            K, CartesianIndex(gap_row, j), -(base.workspace.cr[j] + dj),
+            K, CartesianIndex(gap_row, j), base.workspace.cr[j] + dj,
         )
     end
-    _store_owned_scalar!(K, CartesianIndex(gap_row, dtau_column), beta)
+    _store_owned_scalar!(K, CartesianIndex(gap_row, dtau_column), -beta)
     _store_owned_scalar!(K, CartesianIndex(gap_row, dkappa_column), one(T))
     _store_owned_scalar!(K, CartesianIndex(scalar_row, dtau_column), base.kappa)
     _store_owned_scalar!(K, CartesianIndex(scalar_row, dkappa_column), base.tau)
@@ -1700,7 +1710,7 @@ end
     @inbounds for row in 1:base.m
         zeta += base.b[row] * state.g_output[row]
     end
-    rhs[gap_row] = -base.rG + zeta
+    rhs[gap_row] = -base.rG - zeta
     rhs[scalar_row] = scalar_rhs
     if !_product_hsd_vector_finite(rhs)
         workspace.last_reason = COUPLED_ASSEMBLY_NONFINITE
@@ -1864,7 +1874,7 @@ condition-aware backward gate validates the composed `Theta*G` map.
     @inbounds for k in 1:base.m
         bd += base.b[k] * base.dy[k]
     end
-    base.dkappa = -base.rG + cd + bd
+    base.dkappa = -base.rG - cd - bd
     isfinite(base.dkappa) || return false
     # A highly conditioned PSD scaling may make the conservative a-priori
     # round-trip condition cap inconclusive even when the actual map is
@@ -1903,6 +1913,157 @@ end
     iszero(work) && return iszero(residual) ? zero(T) : T(Inf)
     value = abs(residual) / work
     return isfinite(value) ? value : T(Inf)
+end
+
+# Shared acceptance terms (production gate + internal experimental route).
+#
+# Each helper below owns one five-equation residual/work formula with the
+# production mathematics verbatim; both the production gate above and the
+# standalone experimental predicate pass plain vectors, so the accepted
+# arithmetic lives in exactly one place.  No tolerance, threshold, work
+# definition, or accumulation order differs between the two callers.  The
+# conditioned-family machinery (SOC bounds, PSD/exp/power maps,
+# fixed-trace/conditioned terminal paths) is NOT shared: those branches
+# stay in the production gate, and experimental admission rejects every
+# cone family whose production conditions need runtime scaling context.
+
+"""Row-sum scale of `[A I -b]` plus direction/RHS norms (primal group).
+
+Verbatim the non-fixed-trace scale computation of
+`_product_hsd_primal_newton_stats`: `row_sums` is the caller scratch (the
+production gate passes its `g_input`)."""
+@inline function _shared_primal_scale(
+    A::SparseMatrixCSC{T,Int}, b::AbstractVector{T},
+    ds::AbstractVector{T}, dx::AbstractVector{T}, dtau::T,
+    rP::AbstractVector{T}, row_sums::AbstractVector{T},
+) where {T<:AbstractFloat}
+    m = length(b)
+    n = length(dx)
+    direction_norm = abs(dtau)
+    rhs_norm = zero(T)
+    @inbounds for k in 1:m
+        _store_owned_scalar!(
+            row_sums, k, one(T) + abs(b[k]),
+        )
+        rhs_norm = max(rhs_norm, abs(rP[k]))
+        direction_norm = max(direction_norm, abs(ds[k]))
+    end
+    @inbounds for j in 1:n
+        direction_norm = max(direction_norm, abs(dx[j]))
+        for ptr in nzrange(A, j)
+            row_sums[A.rowval[ptr]] += abs(A.nzval[ptr])
+        end
+    end
+    operator_norm = zero(T)
+    @inbounds for k in 1:m
+        operator_norm = max(operator_norm, row_sums[k])
+    end
+    return operator_norm, direction_norm, rhs_norm
+end
+
+"""Primal residuals from the shared scale (componentwise + group terms)."""
+@inline function _shared_primal_residuals(
+    ax::AbstractVector{T}, ds::AbstractVector{T}, b::AbstractVector{T},
+    dtau::T, rP::AbstractVector{T},
+    operator_norm::T, direction_norm::T, rhs_norm::T,
+) where {T<:AbstractFloat}
+    m = length(b)
+    componentwise = true
+    group_residual = zero(T)
+    @inbounds for k in 1:m
+        bdt = b[k] * dtau
+        residual = ax[k] + ds[k] - bdt + rP[k]
+        local_work = abs(ax[k]) + abs(ds[k]) + abs(bdt) + abs(rP[k])
+        componentwise &= _product_hsd_newton_close(residual, local_work)
+        group_residual = max(group_residual, abs(residual))
+    end
+    group_work = operator_norm * direction_norm + rhs_norm
+    return componentwise, group_residual, group_work
+end
+
+"""Dual residuals with columnwise muladd accumulation (verbatim)."""
+@inline function _shared_dual_stats(
+    A::SparseMatrixCSC{T,Int}, c::AbstractVector{T}, dy::AbstractVector{T},
+    dtau::T, rD::AbstractVector{T},
+) where {T<:AbstractFloat}
+    m = length(dy)
+    n = length(c)
+    componentwise = true
+    group_residual = zero(T)
+    rhs_norm = zero(T)
+    direction_norm = abs(dtau)
+    @inbounds for k in 1:m
+        direction_norm = max(direction_norm, abs(dy[k]))
+    end
+    operator_norm = zero(T)
+    @inbounds for j in 1:n
+        cdt = c[j] * dtau
+        residual = muladd(c[j], dtau, rD[j])
+        local_work = abs(rD[j]) + abs(cdt)
+        row_norm = abs(c[j])
+        for ptr in nzrange(A, j)
+            term = A.nzval[ptr] * dy[A.rowval[ptr]]
+            residual = muladd(
+                A.nzval[ptr], dy[A.rowval[ptr]], residual,
+            )
+            local_work += abs(term)
+            row_norm += abs(A.nzval[ptr])
+        end
+        componentwise &= _product_hsd_newton_close(residual, local_work)
+        group_residual = max(group_residual, abs(residual))
+        rhs_norm = max(rhs_norm, abs(rD[j]))
+        operator_norm = max(operator_norm, row_norm)
+    end
+    group_work = operator_norm * direction_norm + rhs_norm
+    return componentwise, group_residual, group_work
+end
+
+"""Gap residual/work with production muladd accumulation (verbatim)."""
+@inline function _shared_gap_terms(
+    rG::T, dkappa::T,
+    c::AbstractVector{T}, dx::AbstractVector{T},
+    b::AbstractVector{T}, dy::AbstractVector{T},
+) where {T<:AbstractFloat}
+    gap_residual = rG + dkappa
+    gap_work = abs(rG) + abs(dkappa)
+    @inbounds for j in 1:length(dx)
+        term = c[j] * dx[j]
+        gap_residual = muladd(c[j], dx[j], gap_residual)
+        gap_work += abs(term)
+    end
+    @inbounds for k in 1:length(dy)
+        term = b[k] * dy[k]
+        gap_residual = muladd(b[k], dy[k], gap_residual)
+        gap_work += abs(term)
+    end
+    return gap_residual, gap_work
+end
+
+"""Scalar residual/work with production muladd accumulation (verbatim)."""
+@inline function _shared_scalar_terms(
+    kappa::T, dtau::T, tau::T, dkappa::T, scalar_rhs::T,
+) where {T<:AbstractFloat}
+    kdt = kappa * dtau
+    tdk = tau * dkappa
+    residual = muladd(
+        kappa, dtau,
+        muladd(tau, dkappa, -scalar_rhs),
+    )
+    work = abs(kdt) + abs(tdk) + abs(scalar_rhs)
+    return residual, work
+end
+
+"""Orthant cone row residual/work: exact scalar map work (verbatim).
+
+One scalar orthant row: `map_work = |theta|*|dy|`,
+`residual = ds + e - h`, `work = |ds| + map_work + |h|`."""
+@inline function _shared_orthant_row_terms(
+    ds_k::T, e_k::T, h_k::T, theta_k::T, dy_k::T,
+) where {T<:AbstractFloat}
+    map_work = abs(theta_k) * abs(dy_k)
+    residual = ds_k + e_k - h_k
+    work = abs(ds_k) + map_work + abs(h_k)
+    return residual, work
 end
 
 """Check the fixed-trace HKM cone equation using its exact Newton operator."""
@@ -1958,9 +2119,12 @@ a conservative congruence bound; the zero-work case remains exact.
     @inbounds for block in runtime.orthant
         for i in 1:block.dim
             k = block.offset + i - 1
-            map_work = abs(block.state.theta[i]) * abs(base.dy[k])
-            residual = base.ds[k] + base.e[k] - state.h[k]
-            work = abs(base.ds[k]) + map_work + abs(state.h[k])
+            # Scalar orthant row terms are the shared helper (same
+            # formulas, same order).
+            residual, work = _shared_orthant_row_terms(
+                base.ds[k], base.e[k], state.h[k],
+                block.state.theta[i], base.dy[k],
+            )
             componentwise &= _product_hsd_cone_newton_close(residual, work)
             group_residual = max(group_residual, abs(residual))
             group_work = max(group_work, work)
@@ -2180,72 +2344,28 @@ end
         end
     else
         # `g_input` is dead after recovery's authoritative solve and is reused as
-        # a preallocated row-sum scratch for ||[A I -b]||_infinity.
-        @inbounds for k in 1:base.m
-            _store_owned_scalar!(
-                state.g_input, k, one(T) + abs(base.b[k]),
-            )
-            rhs_norm = max(rhs_norm, abs(base.rP[k]))
-            direction_norm = max(
-                direction_norm, abs(base.ds[k]),
-            )
-        end
-        @inbounds for j in 1:base.n
-            direction_norm = max(direction_norm, abs(base.dx[j]))
-            for ptr in nzrange(base.A, j)
-                state.g_input[base.A.rowval[ptr]] += abs(base.A.nzval[ptr])
-            end
-        end
-        operator_norm = zero(T)
-        @inbounds for k in 1:base.m
-            operator_norm = max(operator_norm, state.g_input[k])
-        end
+        # a preallocated row-sum scratch for ||[A I -b]||_infinity.  The
+        # scale computation is the shared helper (same formulas, same order).
+        operator_norm, direction_norm, rhs_norm = _shared_primal_scale(
+            base.A, base.b, base.ds, base.dx, base.dtau, base.rP,
+            state.g_input,
+        )
     end
 
-    @inbounds for k in 1:base.m
-        bdt = base.b[k] * base.dtau
-        residual = base.ax[k] + base.ds[k] - bdt + base.rP[k]
-        local_work = abs(base.ax[k]) + abs(base.ds[k]) + abs(bdt) +
-                     abs(base.rP[k])
-        componentwise &= _product_hsd_newton_close(residual, local_work)
-        group_residual = max(group_residual, abs(residual))
-    end
-    group_work = operator_norm * direction_norm + rhs_norm
-    return componentwise, group_residual, group_work
+    # Per-row residuals are the shared helper (same formulas, same order).
+    return _shared_primal_residuals(
+        base.ax, base.ds, base.b, base.dtau, base.rP,
+        operator_norm, direction_norm, rhs_norm,
+    )
 end
 
 @inline function _product_hsd_dual_newton_stats(
     state::ProductConeHSDState{T},
 ) where {T}
     base = state.base
-    componentwise = true
-    group_residual = zero(T)
-    rhs_norm = zero(T)
-    direction_norm = abs(base.dtau)
-    @inbounds for k in 1:base.m
-        direction_norm = max(direction_norm, abs(base.dy[k]))
-    end
-    operator_norm = zero(T)
-    @inbounds for j in 1:base.n
-        cdt = base.c[j] * base.dtau
-        residual = muladd(base.c[j], base.dtau, base.rD[j])
-        local_work = abs(base.rD[j]) + abs(cdt)
-        row_norm = abs(base.c[j])
-        for ptr in nzrange(base.A, j)
-            term = base.A.nzval[ptr] * base.dy[base.A.rowval[ptr]]
-            residual = muladd(
-                base.A.nzval[ptr], base.dy[base.A.rowval[ptr]], residual,
-            )
-            local_work += abs(term)
-            row_norm += abs(base.A.nzval[ptr])
-        end
-        componentwise &= _product_hsd_newton_close(residual, local_work)
-        group_residual = max(group_residual, abs(residual))
-        rhs_norm = max(rhs_norm, abs(base.rD[j]))
-        operator_norm = max(operator_norm, row_norm)
-    end
-    group_work = operator_norm * direction_norm + rhs_norm
-    return componentwise, group_residual, group_work
+    # Columnwise muladd accumulation is the shared helper (same formulas,
+    # same order).
+    return _shared_dual_stats(base.A, base.c, base.dy, base.dtau, base.rD)
 end
 
 @inline function _product_hsd_symmetric_dual_residual_ok(
@@ -2375,32 +2495,21 @@ Base.@noinline function _product_hsd_newton_residual_ok(
         _product_hsd_symmetric_dual_residual_ok(state) || return false
     end
 
-    # -c'*dx - b'*dy + dκ = -rG.
-    gap_residual = base.rG + base.dkappa
-    gap_work = abs(base.rG) + abs(base.dkappa)
-    @inbounds for j in 1:base.n
-        term = base.c[j] * base.dx[j]
-        gap_residual = muladd(-base.c[j], base.dx[j], gap_residual)
-        gap_work += abs(term)
-    end
-    @inbounds for k in 1:base.m
-        term = base.b[k] * base.dy[k]
-        gap_residual = muladd(-base.b[k], base.dy[k], gap_residual)
-        gap_work += abs(term)
-    end
+    # Standard-HSD: c'*dx + b'*dy + dκ = -rG.  Gap terms are the shared
+    # helper (same formulas, same order).
+    gap_residual, gap_work = _shared_gap_terms(
+        base.rG, base.dkappa, base.c, base.dx, base.b, base.dy,
+    )
     _product_hsd_newton_close(gap_residual, gap_work) || return false
 
     # ds + Theta*dy = h. Recovery has left Theta*dy in `base.e`.
     _product_hsd_cone_newton_residual_ok(state) || return false
 
-    # κ*dτ + τ*dκ = scalar_rhs.
-    kdt = base.kappa * base.dtau
-    tdk = base.tau * base.dkappa
-    scalar_residual = muladd(
-        base.kappa, base.dtau,
-        muladd(base.tau, base.dkappa, -scalar_rhs),
+    # κ*dτ + τ*dκ = scalar_rhs.  Scalar terms are the shared helper (same
+    # formulas, same order).
+    scalar_residual, scalar_work = _shared_scalar_terms(
+        base.kappa, base.dtau, base.tau, base.dkappa, scalar_rhs,
     )
-    scalar_work = abs(kdt) + abs(tdk) + abs(scalar_rhs)
     if _product_hsd_has_nonsymmetric(state) || !conditioned_authority
         return _product_hsd_newton_close(scalar_residual, scalar_work)
     end
@@ -2722,7 +2831,7 @@ end
         return false
     end
     bsum = _product_hsd_rhs!(state)
-    rho = scalar_rhs + base.tau * base.rG - base.tau * bsum
+    rho = scalar_rhs + base.tau * base.rG + base.tau * bsum
     @inbounds for i in 1:base.workspace.nr
         value = base.workspace.rhs[i]
         isfinite(value) || begin
@@ -2783,7 +2892,7 @@ end
     @inbounds for k in 1:base.m
         cd_bd += base.b[k] * base.dy[k]
     end
-    gap_residual = base.rG + candidate - cd_bd
+    gap_residual = base.rG + candidate + cd_bd
     gap_work = abs(base.rG) + abs(candidate) + abs(cd_bd)
     scalar_residual = muladd(
         base.tau, candidate,
@@ -2812,7 +2921,7 @@ end
     @inbounds for k in 1:base.m
         cd_bd += base.b[k] * base.dy[k]
     end
-    gap_candidate = -base.rG + cd_bd
+    gap_candidate = -base.rG - cd_bd
     isfinite(gap_candidate) || return false
     gap_error = _product_hsd_dkappa_equation_error(
         base, scalar_rhs, gap_candidate,
@@ -2901,12 +3010,12 @@ end
     work = abs(base.rG) + abs(base.dkappa)
     @inbounds for j in 1:base.n
         term = base.c[j] * base.dx[j]
-        residual = muladd(-base.c[j], base.dx[j], residual)
+        residual = muladd(base.c[j], base.dx[j], residual)
         work += abs(term)
     end
     @inbounds for k in 1:base.m
         term = base.b[k] * base.dy[k]
-        residual = muladd(-base.b[k], base.dy[k], residual)
+        residual = muladd(base.b[k], base.dy[k], residual)
         work += abs(term)
     end
     worst = max(worst, _product_hsd_normalized_error(residual, work))
@@ -2997,7 +3106,7 @@ end
     @inbounds for k in 1:base.m
         bd += base.b[k] * base.dy[k]
     end
-    base.dkappa = -base.rG + cd + bd
+    base.dkappa = -base.rG - cd - bd
     _hsd_direction_finite(base) || return false
     return roundtrip_certified ||
            _product_hsd_psd_cone_newton_residual_ok(state)
@@ -3082,10 +3191,10 @@ Base.@noinline function _product_hsd_refine_shift!(
         end
         gap_residual = original_rG + base.dkappa
         @inbounds for j in 1:base.n
-            gap_residual = muladd(-base.c[j], base.dx[j], gap_residual)
+            gap_residual = muladd(base.c[j], base.dx[j], gap_residual)
         end
         @inbounds for k in 1:base.m
-            gap_residual = muladd(-base.b[k], base.dy[k], gap_residual)
+            gap_residual = muladd(base.b[k], base.dy[k], gap_residual)
         end
         base.rG = gap_residual
         scalar_residual = muladd(
@@ -3295,6 +3404,9 @@ end
     sigma > one(T) && (sigma = one(T))
     sigma_mu = sigma * base.mu
     _product_hsd_corrector_shift!(state, sigma_mu)
+    if _runtime_ns_affine_fallback_reported(state.runtime)
+        return _product_hsd_restore_affine_predictor!(state, predictor_scalar)
+    end
     corrector_scalar = sigma_mu - base.tau * base.kappa -
                        base.dtau_a * base.dkappa_a
     return _product_hsd_coupled_solve_shift!(state, corrector_scalar)

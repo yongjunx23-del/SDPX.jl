@@ -1,0 +1,678 @@
+
+[records.B10]
+status = "conjugate_replay_certified"
+block = 10
+d_hex = ["c01c62a1355d34b6", "3fe663b14c2da9f8", "4002ec80739c6c1c"]
+reason = "replay_bound_satisfied"
+s_hex = ["4004ca17c9e21bfe", "4002ebf0c5e69583", "401c62a1e772366c"]
+stage = "conjugate"
+iter = 16
+shadow_hex = ["4118ee8acd69a579", "4116b1bacfa2679d", "41310539a95eff7b"]
+
+    [records.B10.root]
+    rho = 3.789928549770091e-7
+    residual = 1.1215514406415125e-23
+    iterations = 2
+    threshold = 2.69290594494096e-21
+    hi = 7.579856381362446e-7
+    E_rho = 5.60775934447626e-24
+    Rmax = 1.1215514438354691e-23
+    lo = 3.78992819068122e-7
+
+    [records.B10.indep_l0]
+    hull_width = 3.454467422037778e-77
+    delta = 1.9166858616168051e-34
+
+    [records.B10.audit]
+    m21_gate = "fail"
+    m21_lo = 2.9999999994724216
+    cross_gate = "fail"
+    m21_hi = 2.9999999994724234
+    verdict = "stored_shadow_identity_failure"
+    m12_hi = 2.999999999879709
+    m12_lo = 2.9999999998797073
+    m12_gate = "fail"
+
+    [records.B10.indep_D]
+    hull_width = 3.454467422037778e-77
+    delta = 1.274566161031121e-33
+
+    [records.B10.P]
+    value = 0.14091814765034666
+    E = 1.70436918580833e-26
+    E_P = 1.6951287595823343e-11
+    p_star = 0.14091814766729793
+    Pmin = 0.14091814765034658
+
+    [records.B10.ops]
+    divisions = 15
+    series_evals = 7
+    two_prod = 1228
+    two_sum = 10765
+
+    [[records.B10.gradient]]
+    g = 7.096318087300234
+    E = 8.881784205584077e-16
+    [[records.B10.gradient]]
+    g = -0.6996695030919448
+    E = 1.1102230254713896e-16
+    [[records.B10.gradient]]
+    g = -2.3654793772788043
+    E = 4.440892101361617e-16
+
+    [records.B10.L]
+    remainder = 8.923887932583386e-71
+    target = 2.4233807008389486e-27
+    l = 1.2863147153067027e-17
+    E = 4.34668774149572e-32
+    h = 1.0985957513503004
+    dexp = 2
+    q = 0.14286524275833856
+
+    [records.B10.l0]
+    remainder = 6.198315822397932e-59
+    target = 1.6155871338926325e-27
+    l = 3.4378928994363457e-18
+    E = 2.1079842942531127e-32
+    h = -1.0985953723575175
+    dexp = -1
+    q = 0.1999918801571802
+
+    [records.B10.recon_errors]
+    e_X = 2.910383045673374e-11
+    e_Y = 2.910383045673372e-11
+    e_Z = 2.2800449922984434e-10
+
+    [records.B10.indep_P]
+    hull_width = 1.8111358157653425e-71
+    delta = 1.2224726928736692e-17
+
+    [records.B10.replay]
+    B3 = 2.845481644572469e-10
+    E_L = 4.34668774149572e-32
+    B2 = 8.416413056517855e-11
+    B1 = 8.536283705152963e-10
+    Ymin = 371822.70276796224
+    Zmin = 1.1154496616058033e6
+    E_YZ = 9.422799673456487e-17
+    L0 = 1.0985957513503004
+
+    [records.B10.D]
+    hi = 7.579856381362446e-7
+    l = 6.5383474444833276e-24
+    E = 3.1939559839416644e-32
+    h = 7.579856381362443e-7
+    lo = 7.57985638136244e-7
+
+    [records.B10.indep_rho]
+    delta = 5.6077582652200334e-24
+    ref = 3.789928549770091e-7
+
+[records.A10]
+status = "conjugate_replay_certified"
+block = 10
+d_hex = ["c00db14535074013", "3fd7fe180cb2d8c2", "3ff3bfd5c2dc2182"]
+reason = "replay_bound_satisfied"
+s_hex = ["3ff5be86ed75af00", "3ff3c4141eee2aa4", "400db161f421c165"]
+stage = "conjugate"
+iter = 11
+shadow_hex = ["40bb4ee4881575df", "40b8ce0c77f15c25", "40d2a5bd7905aa7f"]
+
+    [records.A10.root]
+    rho = 4.242938309714574e-5
+    residual = -9.993986449579087e-20
+    iterations = 2
+    threshold = 3.0147570162411667e-19
+    hi = 8.485786609347701e-5
+    E_rho = 4.997205232886675e-20
+    Rmax = 9.99398644958196e-20
+    lo = 4.2428933046738465e-5
+
+    [records.A10.indep_l0]
+    hull_width = 1.727233711018889e-77
+    delta = 6.086125472357583e-33
+
+    [records.A10.audit]
+    m21_gate = "pass"
+    m21_lo = 2.999999999995313
+    cross_gate = "pass"
+    m21_hi = 2.999999999995315
+    verdict = "stored_geometry_certified"
+    m12_hi = 3.0000000000004676
+    m12_lo = 3.000000000000466
+    m12_gate = "pass"
+
+    [records.A10.indep_D]
+    hull_width = 1.727233711018889e-77
+    delta = 8.689040855938136e-33
+
+    [records.A10.P]
+    value = 0.26942864919782955
+    E = 2.727836549025118e-28
+    E_P = 1.2520540160210238e-13
+    p_star = 0.2694286491977044
+    Pmin = 0.2694286491978294
+
+    [records.A10.ops]
+    divisions = 15
+    series_evals = 7
+    two_prod = 1230
+    two_sum = 10765
+
+    [[records.A10.gradient]]
+    g = 3.7115577833957225
+    E = 4.4408920985382075e-16
+    [[records.A10.gradient]]
+    g = -0.3748836635597356
+    E = 5.551115123163743e-17
+    [[records.A10.gradient]]
+    g = -1.2343347179134652
+    E = 2.220446049262811e-16
+
+    [records.A10.L]
+    remainder = 4.611299773660194e-71
+    target = 2.4233807008389486e-27
+    l = 8.631913923668463e-17
+    E = 4.2949997349775017e-32
+    h = 1.100961969696136
+    dexp = 2
+    q = 0.14170608602284643
+
+    [records.A10.l0]
+    remainder = 9.730077396111355e-59
+    target = 1.6155871338926325e-27
+    l = -9.668206487815136e-17
+    E = 2.609576410947845e-32
+    h = -1.1009195412131396
+    dexp = -1
+    q = 0.20110722526559846
+
+    [records.A10.recon_errors]
+    e_X = 4.547473508864647e-13
+    e_Y = 4.547473508864644e-13
+    e_Z = 2.388939119288905e-12
+
+    [records.A10.indep_P]
+    hull_width = 1.4149498560666738e-73
+    delta = 3.8547673764031286e-18
+
+    [records.A10.replay]
+    B3 = 5.738225658788178e-13
+    E_L = 4.2949997349775017e-32
+    B2 = 1.7413829425080652e-13
+    B1 = 1.7247871903127608e-12
+    Ymin = 6350.048705182069
+    Zmin = 19094.960511604775
+    E_YZ = 6.541995751969063e-17
+    L0 = 1.100961969696136
+
+    [records.A10.D]
+    hi = 8.485786609347701e-5
+    l = -3.632265830177109e-21
+    E = 2.8698679493059017e-32
+    h = 8.485786609347697e-5
+    lo = 8.485786609347693e-5
+
+    [records.A10.oldshadow_audit]
+    m21_gate = "pass"
+    verdict = "stored_shadow_identity_failure"
+    m12_gate = "fail"
+
+    [records.A10.indep_rho]
+    delta = 4.9970992322101286e-20
+    ref = 4.2429383097145786e-5
+
+[records.A4]
+status = "conjugate_replay_certified"
+block = 4
+d_hex = ["c00db1453507976d", "3fd7fe25cb0a2f71", "3ff3bfae8d5f1e85"]
+reason = "replay_bound_satisfied"
+s_hex = ["3ff5bfae30dcdde5", "3ff3cf74a3baf989", "400db161f421c165"]
+stage = "conjugate"
+iter = 11
+shadow_hex = ["40c4e5c0df1168fb", "40c2fb3760a24896", "40dc8a15bd3716fd"]
+
+    [records.A4.root]
+    rho = 2.7723467278474143e-5
+    residual = -1.9057987239244262e-20
+    iterations = 2
+    threshold = 1.9698571758202314e-19
+    hi = 5.544655026873187e-5
+    E_rho = 9.529257787225407e-21
+    Rmax = 1.9057987239274243e-20
+    lo = 2.7723275134365915e-5
+
+    [records.A4.indep_l0]
+    hull_width = 3.454467422037778e-77
+    delta = 4.492680385369916e-33
+
+    [records.A4.audit]
+    m21_gate = "fail"
+    m21_lo = 3.0000000000202283
+    cross_gate = "fail"
+    m21_hi = 3.00000000002023
+    verdict = "stored_gradient_identity_failure"
+    m12_hi = 2.99999999999928
+    m12_lo = 2.9999999999992784
+    m12_gate = "pass"
+
+    [records.A4.indep_D]
+    hull_width = 3.454467422037778e-77
+    delta = 1.075016926917095e-33
+
+    [records.A4.P]
+    value = 0.26942864919678916
+    E = 2.4301136097144706e-28
+    E_P = 1.943722960362496e-13
+    p_star = 0.2694286491969835
+    Pmin = 0.269428649196789
+
+    [records.A4.ops]
+    divisions = 15
+    series_evals = 8
+    two_prod = 1398
+    two_sum = 12153
+
+    [[records.A4.gradient]]
+    g = 3.711557783410055
+    E = 4.440892098534106e-16
+    [[records.A4.gradient]]
+    g = -0.3748869402707335
+    E = 5.5511151231596e-17
+    [[records.A4.gradient]]
+    g = -1.234297325357044
+    E = 2.2204460492614474e-16
+
+    [records.A4.L]
+    remainder = 9.83988421538941e-59
+    target = 1.6155871338926325e-27
+    l = 8.650557079727188e-17
+    E = 2.4623101200156236e-32
+    h = 1.1009775584513826
+    dexp = 1
+    q = 0.2011350604943674
+
+    [records.A4.l0]
+    remainder = 9.787262196163577e-59
+    target = 1.6155871338926325e-27
+    l = -3.478487283887673e-17
+    E = 2.6557745697150463e-32
+    h = -1.1009498353683924
+    dexp = -1
+    q = 0.2011217596887837
+
+    [records.A4.recon_errors]
+    e_X = 9.09494701772929e-13
+    e_Y = 9.094947017729288e-13
+    e_Z = 3.413398468355558e-12
+
+    [records.A4.indep_P]
+    hull_width = 4.2448495682000214e-73
+    delta = 7.75733992267093e-18
+
+    [records.A4.replay]
+    B3 = 8.906867117271141e-13
+    E_L = 2.4623101200156236e-32
+    B2 = 2.7037828690131256e-13
+    B1 = 2.6776068928927533e-12
+    Ymin = 9718.4326365332
+    Zmin = 29224.33967377895
+    E_YZ = 6.996244197469013e-17
+    L0 = 1.1009775584513826
+
+    [records.A4.D]
+    hi = 5.544655026873187e-5
+    l = 2.2044495113120128e-21
+    E = 2.99754091556033e-32
+    h = 5.544655026873185e-5
+    lo = 5.544655026873183e-5
+
+    [records.A4.oldshadow_audit]
+    m21_gate = "fail"
+    verdict = "stored_shadow_identity_failure"
+    m12_gate = "fail"
+
+    [records.A4.indep_rho]
+    delta = 9.52912570616205e-21
+    ref = 2.7723467278474153e-5
+
+[records.B7]
+status = "conjugate_replay_certified"
+block = 7
+d_hex = ["c01c62a1355cffe4", "3fe663b154dd54ce", "4002ec817c4bccbb"]
+reason = "replay_bound_satisfied"
+s_hex = ["4004ca2934c84025", "4002eca86b8b7686", "401c62a1e772366c"]
+stage = "conjugate"
+iter = 16
+shadow_hex = ["4107b64bbcf50da9", "41059582bba91c14", "412030101083fd0e"]
+
+    [records.B7.root]
+    rho = 7.969746821337625e-7
+    residual = 6.646053450463046e-23
+    iterations = 2
+    threshold = 5.66284458146303e-21
+    hi = 1.5939490466833723e-6
+    E_rho = 3.323029375560551e-23
+    Rmax = 6.646053454390035e-23
+    lo = 7.969745233416855e-7
+
+    [records.B7.indep_l0]
+    hull_width = 1.727233711018889e-77
+    delta = 5.707374275280773e-33
+
+    [records.B7.audit]
+    m21_gate = "fail"
+    m21_lo = 3.0000000001105858
+    cross_gate = "fail"
+    m21_hi = 3.0000000001105875
+    verdict = "stored_shadow_identity_failure"
+    m12_hi = 3.0000000000369953
+    m12_lo = 3.0000000000369935
+    m12_gate = "fail"
+
+    [records.B7.indep_D]
+    hull_width = 1.727233711018889e-77
+    delta = 5.128373187006388e-33
+
+    [records.B7.P]
+    value = 0.14091814767274966
+    E = 8.265049565511965e-27
+    E_P = 5.213232623368935e-12
+    p_star = 0.14091814766753644
+    Pmin = 0.14091814767274957
+
+    [records.B7.ops]
+    divisions = 15
+    series_evals = 7
+    two_prod = 1230
+    two_sum = 10765
+
+    [[records.B7.gradient]]
+    g = 7.0963180861720705
+    E = 8.881784201163351e-16
+    [[records.B7.gradient]]
+    g = -0.699669519161207
+    E = 1.1102230250355237e-16
+    [[records.B7.gradient]]
+    g = -2.3654813489641793
+    E = 4.440892099888017e-16
+
+    [records.B7.L]
+    remainder = 8.924918690337573e-71
+    target = 2.4233807008389486e-27
+    l = 8.649667182903456e-17
+    E = 4.5805423363435576e-32
+    h = 1.0985953356485985
+    dexp = 2
+    q = 0.1428654463668483
+
+    [records.B7.l0]
+    remainder = 6.19731027641808e-59
+    target = 1.6155871338926325e-27
+    l = 1.0121096379393348e-16
+    E = 3.830812801737845e-32
+    h = -1.0985945386742342
+    dexp = -1
+    q = 0.19999147998781697
+
+    [records.B7.recon_errors]
+    e_X = 1.455191522836687e-11
+    e_Y = 1.455191522836686e-11
+    e_Z = 1.1489958281864044e-10
+
+    [records.B7.indep_P]
+    hull_width = 9.055679078826712e-72
+    delta = 1.3412619790321825e-17
+
+    [records.B7.replay]
+    B3 = 8.751104490989227e-11
+    E_L = 4.5805423363435576e-32
+    B2 = 2.5883894583406732e-11
+    B1 = 2.625265628662378e-10
+    Ymin = 176816.34163114472
+    Zmin = 530440.032256992
+    E_YZ = 9.963883239887322e-17
+    L0 = 1.0985953356485985
+
+    [records.B7.D]
+    hi = 1.5939490466833723e-6
+    l = -1.71874217271126e-23
+    E = 3.926987088461387e-32
+    h = 1.5939490466833717e-6
+    lo = 1.593949046683371e-6
+
+    [records.B7.indep_rho]
+    delta = 3.323028049671498e-23
+    ref = 7.969746821337625e-7
+
+[records.B4]
+status = "conjugate_replay_certified"
+block = 4
+d_hex = ["c01c62a1355cffc5", "3fe663b154e08ffe", "4002ec817c08a6e0"]
+reason = "replay_bound_satisfied"
+s_hex = ["4004ca298eaa7b5c", "4002ecabff56082f", "401c62a1e772366c"]
+stage = "conjugate"
+iter = 16
+shadow_hex = ["4107b96e5e7cc765", "4105985d547a2800", "4120323400dcd714"]
+
+    [records.B4.root]
+    rho = 7.965632618175844e-7
+    residual = -4.244757766685296e-23
+    iterations = 2
+    threshold = 5.659921265457589e-21
+    hi = 1.593126206378823e-6
+    E_rho = 2.1223805754723096e-23
+    Rmax = 4.244757769729889e-23
+    lo = 7.965631031894109e-7
+
+    [records.B4.indep_l0]
+    hull_width = 3.454467422037778e-77
+    delta = 1.8909776011115754e-33
+
+    [records.B4.audit]
+    m21_gate = "fail"
+    m21_lo = 3.0000000000305556
+    cross_gate = "fail"
+    m21_hi = 3.0000000000305573
+    verdict = "stored_shadow_identity_failure"
+    m12_hi = 3.0000000000549853
+    m12_lo = 3.0000000000549836
+    m12_gate = "fail"
+
+    [records.B4.indep_D]
+    hull_width = 3.454467422037778e-77
+    delta = 3.2150214237960323e-33
+
+    [records.B4.P]
+    value = 0.1409181476752853
+    E = 7.752364872846457e-27
+    E_P = 7.748343633373635e-12
+    p_star = 0.14091814766753696
+    Pmin = 0.1409181476752852
+
+    [records.B4.ops]
+    divisions = 15
+    series_evals = 7
+    two_prod = 1230
+    two_sum = 10765
+
+    [[records.B4.gradient]]
+    g = 7.0963180860443815
+    E = 8.881784200905173e-16
+    [[records.B4.gradient]]
+    g = -0.6996695191721298
+    E = 1.1102230250100684e-16
+    [[records.B4.gradient]]
+    g = -2.3654813469673646
+    E = 4.440892099801957e-16
+
+    [records.B4.L]
+    remainder = 8.924917661921661e-71
+    target = 2.4233807008389486e-27
+    l = -7.333128377282407e-17
+    E = 4.375676520375892e-32
+    h = 1.0985953360633323
+    dexp = 2
+    q = 0.14286544616371397
+
+    [records.B4.l0]
+    remainder = 6.197311272802708e-59
+    target = 1.6155871338926325e-27
+    l = 6.7791514484026295e-18
+    E = 2.3221370338562206e-32
+    h = -1.0985945395003878
+    dexp = -1
+    q = 0.1999914803843722
+
+    [records.B4.recon_errors]
+    e_X = 1.455191522836687e-11
+    e_Y = 1.455191522836686e-11
+    e_Z = 6.983868038106614e-11
+
+    [records.B4.indep_P]
+    hull_width = 6.791759309120034e-72
+    delta = 3.242508637160111e-18
+
+    [records.B4.replay]
+    B3 = 1.300657106487214e-10
+    E_L = 4.375676520375892e-32
+    B2 = 3.8470815543504633e-11
+    B1 = 3.9018899958946133e-10
+    Ymin = 176907.6662486194
+    Zmin = 530714.0016848763
+    E_YZ = 7.128485377776012e-17
+    L0 = 1.0985953360633323
+
+    [records.B4.D]
+    hi = 1.593126206378823e-6
+    l = -5.987948965301144e-23
+    E = 3.0445892302295786e-32
+    h = 1.5931262063788224e-6
+    lo = 1.5931262063788217e-6
+
+    [records.B4.indep_rho]
+    delta = 2.122379728807584e-23
+    ref = 7.965632618175844e-7
+
+[records.A7]
+status = "conjugate_replay_certified"
+block = 7
+d_hex = ["c00db1453507976d", "3fd7fe25cb0a1f8b", "3ff3bfae8d6056aa"]
+reason = "replay_bound_satisfied"
+s_hex = ["3ff5bfae30df9e1f", "3ff3cf74a3cc49ed", "400db161f421c165"]
+stage = "conjugate"
+iter = 11
+shadow_hex = ["40c4e5c0848cae20", "40c2fb370e6b6790", "40dc8a1541992036"]
+
+    [records.A7.root]
+    rho = 2.7723474435774326e-5
+    residual = -2.1661254965375592e-20
+    iterations = 2
+    threshold = 1.9698576843699476e-19
+    hi = 5.544656458313382e-5
+    E_rho = 1.0830927734927338e-20
+    Rmax = 2.1661254965416422e-20
+    lo = 2.772328229156689e-5
+
+    [records.A7.indep_l0]
+    hull_width = 3.454467422037778e-77
+    delta = 6.548848258410385e-33
+
+    [records.A7.audit]
+    m21_gate = "fail"
+    m21_lo = 2.9999999999372626
+    cross_gate = "fail"
+    m21_hi = 2.9999999999372644
+    verdict = "stored_gradient_identity_failure"
+    m12_hi = 2.999999999996727
+    m12_lo = 2.9999999999967253
+    m12_gate = "pass"
+
+    [records.A7.indep_D]
+    hull_width = 3.454467422037778e-77
+    delta = 5.783667395006318e-33
+
+    [records.A7.P]
+    value = 0.26942864919610127
+    E = 2.7168490770957643e-28
+    E_P = 8.822664820939969e-13
+    p_star = 0.2694286491969835
+    Pmin = 0.2694286491961011
+
+    [records.A7.ops]
+    divisions = 15
+    series_evals = 7
+    two_prod = 1230
+    two_sum = 10765
+
+    [[records.A7.gradient]]
+    g = 3.711557783419531
+    E = 4.440892098538057e-16
+    [[records.A7.gradient]]
+    g = -0.37488694027146435
+    E = 5.551115123163588e-17
+    [[records.A7.gradient]]
+    g = -1.2342973253779386
+    E = 2.220446049262761e-16
+
+    [records.A7.L]
+    remainder = 9.839884201652056e-59
+    target = 1.6155871338926325e-27
+    l = 1.0443831908068492e-16
+    E = 2.3680672383960523e-32
+    h = 1.1009775584441643
+    dexp = 1
+    q = 0.20113506049090432
+
+    [records.A7.l0]
+    remainder = 9.787262168949542e-59
+    target = 1.6155871338926325e-27
+    l = 7.15614413925919e-17
+    E = 2.849214517599677e-32
+    h = -1.1009498353540172
+    dexp = -1
+    q = 0.2011217596818868
+
+    [records.A7.recon_errors]
+    e_X = 9.094947017729292e-13
+    e_Y = 9.094947017729288e-13
+    e_Z = 4.2116420212980715e-12
+
+    [records.A7.indep_P]
+    hull_width = 4.2448495682000214e-73
+    delta = 1.919201572055278e-17
+
+    [records.A7.replay]
+    B3 = 4.041990411848653e-12
+    E_L = 2.3680672383960523e-32
+    B2 = 1.227261556626067e-12
+    B1 = 1.215380412745954e-11
+    Ymin = 9718.430127549707
+    Zmin = 29224.332128793183
+    E_YZ = 7.904573260197155e-17
+    L0 = 1.1009775584441643
+
+    [records.A7.D]
+    hi = 5.544656458313382e-5
+    l = 8.793661317138988e-22
+    E = 4.0824660829413484e-32
+    h = 5.54465645831338e-5
+    lo = 5.544656458313378e-5
+
+    [records.A7.oldshadow_audit]
+    m21_gate = "fail"
+    verdict = "stored_shadow_identity_failure"
+    m12_gate = "fail"
+
+    [records.A7.indep_rho]
+    delta = 1.0830777611921706e-20
+    ref = 2.7723474435774337e-5
+[meta]
+julia_version = "1.12.6"
+design = "validation/scientific_core/exp_runtime/COMPENSATED_EXP_DESIGN.md"
+worktree = "/private/tmp/sdpx-scientific-core-20260907"
+threads = 1
+capture = "exp-triple-capture iterations 11 (A) and 16 (B) hex triples; iterations 17-24 contribute REJ metadata rows only (no further hex words)"
+created_utc = "2026-09-09T06:12:49.650"
+git_head_before = "0ebf053031feda0a2a80a63f33b36799c999fcf1"
+blas_threads = 1

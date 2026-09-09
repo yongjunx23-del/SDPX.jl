@@ -71,15 +71,15 @@ function NonsymmetricCorrectorWorkspace(
     tolerance = convert(T, validation_tolerance)
     return NonsymmetricCorrectorWorkspace{T}(
         tolerance,
-        zeros(T, 3, 3),
-        zeros(T, 3, 3),
-        zeros(T, 3),
-        zeros(T, 3),
-        zeros(T, 3),
-        zeros(T, 3),
-        zeros(T, 3),
-        zeros(T, 3),
-        zeros(T, 3),
+        alloc_zeros(T, 3, 3),
+        alloc_zeros(T, 3, 3),
+        alloc_zeros(T, 3),
+        alloc_zeros(T, 3),
+        alloc_zeros(T, 3),
+        alloc_zeros(T, 3),
+        alloc_zeros(T, 3),
+        alloc_zeros(T, 3),
+        alloc_zeros(T, 3),
         T(Inf),
         T(Inf),
         T(Inf),
@@ -202,50 +202,6 @@ end
     return _ns_scaling_finite_vector(destination)
 end
 
-@inline function _ns_exp_third_contraction!(destination, s, ds, u)
-    T = eltype(destination)
-    x = _NSDirectional3{T}(s[1], ds[1])
-    y = _NSDirectional3{T}(s[2], ds[2])
-    z = _NSDirectional3{T}(s[3], ds[3])
-    one_d = _nsd_constant(one(T))
-
-    t = _nsd_div(x, y)
-    log_ratio = _nsd_add(t, _nsd_positive_log_ratio(y, z))
-    rho = _nsd_exp(log_ratio)
-    delta = _nsd_negative_expm1(log_ratio)
-    c = _nsd_div(rho, delta)
-    c2 = _nsd_mul(c, c)
-    inv_y = _nsd_inv(y)
-    inv_z = _nsd_inv(z)
-    inv_y2 = _nsd_mul(inv_y, inv_y)
-    inv_z2 = _nsd_mul(inv_z, inv_z)
-    inv_delta = _nsd_inv(delta)
-    omt = _nsd_sub(one_d, t)
-
-    h11 = _nsd_mul(_nsd_add(c, c2), inv_y2)
-    h12 = _nsd_mul(
-        _nsd_add(_nsd_neg(_nsd_mul(c, t)), _nsd_mul(c2, omt)), inv_y2,
-    )
-    h13 = _nsd_neg(_nsd_mul(_nsd_mul(_nsd_mul(c, inv_delta), inv_y), inv_z))
-    h22 = _nsd_mul(
-        _nsd_add(
-            _nsd_add(_nsd_mul(c, _nsd_mul(t, t)),
-                     _nsd_mul(c2, _nsd_mul(omt, omt))),
-            one_d,
-        ),
-        inv_y2,
-    )
-    h23 = _nsd_neg(
-        _nsd_mul(_nsd_mul(_nsd_mul(_nsd_mul(c, omt), inv_delta), inv_y), inv_z),
-    )
-    h33 = _nsd_mul(
-        _nsd_add(_nsd_mul(inv_delta, inv_delta), one_d), inv_z2,
-    )
-    return _ns_corrector_contract_from_hessian_derivative!(
-        destination, h11, h12, h13, h22, h23, h33, u,
-    )
-end
-
 @inline function _ns_power_third_contraction!(destination, s, ds, u, alpha)
     T = eltype(destination)
     a = convert(T, alpha)
@@ -323,7 +279,18 @@ end
 @inline function _ns_corrector_third_contraction!(
     destination, ::ExpConjugateTag, s, ds, u,
 )
-    return _ns_exp_third_contraction!(destination, s, ds, u)
+    try
+        exp_logarithmic_third!(destination, s, ds, u)
+        half = inv(one(eltype(destination)) + one(eltype(destination)))
+        for i in 1:3
+            _store_owned_scalar!(destination, i, -half * destination[i])
+        end
+        return true
+    catch exception
+        (exception isa ArgumentError || exception isa DomainError) ||
+            rethrow(exception)
+        return false
+    end
 end
 @inline function _ns_corrector_third_contraction!(
     destination, tag::PowerConjugateTag, s, ds, u,
@@ -428,9 +395,11 @@ end
     d1 = convert(T, ds_aff[1])
     d2 = convert(T, ds_aff[2])
     d3 = convert(T, ds_aff[3])
-    q1 = d1 * workspace.work[1]
-    q2 = d2 * workspace.work[2]
-    q3 = d3 * workspace.work[3]
+    # `workspace.h` retains the affine dual direction while `work` is
+    # repurposed for ds_aff before the Euler projection.
+    q1 = d1 * workspace.h[1]
+    q2 = d2 * workspace.h[2]
+    q3 = d3 * workspace.h[3]
     q = q1 + q2 + q3
     p1 = s1 * workspace.chi[1]
     p2 = s2 * workspace.chi[2]
@@ -540,7 +509,8 @@ function try_nonsymmetric_higher_correction!(
         _ns_conjugate_hessian!(workspace.hessian, tag, s1, s2, s3)
         true
     catch exception
-        exception isa ArgumentError || rethrow(exception)
+        (exception isa ArgumentError || exception isa DomainError) ||
+            rethrow(exception)
         false
     end
     barrier_ok && _ns_scaling_finite_matrix(workspace.hessian) ||
@@ -551,7 +521,8 @@ function try_nonsymmetric_higher_correction!(
             workspace.factor, tag, s1, s2, s3,
         )
     catch exception
-        exception isa ArgumentError || rethrow(exception)
+        (exception isa ArgumentError || exception isa DomainError) ||
+            rethrow(exception)
         false
     end
     factor_built || return _ns_corrector_failure(
@@ -562,7 +533,8 @@ function try_nonsymmetric_higher_correction!(
             workspace.factor, tag, s1, s2, s3,
         )
     catch exception
-        exception isa ArgumentError || rethrow(exception)
+        (exception isa ArgumentError || exception isa DomainError) ||
+            rethrow(exception)
         false, T(Inf)
     end
     workspace.factor_error = factor_error
@@ -574,6 +546,9 @@ function try_nonsymmetric_higher_correction!(
     workspace.work[1] = convert(T, dy_aff[1])
     workspace.work[2] = convert(T, dy_aff[2])
     workspace.work[3] = convert(T, dy_aff[3])
+    workspace.h[1] = workspace.work[1]
+    workspace.h[2] = workspace.work[2]
+    workspace.h[3] = workspace.work[3]
     _ns_structural_hessian_solve!(
         workspace.u, workspace.factor, workspace.work,
         workspace.natural_bound,

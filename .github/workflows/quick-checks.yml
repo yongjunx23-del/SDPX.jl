@@ -88,20 +88,47 @@ jobs:
       - name: Release metadata consistency
         run: julia --startup-file=no scripts/check_release_metadata.jl
 
-      - name: Sole E2E test layout
+      - name: Test layout integrity
         run: |
           julia --startup-file=no -e '
-          actual = sort(readdir("test"))
-          expected = ["README.md", "runtests.jl"]
-          actual == expected || error(
-              "test/ must contain only README.md and runtests.jl; got " *
-              join(actual, ", "))
+          # Every test/*.jl must be mounted in runtests.jl or on the
+          # documented manual-only allowlist. The standalone provider-gated
+          # and provenance-pinned suites are executed by explicit drivers
+          # (validation/scientific_core/run_private_sparse_pattern.jl etc.),
+          # not by the standard suite.
           source = read("test/runtests.jl", String)
+          mounted = Set{String}()
+          for m in eachmatch(r"\"([^\"]+\.jl)\"", source)
+              push!(mounted, m.captures[1])
+          end
+          manual_only = Set([
+              "experimental_sparse_core.jl",
+              "experimental_sparse_core_identity.jl",
+              "experimental_sparse_core_numerics.jl",
+              "experimental_sparse_core_ordering.jl",
+              "experimental_sparse_core_research_support.jl",
+              "private_sparse_pattern.jl",
+              "qdldl_legacy_ordering.jl",
+              "test_r4a_pairing_matrix.jl",
+              "test_r1b_owned_object_matrix.jl",
+              "test_r6b_checkpoint.jl",
+              "test_r6b_moi_mapping.jl",
+          ])
+          unmounted = String[]
+          for f in readdir("test")
+              endswith(f, ".jl") || continue
+              f == "runtests.jl" && continue
+              (f in mounted || f in manual_only) || push!(unmounted, f)
+          end
+          isempty(unmounted) || error(
+              "test files neither mounted in runtests.jl nor manual-only " *
+              "allowlisted: " * join(sort(unmounted), ", "))
           occursin("GenericConicBenchmark.jl", source) || error(
               "sole E2E must source cases from benchmark/general")
           occursin("SDPX public modeling-to-certified-result E2E", source) ||
               error("sole E2E contract marker missing")
-          println("sole black-box E2E layout is intact")'
+          println("test layout is intact: ", length(mounted),
+              " mounted, ", length(manual_only), " manual-only allowlisted")'
 
       - name: Documentation page integrity
         run: |
