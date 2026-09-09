@@ -42,6 +42,37 @@ using SparseArrays
     @test singular.factorization_attempts == 1
     @test singular.factorizations == 0
 
+    # Diagnostics-level controls use genuine refusal counters. Construct a
+    # planning context, then supply the actual attempted experimental route.
+    model = SDPX.Model(Float64)
+    t = SDPX.variable!(model, :t, 3; domain=SDPX.Nonnegative())
+    for i in 1:3
+        SDPX.constraint!(model, Symbol(:p,i), (t[i], 1.0, b[3i+3]), SDPX.PowerCone(0.5))
+    end
+    SDPX.objective!(model, SDPX.Minimize(), t[1]+t[2]+t[3])
+    program = SDPX.compile_product_cone_model(model)
+    canonical = SDPX.canonicalize(program)
+    reduction = SDPX.hsd_equality_reduce(canonical)
+    settings = SDPX.Settings(Float64;
+        nonsymmetric_backend=SDPX.ExperimentalHalfPowerFactorPairBackend)
+    plan = SDPX._native_hsd_plan(program, canonical, reduction,
+        SDPX.NativeConeRoute(:bordered), settings)
+    for receipt in (r, singular)
+        d = SDPX._native_hsd_diagnostics(plan, reduction, SDPX.NumericalFailure,
+            receipt.refusal_reason, receipt.iterations, receipt.factorizations,
+            0.0, 0.0, 0.0; executed_kkt_route=:factor_pair,
+            factor_pair_execution=(factorization_attempts=receipt.factorization_attempts,))
+        s = d.selected_algorithms
+        attempted = receipt.factorization_attempts > 0
+        @test s.executed_kkt_route === (attempted ? :factor_pair : :not_executed)
+        @test s.attempted_kkt_routes == (attempted ? (:factor_pair,) : ())
+        @test s.executed_factorization_reuse === :not_executed
+        @test d.termination.factorizations == 0
+        @test !s.structure.factor_current
+        @test s.structure.executed_core_dimension == 0
+        @test s.executed_factorization === :not_executed
+    end
+
     ledger = FA.FactorizationLedger()
     st = start(ledger)
     @test ledger.attempts == ledger.completed == 1

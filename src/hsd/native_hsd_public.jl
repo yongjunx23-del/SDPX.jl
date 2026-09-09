@@ -1045,7 +1045,13 @@ function _native_hsd_diagnostics(
         actual_route, mathematical_formulation, T,
     )
     did_execute = equality_ready && factorizations > 0
-    route_attempts = if !did_execute
+    # A failed experimental LU still attempted this route. Do not promote
+    # completion-dependent factor/reuse/ownership facts along with provenance.
+    did_attempt = did_execute || (equality_ready &&
+        payload.nonsymmetric_backend === ExperimentalHalfPowerFactorPairBackend &&
+        factor_pair_execution !== nothing &&
+        factor_pair_execution.factorization_attempts > 0)
+    route_attempts = if !did_attempt
         ()
     elseif isempty(executed_kkt_attempts)
         (actual_route,)
@@ -1218,7 +1224,7 @@ function _native_hsd_diagnostics(
         requested_kkt_route=payload.kkt_route,
         nonsymmetric_backend=payload.nonsymmetric_backend,
         planned_kkt_route=planned_kkt.route,
-        executed_kkt_route=did_execute ? executed_kkt.route : :not_executed,
+        executed_kkt_route=did_attempt ? executed_kkt.route : :not_executed,
         planned_kkt_storage=planned_storage,
         executed_kkt_storage=executed_storage,
         planned_factorization,
