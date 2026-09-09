@@ -888,6 +888,11 @@ function solve!(
     )
 end
 
+# Internal fault-injection hook for the exception-policy regression: `nothing`
+# in normal operation.  Tests may set it to force a check-in failure at the
+# real call site.  It is not public API and the solver never enables it.
+const _LEASE_CHECKIN_FAULT = Ref{Union{Nothing,Function}}(nothing)
+
 function _solve_prepared!(
     prepared::PreparedSolver{T},
     problem::SDPProblem{T};
@@ -924,6 +929,7 @@ function _solve_prepared!(
     # finish_symbolic!(certified_optimal=false).
     lease = nothing
     result = nothing
+    primary = nothing
     try
         lease = state.symbolic_slot === nothing ? nothing :
             checkout_symbolic!(state.symbolic_slot)
@@ -969,15 +975,40 @@ function _solve_prepared!(
             state.last_objective_offset = objective_offset
             state.numeric_generation += 1
             return result
+        catch err
+            # Remember the primary failure so a check-in error cannot mask it
+            # (approved lease protocol: cleanup must not strand `busy`, retain
+            # an active owner, or mask the primary exception).
+            primary = err
+            rethrow()
         finally
-            # Check-in.  If this throws, the outer finally below still
-            # releases `busy` and the session lock.
+            # Check-in.  A check-in failure must not mask an in-flight primary
+            # exception; the outer finally below still releases `busy` and the
+            # session lock in every case.
             if lease !== nothing && lease.active
-                struct_gen = lock(_SYMMETRIC_CORE_STRUCTURE_LOCK) do
-                    _SYMMETRIC_CORE_STRUCTURE_CACHE.generation
+                try
+                    if _LEASE_CHECKIN_FAULT[] !== nothing
+                        _LEASE_CHECKIN_FAULT[]()
+                    end
+                    struct_gen = lock(_SYMMETRIC_CORE_STRUCTURE_LOCK) do
+                        _SYMMETRIC_CORE_STRUCTURE_CACHE.generation
+                    end
+                    is_opt = result !== nothing && result.status == Optimal
+                    finish_symbolic!(lease; certified_optimal=is_opt, eligible=true, structure_generation=struct_gen)
+                catch cleanup_error
+                    # Never leave an active owner or a retained factor behind,
+                    # even if the failure happened before finish_symbolic!
+                    # could run its own cleanup.
+                    if lease !== nothing && lease.active
+                        abandon_symbolic!(lease)
+                    end
+                    if primary === nothing
+                        rethrow()
+                    end
+                    # A check-in failure after a primary exception is recorded
+                    # for diagnostics but must not replace the primary failure.
+                    @debug "symbolic check-in failed after primary" cleanup_error
                 end
-                is_opt = result !== nothing && result.status == Optimal
-                finish_symbolic!(lease; certified_optimal=is_opt, eligible=true, structure_generation=struct_gen)
             end
         end
     finally

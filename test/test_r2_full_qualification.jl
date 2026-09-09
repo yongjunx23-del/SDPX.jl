@@ -128,3 +128,37 @@ end
     end
     @test maximum(allocs[2:end]) - minimum(allocs[2:end]) < 50_000
 end
+
+@testset "R2: primary exception survives a failing check-in (dual failure)" begin
+    # Approved lease protocol: cleanup must not strand `busy`, retain an active
+    # owner, or mask the primary exception.  This injects a check-in failure at
+    # the real call site while the solve body is already failing (NaN objective)
+    # and requires the primary ArgumentError to propagate.
+    prob = _test_lp()
+    options = _test_options()
+    prep = SDPX.prepare(prob, options)
+    c0 = Float64[1.0, 2.0, 3.0]
+    b0 = Float64[1.5]
+    first = SDPX.solve!(prep; objective=c0, rhs=b0)
+    @test first.status == SDPX.Optimal
+    @test prep.state.symbolic_slot.entry !== nothing
+
+    SDPX._LEASE_CHECKIN_FAULT[] = () -> error("injected check-in failure")
+    try
+        @test_throws ArgumentError SDPX.solve!(
+            prep; objective=Float64[NaN, 2.0, 3.0], rhs=b0,
+        )
+    finally
+        SDPX._LEASE_CHECKIN_FAULT[] = nothing
+    end
+    # Session must not be stranded, and the failed update must not retain a
+    # stale factor.
+    @test prep.state.busy == false
+    free = trylock(prep.state.lock)
+    free && unlock(prep.state.lock)
+    @test free
+    @test prep.state.symbolic_slot.entry === nothing
+    # Recovery still works.
+    recovered = SDPX.solve!(prep; objective=c0, rhs=b0)
+    @test recovered.status == SDPX.Optimal
+end
