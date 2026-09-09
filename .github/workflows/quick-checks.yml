@@ -109,6 +109,7 @@ jobs:
               "experimental_sparse_core_research_support.jl",
               "private_sparse_pattern.jl",
               "qdldl_legacy_ordering.jl",
+              "test_r4a_pairing_matrix.jl",
           ])
           unmounted = String[]
           for f in readdir("test")
