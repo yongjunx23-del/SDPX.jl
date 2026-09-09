@@ -659,6 +659,7 @@ include(joinpath(@__DIR__, "multifloat_trial_tail.jl"))
 include(joinpath(@__DIR__, "factor_pair_backend_selector.jl"))
 include(joinpath(@__DIR__, "factor_pair_internal_namespace.jl"))
 include(joinpath(@__DIR__, "factor_pair_hsd_canonical.jl"))
+include(joinpath(@__DIR__, "factor_pair_public_qualification.jl"))
 include(joinpath(@__DIR__, "accuracy_contract.jl"))
 include(joinpath(@__DIR__, "..", "validation", "scientific_core",
     "test_r2a_symbolic_numeric_separation.jl"))

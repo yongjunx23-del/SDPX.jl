@@ -423,6 +423,9 @@ end
     return has_rsoc ? requested / T(2) : requested
 end
 
+# R0-P4 experimental live-memory ceiling for the admitted half-Power scope.
+const FACTOR_PAIR_MAX_LIVE_BYTES = 64 * 1024 * 1024
+
 @inline _native_hsd_max_iterations(settings::Settings) =
     settings.limits.iterations == 0 ? 200 : settings.limits.iterations
 
@@ -1435,6 +1438,15 @@ function _factor_pair_public_core(
         "post-reduction cone layout is not the admitted contiguous orthant + half-Power shape",
     ))
     A, b, c = FactorPairHSD.canonical_problem(reduced)
+    # Simultaneous-live admission: the estimate is a conservative subtotal of
+    # the admitted scope (problem + point + pair factors + two epochs + LU +
+    # verifier scratch + recovery vectors).  It is enforced against a declared
+    # ceiling, so an admitted solve can never exceed the experimental budget.
+    live_estimate = FactorPairHSD.estimate_live_bytes(A, b, c, layout, 2)
+    live_estimate <= FACTOR_PAIR_MAX_LIVE_BYTES || throw(UnsupportedBackendError(
+        :admission, :memory, settings.nonsymmetric_backend,
+        "estimated live bytes $(live_estimate) exceed the experimental ceiling $(FACTOR_PAIR_MAX_LIVE_BYTES)",
+    ))
     automatic = auto_tolerance(Float64, precision_bits(model))
     tp = settings.tolerances.primal === nothing ? automatic : settings.tolerances.primal
     td = settings.tolerances.dual === nothing ? automatic : settings.tolerances.dual
@@ -1446,10 +1458,20 @@ function _factor_pair_public_core(
         settings=NativeHalfPair.RootSettings(),
         target=target,
         cert_tol=cert_tol,
+        memory_limit_bytes=FACTOR_PAIR_MAX_LIVE_BYTES,
         max_time_seconds=Float64(settings.limits.time),
     )
-    terminal = FactorPairHSD.solve!(state;
-        max_iterations=_native_hsd_max_iterations(settings))
+    terminal = try
+        FactorPairHSD.solve!(state;
+            max_iterations=_native_hsd_max_iterations(settings))
+    catch err
+        err isa FactorPairHSD.FactorPairNumericalRefusal || rethrow()
+        (; status=:refused, iterations=0, merit=Inf, audit=nothing,
+            x=copy(state.x), s=copy(state.pair.s), y=copy(state.pair.y),
+            tau=state.tau, kappa=state.kappa, history=Any[],
+            refusal_stage=err.stage, refusal_reason=err.reason,
+            refusal_detail=err.detail)
+    end
     core_seconds = Float64(time_ns() - core_started) * 1.0e-9
 
     n = canonical_num_variables(canonical)
@@ -1461,7 +1483,10 @@ function _factor_pair_public_core(
     reason = :factor_pair_not_certified
     recovery_valid = false
     recovery_started = time_ns()
-    if terminal.status === :certified_terminal
+    refusal_reason = get(terminal, :refusal_reason, :none)
+    if terminal.status === :refused
+        reason = refusal_reason === :none ? :factor_pair_refused : refusal_reason
+    elseif terminal.status === :certified_terminal
         inv_tau = inv(terminal.tau)
         recovery_valid = hsd_recover_optimal_source!(x_full, s_full, y_full,
             reduction, terminal.x .* inv_tau, terminal.s .* inv_tau,
@@ -1519,14 +1544,23 @@ function _factor_pair_public_core(
         base_exec.algorithm,
         base_exec.scaling,
         base_exec.backend_config,
-        base_exec.formulation_plan,
-        base_exec.la_config,
-        base_exec.storage_plan,
-        base_exec.gram_kernel,
-        base_exec.schedule,
-        base_exec.threads,
-        base_exec.parameter_profile,
-        base_exec.memory_budget_bytes,
+        FormulationPlan(payload.formulation,
+            :native_hsd_factor_pair_formulation, :factor_pair),
+        LABackendConfiguration(:float64, :dense_lu, :dense_lu, :native_lu,
+            (:dense_factorization,), (), :factor_pair, :solve_owned),
+        KKTStoragePlan(:dense;
+            dimension=core_dim,
+            input_nnz=length(A.nzval),
+            density=Float64(length(A.nzval)) / Float64(max(1, size(A, 1) * size(A, 2))),
+            reason=:factor_pair_dense_core,
+            provenance=:factor_pair,
+            requested=:dense,
+        ),
+        :none,
+        :serial,
+        1,
+        :factor_pair,
+        live_estimate,
         base_exec.parameters,
         payload,
     )
@@ -1537,7 +1571,7 @@ function _factor_pair_public_core(
         plan,
         reduction,
         terminal.iterations,
-        terminal.iterations + 1,
+        terminal.status === :refused ? 0 : terminal.iterations + 1,
         nothing,
         recovery_valid,
         x_full,
@@ -1548,7 +1582,7 @@ function _factor_pair_public_core(
         recovery_seconds;
         executed_kkt_route=:factor_pair,
         executed_kkt_attempts=(:factor_pair,),
-        factor_pair_terminal=(
+        factor_pair_terminal=terminal.audit === nothing ? nothing : (
             tau=terminal.tau,
             kappa=terminal.kappa,
             mu=terminal.audit.mu,
