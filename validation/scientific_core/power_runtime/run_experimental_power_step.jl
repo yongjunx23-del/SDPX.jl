@@ -42,11 +42,16 @@ function sprint_res(prefix, res)
 end
 
 target = 1e-8
+# Independent terminal audit: recompute residuals with a separate dense
+# implementation and evaluate cone membership from recovered coordinates,
+# without reusing the loop's residual routine or cached residual vectors.
 function terminal_audit(ctx; target = 1e-8)
-    e = EPS.build_epoch(ctx.pair, problem, ctx.x, ctx.tau, ctx.kappa)
-    rP, rD, rG = EPS.current_residuals(e, ctx.x, ctx.pair.s, ctx.pair.y, ctx.tau, ctx.kappa)
-    m = max(EPS.maxinf(rP), EPS.maxinf(rD), abs(rG))
-    sN = ctx.pair.s ./ ctx.tau; yN = ctx.pair.y ./ ctx.tau; xN = ctx.x ./ ctx.tau
+    Am = Matrix(A); bm = b; cm = c
+    xN = ctx.x ./ ctx.tau; sN = ctx.pair.s ./ ctx.tau; yN = ctx.pair.y ./ ctx.tau
+    rP = Am * xN + sN - bm
+    rD = transpose(Am) * yN + cm
+    rG = dot(cm, xN) + dot(bm, yN) + ctx.kappa / ctx.tau
+    m = max(maximum(abs, rP), maximum(abs, rD), abs(rG))
     obj = dot(c, xN)
     sNy = dot(ctx.pair.s, ctx.pair.y) / (ctx.tau^2)
     scale = max(1.0, maximum(abs, sN), maximum(abs, yN), maximum(abs, xN), abs(obj))
@@ -62,10 +67,11 @@ function terminal_audit(ctx; target = 1e-8)
         membership &= (x >= -tol && y >= -tol && x*y - z*z >= -tol)
         membership &= (u >= -tol && v >= -tol && 4.0*u*v - w*w >= -tol)
     end
-    primal_feas = EPS.maxinf(ctx.rP) / max(1.0, ctx.tau)
-    dual_feas = EPS.maxinf(ctx.rD) / max(1.0, ctx.tau)
+    primal_feas = maximum(abs, rP)
+    dual_feas = maximum(abs, rD)
+    homo_gap = abs(rG)
     obj_gap = abs(obj + dot(b, yN))      # c'x* + b'y* = -kappa/tau ~ 0
-    (; m, membership, primal_feas, dual_feas, obj, sNy, obj_gap,
+    (; m, membership, primal_feas, dual_feas, homo_gap, obj, sNy, obj_gap,
         obj_err = abs(obj - Float64(exact_obj)))
 end
 
@@ -76,13 +82,56 @@ end
     @test ctx.pair isa NP.PairReceipt && EPS.NP.verify(ctx.pair)
     reached_floor = false
     terminal_ok = false
+    prev_tokens = ctx.owner.tokens
+    prev_anchor = ctx.pair
     for iter in 1:80
+        # capture the PRE-STEP tokens/anchor: after the commit below, the
+        # generation advances, so rebuilding with these must refuse.
+        stale0_tokens = ctx.owner.tokens
+        stale0_anchor = ctx.pair
         res = EPS.step!(ctx)
         if !res.ok
             sprint_res("ITER $(iter):", res)
             break
         end
         reached_floor |= res.alpha >= EPS.PROG_FLOOR
+        prev_tokens = ctx.owner.tokens   # tokens bound to the just-committed anchor
+        prev_anchor = ctx.pair
+        # verify committed pair + next-epoch five equations at the committed
+        # state BEFORE any terminal break, so every accepted step is covered.
+        e = EPS.build_epoch(ctx.pair, problem, ctx.x, ctx.tau, ctx.kappa)
+        aff = FA.solve(e, FA.affine_rhs(e))
+        @test NC.certify(e, aff).status === :certified
+        @test all(v -> v <= Q(FactorPreservingAffine.PHYSICAL_FORCING), FAR.physical(e, aff).errors)
+        @test EPS.NP.verify(ctx.pair)
+        @test ctx.owner.anchor === ctx.pair
+        if ctx.iterations >= 2
+            # same-owner PREVIOUS-generation stale-token refusal: stale0_tokens
+            # bind the pre-commit anchor (generation g); after the commit the
+            # owner advanced to g+1 with the same owner, so they must refuse.
+            stale = EPS.NP.build(copy(stale0_anchor.s), copy(stale0_anchor.y),
+                stale0_anchor.mu, ctx.layout; policy = NP.POLICY,
+                settings = ctx.settings, owner = ctx.owner, warm = stale0_tokens)
+            @test stale isa NP.PairRefusal
+            stale2 = EPS.NP.build(copy(ctx.pair.s), copy(ctx.pair.y), ctx.pair.mu,
+                ctx.layout; policy = NP.POLICY, settings = ctx.settings,
+                owner = ctx.owner, warm = stale0_tokens)
+            @test stale2 isa NP.PairRefusal
+            # cold replay certification of the committed pair (warm-independent)
+            @test NP.certify(ctx.pair).status === :certified
+            # rejected-trial rollback: anchor and tokens unchanged after a
+            # failed trial construction attempt.
+            anchor_before = ctx.owner.anchor
+            gen_before = ctx.owner.generation
+            bad_trial = EPS.NP.trial(ctx.pair, ctx.tau, ctx.kappa,
+                -ctx.pair.s, -ctx.pair.y, 0.0, 0.0, 1.0; warm = ctx.owner.tokens)
+            @test bad_trial.status !== :certified
+            @test ctx.owner.anchor === anchor_before && ctx.owner.generation == gen_before
+        end
+        println("ITER ", iter, ": accepted alpha=", res.alpha,
+            " (floor ", EPS.PROG_FLOOR, ") merit=", res.merit,
+            " sigma_mu=", ctx.history[end].sigma_mu,
+            " mu=", ctx.pair.mu, " tau=", ctx.tau, " kappa=", ctx.kappa)
         if res.merit <= target
             aud = terminal_audit(ctx)
             if aud.membership && aud.sNy <= 1e-6 && aud.obj_err <= 1e-6 &&
@@ -91,24 +140,6 @@ end
                 println("TERMINATED iter=", iter, " merit=", res.merit, " obj_err=", aud.obj_err)
                 break
             end
-        end
-        println("ITER ", iter, ": accepted alpha=", res.alpha,
-            " (floor ", EPS.PROG_FLOOR, ") merit=", res.merit,
-            " sigma_mu=", ctx.history[end].sigma_mu,
-            " mu=", ctx.pair.mu, " tau=", ctx.tau, " kappa=", ctx.kappa)
-        # verify committed pair + next-epoch five equations at the committed state
-        e = EPS.build_epoch(ctx.pair, problem, ctx.x, ctx.tau, ctx.kappa)
-        aff = FA.solve(e, FA.affine_rhs(e))
-        @test NC.certify(e, aff).status === :certified
-        @test all(v -> v <= Q(FactorPreservingAffine.PHYSICAL_FORCING), FAR.physical(e, aff).errors)
-        @test EPS.NP.verify(ctx.pair)
-        @test ctx.owner.anchor === ctx.pair
-        if ctx.iterations >= 2
-            # committed trial is the new anchor; a stale-token rebuild must refuse
-            bad = EPS.NP.build(copy(ctx.pair.s), copy(ctx.pair.y), ctx.pair.mu,
-                ctx.layout; policy = NP.POLICY, settings = ctx.settings,
-                owner = NP.Owner(), warm = ctx.owner.tokens)
-            @test bad isa NP.PairRefusal
         end
     end
     @test reached_floor

@@ -56,14 +56,42 @@ function power_boundary(x, y, z, dx, dy, dz)
         return best
     end
 end
-function boundary_alpha(pair, s, ds, tau, dtau, kappa, dkappa)
+function dual_power_boundary(u, v, w, du, dv, dw)
+    # dual cone of POW3^{1/2}: 4uv - w^2 > 0
+    c0 = 4.0 * u * v - w * w
+    b = 4.0 * (dv * u + du * v) - 2.0 * w * dw
+    c2 = 4.0 * du * dv - dw * dw
+    if c2 > 0.0
+        disc = b * b - 4.0 * c2 * c0
+        disc < 0.0 && return Inf
+        r = (-b - sqrt(disc)) / (2.0 * c2)
+        return (r > 0.0 && isfinite(r)) ? r : Inf
+    elseif c2 == 0.0
+        return (b < 0.0 && c0 > 0.0) ? max(0.0, -c0 / b) : Inf
+    else
+        disc = b * b - 4.0 * c2 * c0
+        disc < 0.0 && return Inf
+        r1 = (-b - sqrt(disc)) / (2.0 * c2)
+        r2 = (-b + sqrt(disc)) / (2.0 * c2)
+        best = Inf
+        for r in (r1, r2)
+            r > 0.0 && r < best && (best = r)
+        end
+        return best
+    end
+end
+function boundary_alpha(pair, s, ds, y, dy, tau, dtau, kappa, dkappa)
+    # identical in structure to src/hsd/predictor_corrector.jl
+    # _product_hsd_boundary_alpha!: primal AND dual boundaries + tau/kappa.
     best = 1.0
     for i in 1:pair.layout.orthant
         ds[i] < 0.0 && (best = min(best, -s[i] / ds[i]))
+        dy[i] < 0.0 && (best = min(best, -y[i] / dy[i]))
     end
     for block in pair.cone.blocks
         rows = block.offset:block.offset+2
         best = min(best, power_boundary(s[rows]..., ds[rows]...))
+        best = min(best, dual_power_boundary(y[rows]..., dy[rows]...))
     end
     dtau < 0.0 && (best = min(best, -tau / dtau))
     dkappa < 0.0 && (best = min(best, -kappa / dkappa))
@@ -73,7 +101,7 @@ function predictor(e, direction, pair, tau, kappa)
     m = size(e.A, 1)
     ds = direction.ds; dy = direction.dy
     s = pair.s; y = pair.y
-    alpha_aff = boundary_alpha(pair, s, ds, tau, direction.dtau, kappa, direction.dkappa)
+    alpha_aff = boundary_alpha(pair, s, ds, y, dy, tau, direction.dtau, kappa, direction.dkappa)
     (isfinite(alpha_aff) && alpha_aff > 0.0) || return (; ok = false)
     acc = 0.0
     for k in 1:m
@@ -186,10 +214,13 @@ function build_epoch(pair, problem, x, tau, kappa)
     A, b, c = problem
     m = size(A, 1)
     xv = copy(x)
-    s, y = pair.s, pair.y
-    return FA._assemble_epoch(copy(A), copy(b), copy(c), xv, s, y, tau, kappa,
+    s = copy(pair.s); y = copy(pair.y)
+    e = FA._assemble_epoch(copy(A), copy(b), copy(c), xv, s, y, tau, kappa,
         pair.mu, deepcopy(pair.cone), 0, :experimental_half_power_step,
         deepcopy(pair.reports), deepcopy(pair.reports))
+    # ownership isolation: epoch arrays must never alias the accepted anchor
+    (e.s === pair.s || e.y === pair.y) && error("epoch aliases accepted pair")
+    e
 end
 function cold_start(problem, layout; settings = NP.RootSettings())
     A, b, c = problem
@@ -227,14 +258,19 @@ function step!(ctx; sigma_override = nothing)
     m = size(e.A, 1)
     current_merit = max(maxinf(ctx.rP), maxinf(ctx.rD), abs(ctx.rG))
     scale = max(1.0, current_merit)
-    alpha = boundary_alpha(ctx.pair, ctx.pair.s, d.ds, ctx.tau, d.dtau, ctx.kappa, d.dkappa) * 0.9
+    alpha = boundary_alpha(ctx.pair, ctx.pair.s, d.ds, ctx.pair.y, d.dy,
+        ctx.tau, d.dtau, ctx.kappa, d.dkappa) * 0.9
     backtracking = 0
     while true
         tr = trial_residuals(e, ctx.x, ctx.pair.s, ctx.pair.y, ctx.tau, ctx.kappa,
             d.dx, d.ds, d.dy, d.dtau, d.dkappa, alpha)
         trial = NP.trial(ctx.pair, ctx.tau, ctx.kappa, d.ds, d.dy, d.dtau, d.dkappa,
             alpha; warm = ctx.owner.tokens)
-        t_ok = trial.status === :certified && trial.tau > 0.0 && trial.kappa > 0.0
+        # warm-path acceptance PLUS cold replay certification: the committed
+        # pair must be certified independently of the warm probe seed, so a
+        # later rebuild cannot disagree with the accepted geometry.
+        t_ok = trial.status === :certified && trial.tau > 0.0 && trial.kappa > 0.0 &&
+               NP.certify(trial.pair).status === :certified
         if t_ok
             p2 = maxinf(tr.rPt); d2 = maxinf(tr.rDt)
             trial_merit = max(p2, d2, abs(tr.gap2))
