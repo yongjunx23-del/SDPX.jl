@@ -662,6 +662,7 @@ include(joinpath(@__DIR__, "factor_pair_hsd_canonical.jl"))
 include(joinpath(@__DIR__, "factor_pair_refusal_receipts.jl"))
 include(joinpath(@__DIR__, "factor_pair_public_qualification.jl"))
 include(joinpath(@__DIR__, "accuracy_contract.jl"))
+include(joinpath(@__DIR__, "test_r1_full_qualification.jl"))
 include(joinpath(@__DIR__, "..", "validation", "scientific_core",
     "test_r2a_symbolic_numeric_separation.jl"))
 include(joinpath(@__DIR__, "session_symbolic_lease.jl"))
