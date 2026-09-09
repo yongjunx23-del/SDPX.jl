@@ -115,14 +115,35 @@ end
 function raw_accuracy(values,intervals)
     all(i->intervals[i].lo<=values[i]<=intervals[i].hi,1:3)
 end
+function current_factor(s)
+    formed=HF.factor(s)
+    formed.status===:formed || return (status=:unsupported,reason=:factor_domain)
+    original=copy(formed.L);history=Any[];products=formed.two_prod_calls;sums=formed.two_sum_calls
+    # Preserve the original candidate when it already passes. Only after its
+    # failure consider a fixed neighbouring-word grid in the dominant column;
+    # every selection must pass the SAME independent true-Hessian certificate.
+    choices=vcat([(0,0,0)],[(a,b,c) for a in (-1,0,1) for b in (-1,0,1) for c in (-1,0,1) if (a,b,c)!=(0,0,0)])
+    for shifts in choices
+        L=copy(original)
+        for i in 1:3
+            shifts[i]==-1 && (L[i,1]=prevfloat(L[i,1]))
+            shifts[i]==1 && (L[i,1]=nextfloat(L[i,1]))
+        end
+        certificate=EF.verify_hessian(s,L)
+        products+=get(certificate,:products,0);sums+=get(certificate,:sums,0)
+        push!(history,(;shifts,L=copy(L),certificate))
+        certificate.status===:certified && return (;status=:certified,L,certificate,original,history,products,sums)
+    end
+    (;status=:unsupported,reason=:factor_grid_exhausted,original,history,products,sums)
+end
 function compute(s,ds,dy)
     RG.Phi._runtime_ok() || return (status=:unsupported,reason=:runtime)
     budget=EF.Budget(0,0)
     try
         check_vector(ds);check_vector(dy)
-        formed=HF.factor(s);formed.status===:formed || return (status=:unsupported,reason=:factor_domain)
-        L=formed.L;factor=EF.verify_hessian(s,L)
-        factor.status===:certified || return (;status=:unsupported,reason=:true_factor,factor)
+        selected=current_factor(s)
+        selected.status===:certified || return (;status=:unsupported,reason=:true_factor,selected,production_admitted=false)
+        L=selected.L;factor=selected.certificate
         tag=SDPX.PowerConjugateTag{Float64}(0.5)
         SDPX._ns_conjugate_primal_interior(tag,s...) || return (status=:unsupported,reason=:native_primal)
         workspace=SDPX.NonsymmetricCorrectorWorkspace(Float64)
@@ -181,11 +202,11 @@ function compute(s,ds,dy)
         legacy_workspace=SDPX.NonsymmetricCorrectorWorkspace(Float64)
         legacy=SDPX.try_nonsymmetric_higher_correction!(legacy_workspace,tag,s,ds,dy)
         (;status=:certified,reason=:experimental_current_point_corrector,L=copy(L),u,raw,swap,averaged,chi=projected,
-            first,swapped,gradient,ytilde,factor,posterior,natural_bounds=bounds,raw_error,final_error,
+            first,swapped,gradient,ytilde,factor,selected,posterior,natural_bounds=bounds,raw_error,final_error,
             projection_error=workspace.projection_error,legacy_native_solve_error=workspace.solve_error,
             legacy_status=legacy.status,legacy_reason=legacy.reason,
-            products=budget.products+factor.products+formed.two_prod_calls,
-            sums=budget.sums+factor.sums+formed.two_sum_calls,production_admitted=false)
+            products=budget.products+selected.products,
+            sums=budget.sums+selected.sums,production_admitted=false)
     catch err
         err isa RG.EnclosureFailure || err isa RG.Phi.ArithmeticDomainError || rethrow()
         (;status=:unsupported,reason=err isa RG.EnclosureFailure ? err.reason : :eft_domain,

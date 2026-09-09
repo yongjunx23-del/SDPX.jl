@@ -39,6 +39,8 @@ inside(I,x)=Q(I.lo)<=x<=Q(I.hi)
             result=HC.compute(s,ds,dy)
             result.status===:certified || println("UNSUPPORTED_CORRECTOR ",id,"/",block.offset," ",result)
             @test result.status===:certified
+            result.status===:certified || continue
+            @test length(result.selected.history)<=27
             @test result.factor.reason===:true_stored_hessian_only
             @test !hasproperty(result.factor,:decrement)
             @test !result.production_admitted

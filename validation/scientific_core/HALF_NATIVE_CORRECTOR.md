@@ -2,7 +2,13 @@
 
 This current-primal factor is distinct from the conjugate-shadow factor in the
 scaling epoch. The new factor-only API does not demand current-pair conjugacy.
-The original shadow verifier still requires its true decrement. No production
+The original shadow verifier still requires its true decrement. If the initially
+formed current-point factor fails, a fixed27-point grid of original/previous/next
+binary64 words in its first column is tested, original first. Every choice must
+pass the SAME independent true-Hessian metric and backward targets; there is no
+ridge, new tolerance, reference-supplied entry, or forced acceptance. Original
+and attempted factor bits/outcomes are retained. Exhaustion refuses. Other
+columns and the original point/direction inputs remain fixed. No production
 factor/root/corrector flag is promoted; original full-corrector status/reason are
 recorded separately.
 
