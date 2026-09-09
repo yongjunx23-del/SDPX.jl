@@ -39,6 +39,10 @@ function check_pair(p)
         @test !r.legacy_evaluated
     end
 end
+function refreeze_pair(p;mu=p.mu,reports=deepcopy(p.reports),layout=p.layout)
+    q=NP.PairReceipt(p.status,copy(p.s),copy(p.y),mu,layout,p.settings,p.policy,p.owner,p.generation,deepcopy(p.cone),reports,(),false)
+    NP.PairReceipt(q.status,q.s,q.y,q.mu,q.layout,q.settings,q.policy,q.owner,q.generation,q.cone,q.reports,NP.pair_key(q),false)
+end
 function receipt_fields(p)
     p isa NP.PairReceipt ? (;status=p.status,s=p.s,y=p.y,mu=p.mu,generation=p.generation,
         reports=p.reports,lp_scales=p.cone.lp_scales,blocks=[(;offset=b.offset,L=b.L,R=b.R,scale=b.scale,mu=b.mu,
@@ -52,6 +56,7 @@ end
         owner=NP.Owner();pair=NP.build(s,y,mu,NP.Layout(0,(0.5,));policy=NP.POLICY,settings=SETTINGS,owner)
         pair isa NP.PairReceipt || println("ORDINARY_REFUSAL ",receipt_fields(pair))
         check_pair(pair);pair isa NP.PairReceipt || continue
+        @test NP.trial(pair,1.,1.,zeros(3),zeros(3),0.,0.,0.).reason===:anchor_lineage
         tokens=NP.anchor!(owner,pair)
         @test owner.anchor===pair
         @test_throws ErrorException NP.anchor!(owner,pair)
@@ -65,14 +70,27 @@ end
         @test owner.anchor===pair && NP.pair_key(pair)==before
         @test NP.build(s,y,mu,pair.layout;policy=NP.POLICY,settings=SETTINGS,owner=NP.Owner(),warm=tokens).stage===:warm
         @test NP.build(s,y,mu,pair.layout;policy=NP.POLICY,settings=NP.RootSettings(256eps(Float64),63,512),owner,warm=tokens).stage===:warm
+        t=only(tokens);forged=NP.WarmToken(owner,pair,t.generation,t.offset,nextfloat(t.candidate),t.settings,t.layout,t.policy)
+        @test NP.build(s,y,mu,pair.layout;policy=NP.POLICY,settings=SETTINGS,owner,warm=(forged,)).stage===:warm
+        owner.generation=1
+        @test NP.build(s,y,mu,pair.layout;policy=NP.POLICY,settings=SETTINGS,owner,warm=tokens).stage===:warm
+        owner.generation=0
+        @test_throws ErrorException NP.verify(refreeze_pair(pair;mu=2mu))
+        @test_throws ErrorException NP.verify(refreeze_pair(pair;layout=NP.Layout(3,())))
+        badreports=deepcopy(pair.reports);r=badreports[1]
+        badreports[1]=(;r...,root=(;r.root...,radius=NaN))
+        badpair=refreeze_pair(pair;reports=badreports)
+        @test NP.verify(badpair)
+        @test NP.certify(badpair).stage===:root
         for alpha in (0.,0.25,0.5)
-            ds=-0.01.*s;dy=0.02.*y
+            ds=-0.01.*s;dy=0.02.*y+[0.01,-0.015,0.1]
             trial=NP.trial(pair,1.,1.,ds,dy,-0.01,-0.005,alpha;warm=tokens)
             @test trial.status===:certified
             @test trial.construction_only && !trial.production_admitted
             @test trial.mu==(dot(trial.st,trial.yt)+trial.tau*trial.kappa)/4
             @test all(b->b.mu==trial.mu,trial.pair.cone.blocks)
             @test owner.anchor===pair && NP.pair_key(pair)==before
+            @test_throws ErrorException NP.anchor!(owner,trial.pair)
             push!(NATIVE_PAIR_RESULTS,(;kind=:ordinary_trial,sign,alpha,tau=trial.tau,kappa=trial.kappa,mu=trial.mu,pair=receipt_fields(trial.pair)))
         end
         original=copy(pair.s);s[1]+=1.
@@ -89,11 +107,11 @@ end
         layout=NP.Layout(length(row["lp_rows"]),Tuple(FA.word(p["alpha_bits"]) for p in row["power"]))
         owner=NP.Owner();pair=NP.build(s,y,mu,layout;policy=NP.POLICY,settings=SETTINGS,owner)
         println("CAPTURE_NATIVE_PAIR ",id," ",pair.status,pair isa NP.PairRefusal ? " $(pair.stage)/$(pair.reason)" : "")
-        @test pair isa Union{NP.PairReceipt,NP.PairRefusal}
+        @test pair isa NP.PairReceipt
         if pair isa NP.PairReceipt
             check_pair(pair);tokens=NP.anchor!(owner,pair)
             warm=NP.build(s,y,mu,layout;policy=NP.POLICY,settings=SETTINGS,owner,warm=tokens)
-            @test warm isa Union{NP.PairReceipt,NP.PairRefusal}
+            @test warm isa NP.PairReceipt
             m,n=row["A_shape"];A=SparseMatrixCSC(m,n,copy(row["A_colptr"]),copy(row["A_rowval"]),FA.word.(row["A_bits"]))
             b,c,x=(FA.word.(row[k*"_bits"]) for k in ("b","c","x"));tau=FA.word(row["tau_bits"]);kappa=FA.word(row["kappa_bits"])
             built=NP.epoch(pair,A,b,c,x,tau,kappa;source_record=id)
@@ -108,6 +126,26 @@ end
                 @test cc.status===:certified
                 @test all(v->v<=Q(FA.PHYSICAL_FORCING),FAR.physical(e,result).errors)
                 push!(combined,(;sigma,certificate=cc,direction=(;dx=result.direction.dx,dy=result.direction.dy,ds=result.direction.ds,dtau=result.direction.dtau,dkappa=result.direction.dkappa)))
+                for alpha in (0x1p-10,0.25)
+                    trial=NP.trial(pair,tau,kappa,result.direction.ds,result.direction.dy,result.direction.dtau,result.direction.dkappa,alpha;warm=tokens)
+                    @test trial.status in (:certified,:unsupported)
+                    if trial isa NP.PairRefusal
+                        @test trial.stage===:trial_scalar
+                        push!(NATIVE_PAIR_RESULTS,(;kind=:capture_trial,id,sigma,alpha,pair=receipt_fields(trial)))
+                        continue
+                    end
+                    @test trial.mu==(dot(trial.st,trial.yt)+trial.tau*trial.kappa)/13
+                    @test owner.anchor===pair && NP.verify(pair)
+                    if trial.pair isa NP.PairRefusal
+                        @test trial.pair.stage in (:root,:factor,:stored_geometry,:metric,:primal,:pair_certificate,:shadow)
+                    else
+                        @test NP.certify(trial.pair).status===:certified
+                        @test all(b->b.mu==trial.mu,trial.pair.cone.blocks)
+                    end
+                    println("CAPTURE_NATIVE_TRIAL ",id," sigma=",sigma," alpha=",alpha," ",trial.status,
+                        trial.pair isa NP.PairRefusal ? " $(trial.pair.stage)/$(trial.pair.reason)" : "")
+                    push!(NATIVE_PAIR_RESULTS,(;kind=:capture_trial,id,sigma,alpha,tau=trial.tau,kappa=trial.kappa,mu=trial.mu,pair=receipt_fields(trial.pair)))
+                end
             end
             oldA=copy(e.A.nzval);A.nzval[1]+=1.;b[1]+=1.;x[1]+=1.
             @test FA.verify(e) && e.A.nzval==oldA
