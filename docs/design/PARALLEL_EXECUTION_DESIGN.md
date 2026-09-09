@@ -171,26 +171,15 @@ amortizes exactly the dominant cost (JIT/startup), consistent with its
 measured 3× win. No code change. Single-observation local probe, not a
 repeated campaign; cluster numbers stay as reported.
 
-### 5.2 Conditional residual fusion (implement only on measured value)
+### 5.2 Residual fusion: closed as investigated-and-rejected
 
-Current sites (`fixed_trace_q3.jl:1061-1200`): accepted-point refresh does
-panel-gemv → tail updates → rP combine → panel'-gemv → tail updates →
-c·τ pass → rDr copy, plus scalar gap/complementarity/μ reductions; trial
-residuals repeat the same shape per line-search step. Adjacent full-vector
-passes can merge **without changing statement order or parenthesization**:
-keep the two `rD` accumulation statements (`+= tail...` then `+= c*τ`) as
-two statements inside one per-block body; keep the single rP expression
-verbatim inside the producer loop. Explicit non-goals: no expression
-rewrites (`+= A+B` in one statement would re-parenthesize), no change to
-the non-structured fallback, the non-identity `rank_basis` path, free-variable
-border handling (free columns need a separate small c·τ loop since block
-updates cover only active variables), or shared `panel_action` lifetime.
-Acceptance: bit-identity at fixed workers across all limbs, all existing
-residual/line-search tests green, plus a measured total-time win on the
-α3 pair. Historical residual share (~7% of T1) bounds the prize at a few
-percent; trial-step multiplicity is the only upside beyond that bound.
-If the cluster attribution shows residual below that bound, close this item
-as investigated-and-rejected, not as shipped code.
+Cluster job 211771 directly measured `residual_seconds = 3.952 s` out of
+`total = 59.227 s` (exactly **6.67%**), confirming the historical ~7% estimate.
+Even complete elimination of residual time bounds the speedup at 1.071×, and
+realistic loop fusion (saving memory passes only) delivers ~1% at significant
+risk to MultiFloat parenthesization, rounding order, and free-variable border
+handling. In accordance with the decision rule above, this item is closed as
+**investigated and rejected (no code changes)**.
 
 PBS campaigns use immutable releases and preserved evidence; never alter held
 job 210917, shared environments or provider pins. Full R1/R2 concurrency and
