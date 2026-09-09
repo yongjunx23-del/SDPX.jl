@@ -9,6 +9,7 @@
 # to one side cannot leave the other stale.
 
 using Test
+using SDPX
 
 const _LEAF_MIRRORS = [
     "half_power_compensated_factor.jl",
