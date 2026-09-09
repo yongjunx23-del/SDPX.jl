@@ -49,16 +49,36 @@ ambient BLAS. Parent follow-ups `20c0614` (diagnostics/scope) and `bb4049c`
 (timer-only reset) remain outside that review. No arithmetic/route change was
 requested. Candidate status remains pending broader qualification.
 
+## Subsequent local checks
+
+- Budget test `9e7d5f6`: 134/134 plus 28 fixture assertions at 4 threads.
+  Parent `703defe` corrected test expectations for single-thread processes;
+  worker clean `5107a86` passed 134/134 plus fixture28 at both 1 and 4 threads.
+- On that source, separate regression partitions passed **4197 / 196 / 4857**,
+  with **1 expected-broken** marker in part3; exits0, wall126/51/170s.
+  Each partition used one Julia thread and a 240s external deadline. This is
+  not a same-process whole-suite or full multicore trajectory test.
+  Logs: `/tmp/sdpx-part-exec/`. `src/ext` matches development `5eb7d2b` exactly.
+- Astra narrow static follow-up `c5299d01` closed the timing-reset and
+  cache-specific metadata findings. It requested the existing backend-aware
+  BLAS getter rather than raw libblastrampoline metadata.
+- Getter repair `4252cb9` and tiny real-LP controller test `af39554`: **9/9**,
+  exit0, 27.8s; synthetic getter reports7 while actual BLAS remains1, setter
+  is never called, prior controller restored. Integrated as `5434dc6`/`81c39c9`.
+  No full partitions were rerun after this telemetry-only change.
+- Repaired persistent-pool finite-batch local gate: **3.0471×** startup-inclusive
+  throughput, complete valid recorded results, finite-run RSS below3GiB.
+  See `PERSISTENT_POOL_LOCAL_GATE.md`; not long-run memory or cluster qualification.
+
 ## Still pending
 
-- Workspace budgets, nested ranges, exception joining, provider width and
-  timing lifecycle tests; full source-matched regression partitions.
-- Follow-up verification of `20c0614` diagnostics and `bb4049c` timing reset;
-  neither is covered by the frozen `59d3be4` review.
-- Permanent pool fault tests and source-matched balanced throughput comparison.
-  Astra confirmed lifecycle/freshness/queue repair probes at `dac8617` but
-  found remaining worker-identity/RSS/numeric-gate gaps, addressed in later
-  candidate commits; acceptance requires tests of those repairs.
-- Controlled α3 latency campaign and original application-baseline reconciliation.
-  No new speedup, retained-memory bound or complete parallel qualification is
-  claimed by this document.
+- Controlled α3 latency and finer-phase campaign: first PBS job211768 failed
+  before any of12 solve processes because the wrapper did not export a required
+  variable. Failed evidence preserved; supplemental dependency submission was
+  rejected and never queued. Corrected retry1 job **211771** submitted and
+  observed running, same immutable base/candidate/provider pins. Completion,
+  paired trajectory agreement, timing/RSS results and acceptance remain pending.
+- Original application-baseline reconciliation, complete multicore trajectories,
+  provider matrix and long-lived retention qualification remain open.
+- Residual fusion is conditional on measured value, not a mandatory unmeasured
+  code change. No α3 speedup or total resource-admission bound is claimed here.
