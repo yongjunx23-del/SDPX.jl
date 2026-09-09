@@ -909,66 +909,78 @@ function _solve_prepared!(
         ))
     end
     state.busy = true
-    # Checkout happens BEFORE any validation (approved lease protocol):
-    # checkout advances the attempt generation (including failed attempts),
-    # moves any idle entry into the lease, and unconditionally revokes a
-    # healthy retained entry to Prepared with matrix epoch zero.  A failed
-    # update (NaN objective/RHS, structural mismatch, non-optimal solve) must
-    # therefore still revoke the retained entry and advance the attempt, so
-    # no stale factor can survive a failed update.  Validation runs after
-    # checkout and discards via finish_symbolic!(certified_optimal=false).
-    lease = state.symbolic_slot === nothing ? nothing : checkout_symbolic!(state.symbolic_slot)
+    # Exception-safe session transaction.  The OUTER try/finally covers the
+    # checkout itself, so a checkout throw (e.g. attempt-counter overflow)
+    # still releases `busy` and the session lock.  The INNER try/finally runs
+    # the lease check-in, and if check-in throws the outer finally still
+    # releases the session.  Checkout happens BEFORE any validation (approved
+    # lease protocol): it advances the attempt generation (including failed
+    # attempts), moves any idle entry into the lease, and unconditionally
+    # revokes a healthy retained entry to Prepared with matrix epoch zero.  A
+    # failed update (NaN objective/RHS, structural mismatch, non-optimal
+    # solve) therefore still revokes the retained entry and advances the
+    # attempt, so no stale factor can survive a failed update.  Validation
+    # runs after checkout and discards via
+    # finish_symbolic!(certified_optimal=false).
+    lease = nothing
     result = nothing
     try
-        # The no-argument solve uses the immutable structure owned by the
-        # PreparedSolver itself. Rehashing every coefficient on each repeated
-        # objective/RHS solve proves nothing new and can dominate small solves.
-        # An explicitly supplied external problem still receives the complete
-        # structural fingerprint check.
-        if validate_external_structure
-            _assert_prepared_structure!(prepared, problem)
-        end
-        selected_objective = objective === nothing ? problem.c : objective
-        selected_rhs = rhs === nothing ? problem.b : rhs
-        solve_problem, prepared_data, reduced_c, reduced_b, objective_offset =
-            _prepared_problem(
-            prepared;
-            objective=selected_objective,
-            rhs=selected_rhs,
-        )
-        # The native product-HSD production path: the prepared session builds
-        # a typed Model/Settings/Outputs through the entrypoint bridge and
-        # calls the public `optimize!` seam (engine=:native_hsd).  The direct
-        # route is cold-start only, so the legacy warm-start keyword is
-        # validated for API compatibility (`_prepared_warm_start` raises on
-        # invalid values) and then the deterministic cold initialization is
-        # used; results are unchanged in original coordinates.  The
-        # preprocessed/reduced data from `_prepared_problem` remains the
-        # authoritative structural validation and state bookkeeping; the
-        # native route performs its own canonical equality reduction.  No
-        # interior_point solve! is reachable from a prepared session.
-        _prepared_warm_start(prepared, warm_start)
-        fp_uint = UInt64(hash(prepared.structure.fingerprint))
-        context = lease === nothing ? NativeExecutionContext() :
-            NativeExecutionContext(lease, UInt64(state.numeric_generation), fp_uint)
-        result = _bridge_sdp_solve(solve_problem, prepared.options; execution_context=context)
-        state.previous = result
-        state.solve_count += 1
-        state.structure_reuses += 1
-        state.last_reuse = :structure_reused_numeric_state_fresh
-        state.last_reduced_objective = reduced_c
-        state.last_reduced_rhs = reduced_b
-        state.last_objective_offset = objective_offset
-        state.numeric_generation += 1
-        return result
-    finally
-        if lease !== nothing && lease.active
-            struct_gen = lock(_SYMMETRIC_CORE_STRUCTURE_LOCK) do
-                _SYMMETRIC_CORE_STRUCTURE_CACHE.generation
+        lease = state.symbolic_slot === nothing ? nothing :
+            checkout_symbolic!(state.symbolic_slot)
+        try
+            # The no-argument solve uses the immutable structure owned by the
+            # PreparedSolver itself. Rehashing every coefficient on each repeated
+            # objective/RHS solve proves nothing new and can dominate small solves.
+            # An explicitly supplied external problem still receives the complete
+            # structural fingerprint check.
+            if validate_external_structure
+                _assert_prepared_structure!(prepared, problem)
             end
-            is_opt = result !== nothing && result.status == Optimal
-            finish_symbolic!(lease; certified_optimal=is_opt, eligible=true, structure_generation=struct_gen)
+            selected_objective = objective === nothing ? problem.c : objective
+            selected_rhs = rhs === nothing ? problem.b : rhs
+            solve_problem, prepared_data, reduced_c, reduced_b, objective_offset =
+                _prepared_problem(
+                prepared;
+                objective=selected_objective,
+                rhs=selected_rhs,
+            )
+            # The native product-HSD production path: the prepared session builds
+            # a typed Model/Settings/Outputs through the entrypoint bridge and
+            # calls the public `optimize!` seam (engine=:native_hsd).  The direct
+            # route is cold-start only, so the legacy warm-start keyword is
+            # validated for API compatibility (`_prepared_warm_start` raises on
+            # invalid values) and then the deterministic cold initialization is
+            # used; results are unchanged in original coordinates.  The
+            # preprocessed/reduced data from `_prepared_problem` remains the
+            # authoritative structural validation and state bookkeeping; the
+            # native route performs its own canonical equality reduction.  No
+            # interior_point solve! is reachable from a prepared session.
+            _prepared_warm_start(prepared, warm_start)
+            fp_uint = UInt64(hash(prepared.structure.fingerprint))
+            context = lease === nothing ? NativeExecutionContext() :
+                NativeExecutionContext(lease, UInt64(state.numeric_generation), fp_uint)
+            result = _bridge_sdp_solve(solve_problem, prepared.options; execution_context=context)
+            state.previous = result
+            state.solve_count += 1
+            state.structure_reuses += 1
+            state.last_reuse = :structure_reused_numeric_state_fresh
+            state.last_reduced_objective = reduced_c
+            state.last_reduced_rhs = reduced_b
+            state.last_objective_offset = objective_offset
+            state.numeric_generation += 1
+            return result
+        finally
+            # Check-in.  If this throws, the outer finally below still
+            # releases `busy` and the session lock.
+            if lease !== nothing && lease.active
+                struct_gen = lock(_SYMMETRIC_CORE_STRUCTURE_LOCK) do
+                    _SYMMETRIC_CORE_STRUCTURE_CACHE.generation
+                end
+                is_opt = result !== nothing && result.status == Optimal
+                finish_symbolic!(lease; certified_optimal=is_opt, eligible=true, structure_generation=struct_gen)
+            end
         end
+    finally
         state.busy = false
         unlock(state.lock)
     end

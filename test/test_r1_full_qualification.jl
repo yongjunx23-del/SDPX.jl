@@ -155,10 +155,10 @@ end
     result = SDPX.optimize!(model; settings=SDPX.Settings(Float64; verbosity=0))
     s = SDPX.status(result)
     @test s === :primal_infeasible
-    # Independently validate the original-coordinate infeasibility certificate:
-    # it must be an available, valid primal-infeasibility ray whose reported
-    # dual residual is inside its own limit.  A bare "non-optimal" status
-    # cannot satisfy these checks.
+    # Check the solver-reported original-coordinate infeasibility certificate:
+    # available, valid, the documented ray method, and its reported dual
+    # residual inside its own limit.  This validates the reported certificate
+    # facts; it does NOT independently recompute the returned ray equations.
     cert = SDPX.certificate(result)
     @test cert.available
     @test cert.valid
