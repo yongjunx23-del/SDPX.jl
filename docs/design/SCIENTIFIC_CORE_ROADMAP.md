@@ -47,7 +47,7 @@
 
 **独立审阅（`42dc47e3`）在 Codex usage limit 处中断（基础设施阻塞，不构成通过）**；其初检项仅部分处理，尚未独立验证闭环。仍未完成：该审阅的完整闭环、完整资格矩阵、完整内存上界、Exp whole-epoch 迁移决策。公开默认 Float64 Power/Exp dispatch **未修复**（默认仍 breakdown，known-issue control 保留）。
 
-8. **实际 retained-owner 快照**（`f2d4097` / `3303f1f`）：不再由 Optimal 或历史 LU 次数推断因子所有权；按实际 pending epoch、共享完整性检查及精确状态绑定报告 prepared/current，消费后无保留对象则 owner=none。564 项相关断言通过（325 factor-pair + 239 默认结构诊断），实施独立复核待闭环。`ae53aa5` 另补有界目标符号、原始/对偶偏移和精确缩放目标验证，34 项通过。见 `docs/evidence/FACTOR_PAIR_RETAINED_OWNER.md`。
+8. **实际 retained-owner 快照**（`f2d4097` / `3303f1f`）：不再由 Optimal 或历史 LU 次数推断因子所有权；按实际 pending epoch、共享完整性检查及精确状态绑定报告 prepared/current，消费后无保留对象则 owner=none。564 项相关断言通过（325 factor-pair + 239 默认结构诊断），实施独立复核 `06623322` 在限定范围内未发现阻塞项。`ae53aa5` 另补有界目标符号、原始/对偶偏移和精确缩放目标验证，34 项通过。见 `docs/evidence/FACTOR_PAIR_RETAINED_OWNER.md`。
 
 ## T0 · 跨求解器、精度与问题适定性诊断（立即执行）
 
@@ -236,6 +236,8 @@
 **验收/检查**：同结构 100 次 c/b 更新不重复符号分析；结构改变必失效；并发独立 solver 无共享可变数据或额外内存增长；冷编译、prepare、数值更新、solve、verify 账目可核对。Mac 检查生命周期，PBS 对照外层并发与单 solve 多线程。
 
 ### R2实施包
+
+最新切片：`bba60e6` 内部 session-local CHOLMOD 租约基础实现通过 881 项断言，异常清理经独立复核 `cab03e0c` 确认关闭。**尚未接入 Prepared/native 调用链**；底层缓存 cold100=1/warm100=0 不等于公开 Prepared 门通过，现有 Prepared 仍 delta100=100。接线设计见 `docs/design/R2_SESSION_SYMBOLIC_REUSE.md`，证据见 `docs/evidence/R2_SESSION_LEASE_FOUNDATION.md`。
 
 1. **R2-A 真正的symbolic/numeric分离**：在provider真实symbolic分析入口计数；同结构100次c/b更新应不重复分析。现有metadata reuse只能证明metadata reuse，不满足这项出口。
 2. **R2-B 失效事务**：precision、rounding、CSC结构、cone布局、provider和线程预算变化时撤销旧receipt；在构造、factor、solve和证书阶段分别注入失败，确认下一次合法更新可恢复。

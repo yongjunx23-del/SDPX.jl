@@ -1,7 +1,8 @@
 # Retained factor-pair owner snapshot
 
 SDPX 0.6.1, tested source `3303f1f` (implementation `f2d4097`).
-Design consultation `1e138597`, implementation review pending at writing.
+Design consultation `1e138597`; implementation review `06623322` found no
+blockers in the bounded retained-owner diff. It did not rerun tests.
 No R0 qualification or memory-bound claim.
 
 ## Contract
@@ -48,7 +49,7 @@ Separate public objective-transform tests at `ae53aa5`: **34/34**, including
 bounded min(f)/max(-f), primal and dual offsets, and exact 4^3 objective scaling.
 That scaling is a changed problem, not homogeneous-state invariance.
 
-Remaining: independent implementation review, full regression at this source,
+Remaining: full regression at this source,
 complete original/post-reduction admission, peak-memory boundary, genuine
 homogeneous-state qualification and broad ErrorException catch in NP.build.
 R2-A symbolic reuse remains unimplemented; a distinct session-local design is
