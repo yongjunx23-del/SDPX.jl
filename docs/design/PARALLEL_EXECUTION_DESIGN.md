@@ -56,7 +56,13 @@ The first local persistent-pool experiment observed **2.85× throughput** on
 8 LP items/2 workers/2 repeats. Astra found timeout, queue, validation,
 provenance and memory-claim defects. Those records used an untracked,
 unhashed harness on solver `f1c5df4`; **they are not an acceptance receipt**.
-See `benchmark/optimization/persistent_worker_pool_results.md`.
+See `benchmark/optimization/persistent_worker_pool_results.md` for that
+historical run. The repaired, source-matched local comparison subsequently
+passed its finite-batch gate: **199.60 → 608.20 solves/h (3.0471×)**,
+32/32 valid recorded results, two counterbalanced repetitions and per-worker
+RSS samples below 3 GiB. This supports the opt-in planted-LP benchmark driver,
+not a production scan API or long-run retention guarantee. See
+`../evidence/PERSISTENT_POOL_LOCAL_GATE.md`.
 
 ## 3. Implemented candidates
 
@@ -93,10 +99,17 @@ See `benchmark/optimization/persistent_worker_pool_results.md`.
   `_affine_sum` is an ordered model-owned zero-initialized sum, not Julia's
   pairwise `sum` or an unseeded signed-zero `foldl` contract.
 
-These commits are development candidates. One-thread regression receipts
-for earlier commits do not qualify the new multicore/provider paths.
+## 4. Acceptance ledger
 
-## 4. Remaining acceptance work
+Completed narrow checks (see `../evidence/PARALLEL_REPAIR_QUALIFICATION.md`):
+affine23, SIMD52, budget134+fixture28 at both 1 and 4 threads, regression
+partitions4197/196/4857+1 expected-broken, pool contracts130, backend-aware
+BLAS diagnostics9. Astra scoped arithmetic/task review found no new blocker;
+follow-up statically closed reset and cache-label findings. This does not
+qualify complete multicore trajectories or the entire provider matrix.
+
+The following requirements remain the acceptance contract, not a claim that
+all are still unattempted or that narrow tests close every obligation:
 
 1. **Correctness tests (delegated):** source-matched Q3 references, workspace
    isolation, pool larger than budget, nested task invocation, joined failures,
@@ -107,14 +120,19 @@ for earlier commits do not qualify the new multicore/provider paths.
    pool failure probes and the numerical changes separately. Repair findings
    before promotion. Pool receipt validation checks reported certificate
    facts plus an analytic objective, not independent x/y/s equations.
-3. **Latency campaign:** immutable source/provider/input/harness identities,
+3. **Latency campaign (pending):** corrected PBS job211771 collects paired
+   base/candidate results at pools1/8 with three repeats per arm. Job211768
+   failed before solving because of an environment-export bug; preserve it
+   as failed evidence. No latency conclusion until all required receipts pass.
+   Use immutable source/provider/input/harness identities,
    matched environments, ≥3 source-matched repeats, untimed warmup, budgets
    1/2/4 inside a larger pool, plus PBS 1/8/16/32 where allocated. Record
    exclusive timing, tasks/budget, CPU/affinity, allocation/RSS, status,
    objective/residuals/certificate, iterations and digest. Accept only a
    reproducible total certified-time improvement without material T1 or
    memory regression. Do not call oversubscribed local threads real cores.
-4. **Pool campaign:** new exclusive output directory; repeated balanced arms
+4. **Pool campaign (local finite-batch gate passed; wider scope open):** new
+   exclusive output directory; repeated balanced arms
    at fixed reserved cores/memory/item stream; include startup, warmup,
    collection and failures. Require complete valid receipts and cross-arm
    numerical agreement, measured RSS within the configured bound, and ≥2%
