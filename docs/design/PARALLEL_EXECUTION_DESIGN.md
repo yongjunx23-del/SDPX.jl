@@ -181,6 +181,24 @@ risk to MultiFloat parenthesization, rounding order, and free-variable border
 handling. In accordance with the decision rule above, this item is closed as
 **investigated and rejected (no code changes)**.
 
+### 5.3 α3 paired latency campaign — COMPLETE (job 211771)
+
+12/12 fresh-process reps, all exit 0, all trajectory digests identical
+(`c354cf07…`). Final medians (3 reps/arm):
+
+| Arm | Pool 1 (s) | Pool 8 (s) |
+|---|---|---|
+| baseline `f1c5df4` | 62.538 | 40.617 |
+| candidate `5eb7d2b` | 62.344 | 40.532 |
+
+Pool 1→8 combined speedup: **1.539×** (matches Amdahl limit 1.49× for the
+measured ~62% serial fraction). Candidate vs baseline: **0.997×** at both
+pools — the workspace-budget/range-scheduler changes are numerically neutral
+within noise (no regression, no meaningful gain at this size). The measured
+parallel win comes from the existing Gram-assembly parallelization
+(13.93s→2.82s, 4.93×), not the new scheduler. Campaign complete; the parallel
+latency question is closed with this evidence.
+
 PBS campaigns use immutable releases and preserved evidence; never alter held
 job 210917, shared environments or provider pins. Full R1/R2 concurrency and
 memory qualification, native Power/Exp correctness, sparse MP admission and
