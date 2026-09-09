@@ -35,13 +35,14 @@
 - **R0–R3 统一验收（窄范围）**：Astra round-3 **PASS**（`febad00` 记录）；分区 1/2/3 = 3736/196/4622+1 broken，R2-A 门 Warm100=0/Cold100=1；故障注入 33/33。**不等于全阶段关闭**。
 - **R1-B 窄测试**（`1cc1b40`）：BigFloat 256/512/1024 owned-object 矩阵（别名隔离/重复求解/失败恢复/精度切换），standalone + CI 允许清单（`9dc5f68`）。
 - **R6-D 可重建交付**（`ced85ce`）：`check_reproducible_delivery.jl` 现如实记录 `manifest_sha1=absent` 与 active env Manifest，PASS/exit 0。
-- **R4-B MFLA panel SIMD 候选**（provider 分支 `f482be7`）：默认关；小型单进程 blocked-Cholesky 观察 1.14–1.42×，不是 solver 或完整 provider 资格。SDPX 实验开关 `c5cb2c3` 尚未集成；需完整矩阵与端到端配对验证。
+- **R4-B MFLA panel SIMD 候选**（provider 分支 `f482be7`）：provider 完整套件 4246/4246 通过，默认关闭已确认；SDPX 端到端 A/B（`ab38a8d9`，`c5cb2c3`）查明**仅终端可选精炼小 Gram 可达，每轮 KKT 因子化（LU）完全不走 Cholesky**；实测逐位等价、无求解器加速，**结论：维持默认关，不再晋升**。
 - **CSDR 算法层调研**（`75ae7a7`，`docs/design/CSDR_ALGORITHM_OPTIONS.md`）：排序机会与“不再重查”清单；冻结指纹冲突裁决（roadmap 管辖，旧 guard 不变，105/`3a7833` 为未资格观察基线）。
 - **CSDR 集群战役**（release `d52f041`，4 作业 24 次重复）：全部报告 optimal/证书有效，digest 一致 `c354cf07`。1/8/16/32 线程中位 92.207/66.257/69.525/60.149s；节点/时间窗不同，非受控扩展率，CPU% 本身不证明争用。**chunk-64 最佳 −1.85%，未过 5% 门，不采用**。旧应用 guard 尚未协调。
-- **并行实现候选（待资格）**：`e1d78e9` 取代 `f0325a4` 的进程全局预算，工作区/provider 接收独立预算，Q3 使用可嵌套粗粒度范围任务；修复 LU 标签与 SIMD 拒绝/类型/计数器。`9123695` 拆分 local/transform/Gram 计时并行化独立局部 metric；worker 字段是预算不是 CPU 测量。详见 `PARALLEL_EXECUTION_DESIGN.md`。
-- **进程池候选（待资格）**：`69916e6` 引入，`dac8617`/`4630328` 修复超时回收、队列竞态、输出/源码身份及组合验收门；历史 2.85× 使用未跟踪脚本，不能作为修复版通过凭证。
-- **R4/CSDR 批量仿射装配**（`2cfa6af`）：dot/PSD-dot/A*block 走 builder；旧窄回归通过。`3dde10a` 修复 mutable scalar 输入/输出隔离，独立测试进行中。CSDR scratch 显式调用 `_affine_sum` 的构建观察 1.411s/15.93GB→0.185s/0.724GB；冻结 driver 的任意 `sum` 不会自动获得该收益。
-- **LP 集群观察**：内层线程 T1–T16 平坦、T32 较慢；进程级 282→559→893 solves/node-hr（ppn 8/16/32）。实际并行路径需按 route/尺寸核实，不推断 LP 无并行工作。
+- **并行实现候选与回归验证**：`e1d78e9` 工作区独立预算 + 粗粒度范围调度；`9123695` 局部消除/变换/Gram 细分计时；`20c0614`/`bb4049c` 区分 LU/Cholesky 枢轴、自由变量边界并重置子计时；`5434dc6` 遵循注册 BLAS 控制器。Astra 审阅确认无算术/所有权阻塞。独立回归 `test/q3_worker_budget.jl` 134/134、`affine_builder_ownership.jl` 23/23、`hkm_vec4_parity.jl` 52/52、`blas_controller_diagnostics.jl` 9/9；三分区 4197/196/4857+1 全部通过。
+- **进程池已通过本地有限批次门**（`PERSISTENT_POOL_LOCAL_GATE.md`）：130 项 solver-free 契约测试全过；重测吞吐 199.60→608.20 次/小时（**3.0471×**），32/32 记录有效，每 worker 峰值/退前 RSS < 3 GiB；作为 opt-in 工具保留，非长期内存/生产调度资格。
+- **R4/CSDR 批量仿射装配**（`2cfa6af`）：dot/PSD-dot/A*block 走 builder；`3dde10a` 修复 mutable scalar 隔离（测试 23/23）。CSDR scratch 显式 `_affine_sum` 构建 1.411s/15.93GB→0.185s/0.724GB。
+- **LP random_large 选路归因关闭**（`c628083`）：实测 T1 29.19s vs T8 29.95s，实际走 native-HSD 稀疏 LDLT（因子化仅 2.3ms），首解 JIT 占 ~14s，`parallel_blas_panels` 是不可达算法；平坦是预期行为，无内层并行空间，不再 redesign。
+- **CSDR α3 集群配对战役（进行中）**：作业 211771（ppn8/24GB/4h），基线 vs 候选在池 1 与 8 各 3 次新鲜进程预热+测算（共 12 次），目前池 1（6/12）全部完成 exit 0，池 8 正在执行。
 
 ## 架构选择与不可越过的门（保持不变）
 
