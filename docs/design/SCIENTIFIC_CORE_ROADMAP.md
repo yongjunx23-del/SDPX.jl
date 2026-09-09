@@ -47,6 +47,8 @@
 
 **独立审阅（`42dc47e3`）在 Codex usage limit 处中断（基础设施阻塞，不构成通过）**；其初检项仅部分处理，尚未独立验证闭环。仍未完成：该审阅的完整闭环、完整资格矩阵、完整内存上界、Exp whole-epoch 迁移决策。公开默认 Float64 Power/Exp dispatch **未修复**（默认仍 breakdown，known-issue control 保留）。
 
+8. **实际 retained-owner 快照**（`f2d4097` / `3303f1f`）：不再由 Optimal 或历史 LU 次数推断因子所有权；按实际 pending epoch、共享完整性检查及精确状态绑定报告 prepared/current，消费后无保留对象则 owner=none。564 项相关断言通过（325 factor-pair + 239 默认结构诊断），实施独立复核待闭环。`ae53aa5` 另补有界目标符号、原始/对偶偏移和精确缩放目标验证，34 项通过。见 `docs/evidence/FACTOR_PAIR_RETAINED_OWNER.md`。
+
 ## T0 · 跨求解器、精度与问题适定性诊断（立即执行）
 
 ### T0.1 冻结真正的原问题，不把迭代点当问题
