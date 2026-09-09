@@ -4,21 +4,34 @@ Date: 2026-09-09. Evidence-based design note. It does not change any default;
 it records why thread scaling is poor and what a better execution model looks
 like. Numbers are measured unless marked as an estimate.
 
-## 1. Diagnosis: the poor efficiency is structural, not a tuning gap
+## 1. Diagnosis: thread scaling is poor, and the cause is workload- and policy-dependent
 
-### 1.1 Two workloads, two different causes
+**Framing correction (Astra review).** The `s` values below are *effective
+scaling parameters fitted to two/three points under the current design*, not
+proven intrinsic serial fractions, and the "cap" is conditional on that model.
+A true serial fraction requires per-phase worker-count and wall-time
+instrumentation (Section 4). Likewise a low whole-job CPU% does **not** by
+itself prove node contention: serial phases or policy gating produce the same
+signature. Treat every number here as an effective observation to be explained,
+not as a structural constant.
 
-| Workload | p=1 | p=4 | p=8 | p=16 | p=32 | implied serial fraction s | Amdahl cap at 32 |
+### 1.1 Two workloads, two different observed signatures
+
+| Workload | p=1 | p=4 | p=8 | p=16 | p=32 | fitted effective `s` | model cap at 32 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| LP `random_large` (m=400,n=1200), cluster | 6.737 s | — | 6.573 s | 6.730 s | 7.960 s | **~0.97** | **1.03×** |
-| CSDR frozen α3 Float64x4, local | 41.313 s | 23.056 s | — | — | — | **~0.41** | **2.33×** |
+| LP `random_large` (m=400,n=1200), cluster | 6.737 s | — | 6.573 s | 6.730 s | 7.960 s | ~0.97 | ~1.03× |
+| CSDR frozen α3 Float64x4, local | 41.313 s | 23.056 s | — | — | — | ~0.41 | ~2.33× |
 
-- The LP has essentially **no parallelizable work**: the cone is the orthant
-  (diagonal), so there is no Gram/metric assembly; the solve is sparse
-  factorization plus vector sweeps. Threading is the wrong axis; at p=32 the
-  overhead makes it 18% *slower*.
-- CSDR α3 does scale (1.79× at 4 threads) but is capped near 2.3× by a ~41%
-  serial fraction.
+- The LP does **not** lack a parallel path: `src/pipeline/plan.jl:318-322`
+  selects `:parallel_blas_panels` for `:lp_primal_dual` Float64 when
+  `selected_threads > 1 && cone_rows * variables^2 >= 2_000_000 &&
+  blas_threads() == 1`; weighted-Gram kernels exist. The flat curve may
+  therefore be a **policy/threshold/work-size** outcome (path not selected, or
+  selected but dominated by serial work, or overhead), not an absence of
+  parallel arithmetic. This must be resolved by instrumentation before
+  redesigning.
+- CSDR α3 does scale (1.79× at 4 threads) but far below ideal; the serial
+  share needs attribution.
 
 ### 1.2 Where α3's time goes (1 thread, solver 41.3 s, phase trace)
 
@@ -53,8 +66,17 @@ double-counts.
 4. **Incomplete accounting.** ~21% of α3 wall time is not attributed to any
    phase, and `direction_seconds` overlaps children. We cannot optimize what we
    do not measure.
-5. **Wrong axis for LP-like problems.** For diagonal cones there is no
-   parallelizable arithmetic; only process-level parallelism helps.
+5. **Wrong axis for some LP-like cases.** Where no parallel path is selected or
+   the parallel Gram share is small, inner threading adds overhead; but this is
+   a policy/threshold question (see `plan.jl:318-322`) to be settled by
+   instrumentation, not assumed.
+
+6. **Static-partitioning composability hazard.** Coarse `@threads :static`
+   partitioning (a proposed fix for atomic-claim contention) introduces
+   non-primary/nested-task composability problems: nested parallel regions,
+   task migration, and blocking behaviour when the solve runs inside an outer
+   task pool. Any partitioning change must specify how it composes with the
+   outer scheduler and the existing thread budget.
 
 ## 2. Proposal: a two-level execution model
 
@@ -96,9 +118,10 @@ a user thread count alone:
 - **NUMA/affinity** on the cluster: first-touch placement, per-thread scratch,
   avoid false sharing on adjacent block writes.
 - **Validity gate for scaling claims**: every timed run records
-  `Percent of CPU this job got`; a run whose CPU% is far below the requested
-  thread count is contended and must not be reported as scaling evidence (the
-  first t32 cluster run used ~1.4 cores while requesting 32).
+  `Percent of CPU this job got`; a low value is *evidence to investigate*, not
+  proof of contention (serial phases and policy gating produce the same
+  signature). Only report a run as contended when node load / other-job
+  evidence supports it; otherwise attribute it via per-phase instrumentation.
 - **Digest caveat**: threading changes Gram reduction order, so trajectories
   differ across thread counts; bit-identity/A-B gates must compare within a
   fixed thread count.
