@@ -134,6 +134,33 @@ Recorded because the packet forbids presenting a prototype as production.
 | PSD large-scale storage | **not characterised** | see PR-09 evidence gap; no measurement recorded |
 | Thread scaling 16/64 | **not measurable here** | `Sys.CPU_THREADS` reports 4 on this host |
 
+## 4b. Whitelist collision check (executed, not assumed)
+
+The packet states: "所有新增文件路径均为建议，必须进行碰撞检查" — every proposed
+new path must be collision-checked. `packet_validation.json` reports
+`new_file_owner_conflicts: 0`, but that is the packet checking itself against its
+own task graph. It does not check the paths against the actual repositories, so
+A00 ran that check.
+
+Method: extract every `write_allowlist` entry from `tasks.json`, then test each
+path for membership in `git ls-files` of the task's own repository.
+
+| Metric | Result |
+|---|---|
+| Whitelisted paths across all 26 tasks | **95** (SDPX 58, MFLA 15, BFLA 22) |
+| Paths already tracked in their repo | **0** (excluding A00's own four, which A00 created) |
+| Paths claimed by more than one task | **0** — every path has exactly one owner |
+| Worker tasks writing an existing `src/` file | **0** — correct, that is I01/I02/I03 authority |
+
+Three entries are not file paths: `@integration/core-cutover`,
+`@integration/numeric-cutover`, `@integration/retirement` are the branch/tag
+names the integration role claims for I01/I02/I03. That is a sensible
+convention — the integration role reserves a branch rather than files — and it
+is recorded here so a later reader does not mistake them for missing paths.
+
+Conclusion: the packet's task graph is collision-free against the frozen
+repositories. This is now verified, not inherited from the packet's self-check.
+
 ## 5. What A00 did NOT do
 
 - Did not run the packet's `scripts/bootstrap_env.jl`; no joint environment exists.
