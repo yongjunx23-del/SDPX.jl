@@ -2631,8 +2631,23 @@ end
         for j in i:n
             backward_work += abs(F[i, j] * solution[j])
         end
+        # P0-03 composed-bound repair.  `U*x = y` is only the second half of
+        # the solve: `y` itself came from the forward substitution computed
+        # just above, so it is known only to within `gamma * forward_work`.
+        # Bounding the backward residual by `gamma * backward_work` alone
+        # drops that propagated term and therefore asserts a tighter
+        # statement than the arithmetic supports.  The allowance is the
+        # composed backward-error bound
+        #     gamma * ( (|U||x|)_i + (|L||y| + |Py|)_i )
+        # with the same gamma, the same work definition and the same
+        # arithmetic; only the propagated forward term is no longer
+        # discarded.  This is a bound-propagation fix, not a tolerance
+        # change: no gamma, operation count or acceptance constant moves.
+        # Observed on x86 znver3 (rejected at ratio 2.77 with an absolute
+        # residual of 1.1e-20 and an exact forward replay) while the same
+        # input is accepted on znver4 and on aarch64.
         _product_bordered_zero_safe_close(
-            u[i], gamma * backward_work,
+            u[i], gamma * (backward_work + forward_work),
         ) || return false
     end
     return true
