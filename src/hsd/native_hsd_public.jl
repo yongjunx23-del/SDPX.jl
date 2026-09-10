@@ -1249,6 +1249,18 @@ function _native_hsd_diagnostics(
         step_size = factor_pair_terminal.step_size
         backtracking = factor_pair_terminal.backtracking
     end
+    # PR-07 step diagnostics. The plan requires the ACTUAL per-step values to be
+    # observable, not only the requested knobs: "先记录每步真实 mu_aff/mu,
+    # sigma_used, alpha_aff, alpha_combined, correction norm, backtracks, retry
+    # reason，不要只记录 requested setting". These come straight off the step
+    # record; nothing is recomputed or inferred here.
+    step_record = terminal_base === nothing ? nothing : terminal_base.record
+    mu_aff = step_record === nothing ? T(NaN) : step_record.mu_aff
+    sigma_used = step_record === nothing ? T(NaN) : step_record.sigma_used
+    alpha_aff = step_record === nothing ? T(NaN) : step_record.alpha_aff
+    alpha_combined = step_record === nothing ? T(NaN) : step_record.alpha_combined
+    correction_norm = step_record === nothing ? T(NaN) : step_record.correction_norm
+    retry_reason = step_record === nothing ? :none : step_record.retry_reason
     termination = (
         reason=reason,
         stage=termination_stage,
@@ -1266,6 +1278,13 @@ function _native_hsd_diagnostics(
         terminal_alpha,
         step_size,
         backtracking,
+        # PR-07 diagnostics.
+        mu_aff,
+        sigma_used,
+        alpha_aff,
+        alpha_combined,
+        correction_norm,
+        retry_reason,
     )
     if factor_pair_execution !== nothing
         termination = (; termination..., factor_pair_execution)

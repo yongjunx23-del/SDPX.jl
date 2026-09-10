@@ -63,10 +63,31 @@ mutable struct HSDStepRecord{T}
     factor_epoch::Int
     factorizations::Int
     iterations::Int
+    # PR-07 iteration diagnostics. The plan requires that the *actual* per-step
+    # values be recorded, not only the requested settings: "先记录每步真实
+    # mu_aff/mu, sigma_used, alpha_aff, alpha_combined, correction norm,
+    # backtracks, retry reason，不要只记录 requested setting".
+    #
+    # `mu_aff` and `backtracking` already existed; these four were computed in
+    # the predictor and discarded, so a receipt could say which knobs were
+    # requested but not what the step actually used.
+    #
+    # All four are plain scalars written in place, so recording them costs no
+    # allocation and cannot change the trajectory. `retry_reason` is a Symbol
+    # (a pointer store) rather than a formatted string: the plan also requires
+    # that diagnostics not be built on the hot path.
+    sigma_used::T
+    alpha_aff::T
+    alpha_combined::T
+    correction_norm::T
+    retry_reason::Symbol
 end
 function HSDStepRecord{T}() where {T}
     z = zero(T)
-    return HSDStepRecord{T}(z, z, z, z, z, z, z, z, 0, 0, 0, 0, 0)
+    return HSDStepRecord{T}(
+        z, z, z, z, z, z, z, z, 0, 0, 0, 0, 0,
+        z, z, z, z, :none,
+    )
 end
 
 """Route-owned storage for the dense bordered HSD implementation.

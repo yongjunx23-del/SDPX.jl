@@ -456,6 +456,9 @@ function _product_hsd_expanded_direction!(
     ratio = base.mu_aff / base.mu
     sigma = _product_hsd_sigma(state, ratio)
     sigma_mu = sigma * base.mu
+    # PR-07: record what the step actually used, not what was requested.
+    base.record.sigma_used = sigma
+    base.record.alpha_aff = alpha_aff
     _product_hsd_corrector_shift!(state, sigma_mu)
     if _runtime_ns_affine_fallback_reported(state.runtime)
         return _product_hsd_restore_affine_predictor!(state, predictor_scalar)
@@ -569,6 +572,9 @@ function _product_hsd_sparse_direction!(state::ProductConeHSDState{T}) where {T}
     ratio = base.mu_aff / base.mu
     sigma = _product_hsd_sigma(state, ratio)
     sigma_mu = sigma * base.mu
+    # PR-07: record what the step actually used, not what was requested.
+    base.record.sigma_used = sigma
+    base.record.alpha_aff = alpha_aff
     _product_hsd_corrector_shift!(state, sigma_mu)
     if _runtime_ns_affine_fallback_reported(state.runtime)
         return _product_hsd_restore_affine_predictor!(state, predictor_scalar)
@@ -610,6 +616,9 @@ Base.@noinline function _product_hsd_direction!(
     ratio = base.mu_aff / base.mu
     sigma = _product_hsd_sigma(state, ratio)
     sigma_mu = sigma * base.mu
+    # PR-07: record the actual per-step values (see HSDStepRecord).
+    base.record.sigma_used = sigma
+    base.record.alpha_aff = alpha_aff
 
     _product_hsd_corrector_shift!(state, sigma_mu)
     if _runtime_ns_affine_fallback_reported(state.runtime)

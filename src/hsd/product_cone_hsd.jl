@@ -4225,8 +4225,15 @@ Base.@noinline function product_hsd_step!(state::ProductConeHSDState{T,R,RT,NS,C
             end
         end
     end
-    accepted || return state.runtime.valid ?
-                       HSDStepBreakdown : HSDStepDirectionFailed
+    if !accepted
+        # PR-07: record the reason the epoch produced no accepted step, so a
+        # receipt can distinguish "no direction" from "direction failed line
+        # search" without string-matching the returned code.
+        base.record.retry_reason = state.runtime.valid ?
+            :line_search_rejected : :runtime_invalidated
+        return state.runtime.valid ? HSDStepBreakdown : HSDStepDirectionFailed
+    end
+    base.record.retry_reason = :none
     # P7 minimal hook: record that one candidate direction passed the route
     # acceptance gate.  Diagnostic metadata only; the fused workspace is
     # optional and nothing here promotes a status or changes a tolerance.

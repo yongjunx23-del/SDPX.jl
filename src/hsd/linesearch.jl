@@ -143,6 +143,12 @@ Base.@noinline function _product_hsd_line_search!(
     (isfinite(p_norm) && isfinite(d_norm) && isfinite(g_norm)) || return false
     current_merit = max(p_norm, d_norm, g_norm)
     scale = max(one(T), current_merit)
+    # PR-07 diagnostic. Initialised before the loop: `trial_merit` is assigned
+    # inside the accepted branch, so referencing it afterwards would be an
+    # UndefVarError on any path that did not evaluate it. (That mistake was made
+    # and caught here; the safe form is an explicit initial value, not a scoping
+    # assumption.)
+    trial_merit = T(NaN)
     backtracking = 0
     has_nonsymmetric = !isempty(state.runtime.exp) ||
                        !isempty(state.runtime.power)
@@ -291,5 +297,17 @@ Base.@noinline function _product_hsd_line_search!(
     base.record.primal_step = alpha
     base.record.dual_step = alpha
     base.record.step_size = alpha
+    # PR-07: the combined step actually accepted, alongside the affine step the
+    # predictor recorded. `primal_step`/`dual_step`/`step_size` are aliases of
+    # this value; `alpha_combined` names it explicitly so a receipt can compare
+    # it against `alpha_aff` without knowing the aliasing.
+    base.record.alpha_combined = alpha
+    # Correction-norm proxy: how much the corrector moved the trial residual
+    # relative to the current merit. Recorded as a scale-free ratio so it is
+    # comparable across arithmetics; NaN when either merit is not resolvable,
+    # which is the honest value rather than a fabricated number.
+    base.record.correction_norm =
+        (isfinite(trial_merit) && isfinite(current_merit) &&
+         current_merit > zero(T)) ? trial_merit / current_merit : T(NaN)
     return true
 end
