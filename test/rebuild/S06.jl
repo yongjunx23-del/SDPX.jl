@@ -40,11 +40,124 @@ const S06_SRC = joinpath(S06_ROOT, "src")
 const S06_PLANNING = joinpath(S06_SRC, "planning")
 const S06_PLANNING_INCLUDED_HERE = !isdefined(SDPX, :plan_setup)
 
+# Two modes, one contract. In *standalone* mode the planning sources are not yet
+# part of the package and are included into this module. In *integrated* mode
+# `src/SDPX.jl` already includes them and every planning name must be imported
+# from `SDPX` instead. The first version of this driver had only the first
+# branch, so it had never executed in integrated mode at all: wired in, all 28
+# planning names below were undefined in `Main` and the driver died on its first
+# `ThreadCapacity`. The list is checked rather than trusted — see
+# `s06_planning_binding_gaps()` below, which parses the planning sources and
+# re-derives the requirement from this file's own identifiers, then requires the
+# local binding to *be* SDPX's object.
 if S06_PLANNING_INCLUDED_HERE
     include(joinpath(S06_PLANNING, "costs.jl"))
     include(joinpath(S06_PLANNING, "resources.jl"))
     include(joinpath(S06_PLANNING, "setup.jl"))
+else
+    import SDPX: ThreadCapacity, BlasLeaseRegistry, ThreadContentionError
+    import SDPX: SetupRequest, SetupWorkload, SetupProfile
+    import SDPX: SetupPlan, SetupCostModel, SetupMemoryLedger, SessionThreadBudget
+    import SDPX: MemoryAdmission, SetupExecutionObservation
+    import SDPX: SetupMemoryRefusal, SetupCapabilityRefusal, SetupProfileRefusal
+    import SDPX: plan_setup, setup_context, setup_request, setup_workload
+    import SDPX: setup_profile, setup_plan_signature, setup_memory_ledger
+    import SDPX: admit_setup_memory, reserve_setup_memory
+    import SDPX: session_thread_budget, execute_setup_plan, verify_setup_execution
+    import SDPX: load_setup_profile, profile_from_benchmark_name, artifact_digest
+    import SDPX: describe_coarse_cone_tasks, available_consumer_width
+    import SDPX: thread_capacity, thread_tier_status, max_granted_threads
+    import SDPX: with_session_thread_scope, blas_lease_record
+    import SDPX: UNPROFILED_SETUP, SETUP_THREAD_REGISTRY
 end
+
+"""
+Every name defined at top level by the planning sources, parsed from the files
+themselves so this check cannot drift from them. Only column-0 definitions are
+collected: `function`/`struct`/`const` forms plus one-line `f(x) = ...` forms.
+
+`function Base.show(...)` style lines extend *another* module's function and are
+not planning bindings of their own, so the roots of such qualified names are
+dropped rather than required to be importable from `SDPX`.
+"""
+function s06_planning_top_level_names()
+    names = Symbol[]
+    for file in ("costs.jl", "resources.jl", "setup.jl")
+        path = joinpath(S06_PLANNING, file)
+        isfile(path) || continue
+        for line in eachline(path)
+            (isempty(line) || line[1] in (' ', '\t', '#')) && continue
+            name = nothing
+            for pattern in (
+                r"^(?:function|struct|mutable struct|abstract type)\s+([A-Za-z_][A-Za-z0-9_!]*)",
+                r"^const\s+([A-Za-z_][A-Za-z0-9_!]*)",
+                r"^([A-Za-z_][A-Za-z0-9_!]*)\s*\([^=]*\)\s*(?:where[^=]*)?=",
+            )
+                matched = match(pattern, line)
+                matched === nothing && continue
+                name = Symbol(matched.captures[1])
+                break
+            end
+            name === nothing && continue
+            name in (:Base, :Core, :Main) && continue
+            push!(names, name)
+        end
+    end
+    return unique(names)
+end
+
+"""
+Identifiers this driver references, with comments and string literals removed.
+Deliberately over-inclusive: a planning name that appears here only in a comment
+is a harmless extra requirement, whereas missing one is the failure this guard
+exists to catch.
+"""
+function s06_driver_identifiers()
+    tokens = Set{Symbol}()
+    for line in eachline(@__FILE__)
+        stripped = replace(line, r"#.*$" => "")
+        stripped = replace(stripped, r"\"(?:\\.|[^\"\\])*\"" => "\"\"")
+        for matched in eachmatch(r"[A-Za-z_][A-Za-z0-9_!]*", stripped)
+            push!(tokens, Symbol(matched.match))
+        end
+    end
+    return tokens
+end
+
+"""
+    s06_planning_binding_gaps() -> Vector{Symbol}
+
+The names the planning sources define that *this driver* references but that are
+not bound in the current module — exactly the integration-mode gap that made
+this driver unusable once the planning layer was wired into `SDPX`. In
+integrated mode it additionally requires the local binding to be the module's
+own object (`===`), so a shadowing copy cannot pass as the real one.
+"""
+function s06_planning_binding_gaps()
+    referenced = s06_driver_identifiers()
+    gaps = Symbol[]
+    for name in s06_planning_top_level_names()
+        name in referenced || continue
+        isdefined(@__MODULE__, name) || (push!(gaps, name); continue)
+        if !S06_PLANNING_INCLUDED_HERE && isdefined(SDPX, name)
+            getfield(@__MODULE__, name) === getfield(SDPX, name) ||
+                push!(gaps, Symbol("$(name)(shadowed)"))
+        end
+    end
+    return gaps
+end
+
+const S06_MODE = S06_PLANNING_INCLUDED_HERE ? "standalone" : "integrated"
+const S06_PLANNING_NAMES_CHECKED = length(
+    intersect(s06_driver_identifiers(), Set(s06_planning_top_level_names())),
+)
+const S06_PLANNING_GAPS = s06_planning_binding_gaps()
+isempty(S06_PLANNING_GAPS) || error(
+    "S06 driver cannot run in $(S06_MODE) mode: $(length(S06_PLANNING_GAPS)) " *
+    "planning names are not bound in $(@__MODULE__): " *
+    join(string.(S06_PLANNING_GAPS), ", "),
+)
+@info "S06 driver bindings resolved" mode=S06_MODE planning_names_checked=S06_PLANNING_NAMES_CHECKED
 
 # ---------------------------------------------------------------------------
 # Fixtures and helpers
@@ -378,6 +491,23 @@ elseif get(ENV, "SDPX_S06_CHILD", "") == "provider"
 end
 
 @testset "S06 setup planning, memory and thread budget" begin
+
+    # -----------------------------------------------------------------------
+    # 0. Binding coverage in whichever mode this driver is running
+    # -----------------------------------------------------------------------
+    #
+    # This is the guard for the integration-mode gap: the driver only ever ran
+    # its standalone branch before the planning layer was wired in, and the
+    # integrated branch had 28 undefined names. The check is re-derived from the
+    # planning sources and this file's own identifiers, so a new planning name
+    # used here without a matching binding fails loudly in *both* modes instead
+    # of only in the mode nobody ran.
+    @testset "0 planning binding coverage" begin
+        @test S06_MODE in ("standalone", "integrated")
+        @test isempty(S06_PLANNING_GAPS)
+        @test S06_PLANNING_NAMES_CHECKED >= 28
+        @info "S06 binding coverage" mode=S06_MODE names_checked=S06_PLANNING_NAMES_CHECKED gaps=length(S06_PLANNING_GAPS)
+    end
 
     # -----------------------------------------------------------------------
     # 1. Reproducibility, and the reported plan versus the execution
@@ -1036,40 +1166,38 @@ end
         # provider loaded the request is refused with its reason; with it loaded
         # the same request must be planned and priced at the provider's own
         # element width. Neither branch may be satisfied by a stale belief.
-        if S06_PLANNING_INCLUDED_HERE
-            big_request = SetupRequest(
-                BigFloat, 256, :bordered, false, 3,
-                request.full_dimension, request.compact_dimension,
-                request.ar_nnz, request.canonical_nnz, 0, 0,
-                copy(request.block_sizes), :sparse_lower, 1, S06_BUDGET, nothing,
+        #
+        # This block is deliberately NOT conditional on the driver's mode: the
+        # two binding modes must assert the same things, or the mode nobody runs
+        # is the mode that is wrong.
+        big_request = SetupRequest(
+            BigFloat, 256, :bordered, false, 3,
+            request.full_dimension, request.compact_dimension,
+            request.ar_nnz, request.canonical_nnz, 0, 0,
+            copy(request.block_sizes), :sparse_lower, 1, S06_BUDGET, nothing,
+        )
+        if s06_provider_loaded(BigFloat)
+            planned = plan_setup(
+                big_request,
+                setup_context(capacity=S06_CAPACITY, provider_available=true),
             )
-            if s06_provider_loaded(BigFloat)
-                planned = plan_setup(
-                    big_request,
-                    setup_context(capacity=S06_CAPACITY, provider_available=true),
-                )
-                @test planned.memory.scalar_bytes ==
-                      ExtendedPrecisionBLAS._element_storage_bytes(BigFloat)
-                @test planned.memory.scalar_bytes > 8
-                @test planned.admission.admitted
-                @test planned.route isa Symbol
-            else
-                capability = try
-                    plan_setup(
-                        big_request,
-                        setup_context(
-                            capacity=S06_CAPACITY, provider_available=false,
-                        ),
-                    )
-                    nothing
-                catch exception
-                    exception
-                end
-                @test capability isa SetupCapabilityRefusal
-                @test capability.reason === :provider_unavailable_for_precision
-            end
+            @test planned.memory.scalar_bytes ==
+                  ExtendedPrecisionBLAS._element_storage_bytes(BigFloat)
+            @test planned.memory.scalar_bytes > 8
+            @test planned.admission.admitted
+            @test planned.route isa Symbol
         else
-            @info "S06 BigFloat capability check skipped: integrated configuration"
+            capability = try
+                plan_setup(
+                    big_request,
+                    setup_context(capacity=S06_CAPACITY, provider_available=false),
+                )
+                nothing
+            catch exception
+                exception
+            end
+            @test capability isa SetupCapabilityRefusal
+            @test capability.reason === :provider_unavailable_for_precision
         end
     end
 
