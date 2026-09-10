@@ -39,7 +39,14 @@ scratch/
 tmp/
 *.tmp
 
+# Crash dumps. The bare `core` pattern matches a directory named `core` at ANY
+# depth, so it also captured the real source directory `src/core/`. That hid
+# deliverables from `git status` and therefore from the fresh-process clean-tree
+# gate, which is defined as an empty `git status --porcelain`
+# (benchmark/optimization/v2_fresh_process_profile.jl:162). Re-include the
+# source directory; genuine core dumps are still ignored.
 core
+!/src/core/
 /core.*
 LocalPreferences.toml
 .julia/
