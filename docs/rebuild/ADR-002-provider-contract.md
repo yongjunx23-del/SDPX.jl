@@ -284,3 +284,52 @@ exact generalization §3 of this ADR rejects. S05 refused to promote it and the
 live leg conservatively reports `MultiRHSPerColumn`. Whether batching is genuinely
 supported is therefore a **decision**, not a measurement, until M01–M03 answers
 it. ADR-002 §3 is not satisfied for MFLA on this point.
+
+## 11. The §10 equivalence has EXPIRED — I01 wired both providers (added 2026-09-11)
+
+§10 closed the §6 SHA drift by proving that `using <Provider>` executed identical
+code at the ADR's label and at the revision a task actually measured. It then said
+the equivalence would lapse the moment I01/I02 added an `include` for the new
+files, and required I01/I02 to re-check it and I03 not to freeze on a stale one.
+
+**Both providers are now wired, so it has lapsed.** This section exists so no later
+task cites §10 as if it still held.
+
+| Provider | §10's equivalence | Wired at | Diff that ended it | Status |
+|---|---|---|---|---|
+| MFLA | `50e6e0b` (via `3ddf8ed`) | `2294ada` | 3 `include`s added after `factor_cache_requirements.jl:36` | **void** |
+| BFLA | `f95d3e6` (via `9d9683c`) | `db06034` | `mpfr_context.jl` + 3 `include`s added | **void** |
+
+### Why the inference no longer holds
+
+§10's justification was: zero deletions, plus an unchanged module entry point, plus
+no new file in the include graph, therefore the loaded code is identical. I01
+changed the **entry point** of both packages. The other two premises still hold —
+the wiring commits delete nothing from the packages' kernels — but the inference
+needs all three, and the load graph is now strictly larger. `using
+MultiFloatLinearAlgebra` and `using BigFloatLinearAlgebra` each execute top-level
+code that did not execute before.
+
+Note what did *not* change, because it bounds the blast radius: for BFLA the wiring
+is additive at the name surface. Measured at `9d9683c` and at `db06034`, the
+exported name set is byte-identical (115 names) and of the `names(M; all=true)`
+entries, 272 real (non-gensym) names became 350 with **zero removals**. So the
+equivalence is void as a *proof technique*, not because provider behaviour is
+suspected to have changed. BFLA's own suite is 10864/10864 at both revisions and
+B01's driver measures identical values in sandbox and wired modes.
+
+### The rule, for the third time
+
+**Name the revision actually measured.** Results taken at `3ddf8ed`/`9d9683c`
+remain valid *as results at those revisions* and may not be re-attributed to
+`2294ada`/`db06034`. Results taken at the wired revisions must say so. The I01
+rollback path is recorded in `docs/rebuild/I01_integration_record.md` §3; reverting
+the wiring does not revive this equivalence for any result already reported, it only
+makes the old revision current again.
+
+### What §11 does not settle
+
+§10's open capability question (`S05-F1`: MFLA's `capabilities(MF)` still reporting
+`multi_rhs::Bool`, the generalization §3 rejects) is untouched. It stays a decision,
+not a measurement, until M01–M03 answers it, and ADR-002 §3 remains unsatisfied for
+MFLA on that point.
