@@ -107,3 +107,45 @@ measuring the newer one and reporting it as `b38dea1` is forbidden.
 - Provider-gated tests must **skip with a reason** when the provider env is
   absent, never pass silently. `test/sparse_qdldl_provider.jl` is the reference
   pattern: a skip is visible in the summary; a missing test is not.
+
+---
+
+## 8. Verification of §4 against the actual BFLA code (added 2026-09-11)
+
+§4 asserted the "retained physical factor" hazard from the packet's prose. It has
+now been checked against the real provider source at BFLA `f95d3e6`
+(`src/caches.jl`), and the packet's description is **accurate**.
+
+All four BFLA `factorize!` methods — `BFLACholeskyCache` (:376), `BFLALUCache`
+(:749), `BFLALDLTCache` (:990), `BFLARRQRCache` (:1205) — use a **two-phase**
+design:
+
+```julia
+# Preflight: shape/precision checks that do not mutate factor storage. A
+# preflight error preserves the previous (possibly successful) factor.
+_cache_require_prepared(cache, "factorize!")
+_require_cache_matrix(cache, A, "factorize!")
+# Commit phase: invalidate the old success first, then factorize. Any
+# exception leaves the status non-success (never a stale :success).
+cache.status = FactorStatus(:unprepared, nothing)
+```
+
+Two consequences that sharpen §4 rather than merely restating it:
+
+1. **BFLA's `:success` cannot go stale within the commit phase** — the status is
+   cleared *before* the work. That is a genuine and documented guarantee.
+2. **It does not extend to the preflight phase.** Preflight deliberately does not
+   touch `status` or storage, so after a *preflight* failure the cache still
+   reports its previous `:success` and still holds the previous physical factor.
+   An SDPX adapter that inspects `cache.status` after a failed call would
+   therefore conclude the old factor is valid **for the new request**.
+
+That is exactly the failure §4 legislates against. The mitigation is unchanged
+and is now grounded in the provider's actual structure: SDPX must revoke the
+**logical** lease on any failed `refactor_numeric!`, before inspecting any
+provider status, because the provider is entitled to keep both its storage and
+its previous success flag across a preflight rejection.
+
+Recorded here as evidence, not as a request for BFLA to change: the preflight
+behaviour is a reasonable strong-exception guarantee. The obligation is
+SDPX-side.
