@@ -24,12 +24,47 @@ Anything not executed is `NOT_STARTED`.
 | P4    | NOT_STARTED | selective additional correction not implemented. |
 | P5    | NOT_STARTED | large-KKT/sparse scaling not implemented. |
 | G0    | PARTIAL | identity emitter + loader-path check implemented and enforced by `run_gates.jl` (exit 3 on mismatch); full per-run identity not yet recorded for every performance sample. |
-| G1    | PARTIAL | P0 analytical counterexamples + boundary/illegal-input semantics gate green; the platform failure regression (P0-03) is in CI jobs, not yet a committed test. |
+| G1    | PARTIAL | P0 analytical counterexamples + boundary/illegal-input semantics gate green (`--gate p0` 21/21, `--gate semantics` 18/18). The platform failure regression (P0-03) is covered by the CI diagnostic workflow, not yet by a committed local test. |
 | G2    | PARTIAL | bit-level payload comparison exists and is exercised; not yet applied to every E-class change (none landed yet). |
 | G3    | NOT_STARTED | no A-class policy landed. |
 | G4    | NOT_STARTED | lifecycle/epoch/alias/concurrency gate not executed. |
 | G5    | NOT_STARTED | five-cone × precision × scale matrix not run. |
 | G6    | NOT_STARTED | no statistically-qualified performance comparison yet. |
+
+## CI layers cleared on the candidate branch (`development/scientific-core-20260907`)
+
+The platform `test` matrix aborts at the first errored top-level testset, so
+each fix reveals the next previously-masked failure.  Cleared in order:
+
+1. **SOCP/native-V2 lowering receipts** — canonical `_domain_token` /`_sense_token` /`_canonical_power_token` (commit `4ff976d`).
+2. **`factor_pair_backend_selector.jl`** — admission capability checks
+   short-circuit in order, so a multi-thread process hit the `threads`
+   refusal before `iteration_policy`/`cones`; pinned `Limits(threads=1)`
+   (`27839e4`).
+3. **`native_structure_diagnostics.jl`** — pinned `Limits(threads=1)` for the
+   bordered-LP compact-plan control.
+4. **`power_epigraph_small` E2E control** — the Float64 Power/Exp breakdown is
+   platform-dependent, so the known-breakdown control now accepts exactly the
+   two internally consistent truthful states (`7ea4952`).
+5. **x86 bordered LP `direction_breakdown`** — P0-03, the triangular-solve
+   certificate bound; see the evidence document above.
+6. **`factor_pair_public_qualification.jl` "default route unchanged"** — the
+   same platform-dependent Float64 Power breakdown as (4); the control now
+   asserts `optimal ⇔ valid certificate` instead of a pinned non-optimal
+   outcome.  Confirmed not to be caused by P0-03: this model never reaches the
+   bordered triangular certificate (zero gate traces under
+   `SDPX_DEBUG_DIRECTION=1`).  macOS CI passed this control before and after.
+7. **`Pkg` missing from the test target** —
+   `validation/scientific_core/test_r2a_symbolic_numeric_separation.jl` uses
+   `using Pkg` for provenance and is included by `test/runtests.jl`; `Pkg` was
+   not in `[targets] test`, so every platform that reached it aborted with
+   `Package Pkg not found in current path`.
+
+`test.yml` also gained `workflow_dispatch` so the platform matrix can be
+validated on a candidate branch instead of after `main` turns red.
+
+Layers below those are still unknown; the matrix has not yet run to
+completion on all four platforms.
 
 ## Notes on scope
 
