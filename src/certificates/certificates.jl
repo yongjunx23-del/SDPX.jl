@@ -195,6 +195,14 @@ function _cert_residual!(state::Union{HSDState{T},_OptimalityCandidate{T}}) wher
     state.rG = dot(c, x) + dot(b, y) + kappa
     state.complementarity = dot(svec, y) + tau * kappa
     state.mu = state.complementarity / T(state.nu + 1)
+    # PR-01: this kernel overwrites rP/rD with a different accumulation
+    # association than `hsd_residual!` (it pre-seeds rP from `s - b*tau` and rD
+    # from `c[j]*tau` rather than accumulating A*x / A'y first). The results are
+    # mathematically equal but not bitwise equal, and the Newton direction build
+    # consumes rP/rD. Clearing the canonical mark here is what makes the
+    # accepted-point residual dedup sound: without it, a certificate check would
+    # silently leave a certificate-flavoured residual to be treated as canonical.
+    state.residual_canonical = false
     return nothing
 end
 

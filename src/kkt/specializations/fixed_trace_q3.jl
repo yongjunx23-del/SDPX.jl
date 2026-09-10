@@ -1190,6 +1190,12 @@ function _fixed_trace_hsd_residual!(
     base.rG = hsd_gap_residual(base)
     base.complementarity = hsd_complementarity(base)
     base.mu = hsd_mu(base)
+    # PR-01: the structured kernels compute the same canonical residual as
+    # `hsd_residual!` (the parity is asserted in
+    # `validation/product_hsd_symmetric_state.jl`), so this path also marks the
+    # cached residual canonical for the current point.
+    base.residual_epoch = base.point_epoch
+    base.residual_canonical = true
     return nothing
 end
 

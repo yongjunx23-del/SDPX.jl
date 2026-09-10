@@ -158,6 +158,56 @@ mutable struct HSDState{T, R<:AbstractFactorCache{T}}
     rDt::Vector{T}
     record::HSDStepRecord{T}
     epoch::Int
+    # PR-01 accepted-point lifecycle token.
+    #
+    # `point_epoch` is bumped by every write to the accepted iterate
+    # (x/s/y/tau/kappa). `residual_epoch` records the `point_epoch` the cached
+    # rP/rD/rG/mu were computed from, and `residual_canonical` records *which*
+    # kernel produced them.
+    #
+    # The second field is load-bearing and is why a naive "skip the entry
+    # residual" change is unsound. `_cert_residual!`
+    # (src/certificates/certificates.jl) writes rP/rD with a different
+    # accumulation association than `hsd_residual!`: it pre-seeds the dual
+    # accumulator with `c[j]*tau` and seeds rP from `s - b*tau`, instead of
+    # accumulating A*x / A'y first. The values agree mathematically but not
+    # bitwise. The direction build consumes rP/rD, so reusing a
+    # certificate-flavoured residual would change the trajectory.
+    #
+    # The token therefore lives on `HSDState`, not on `ProductConeHSDState`:
+    # `_cert_residual!` receives the former, and a token it cannot clear would
+    # be unsound by construction.
+    point_epoch::Int
+    residual_epoch::Int
+    residual_canonical::Bool
+end
+
+"""
+    _hsd_bump_point_epoch!(state) -> Int
+
+Record that the accepted iterate changed, invalidating any cached residual.
+
+Must be called from every site that writes `x`, `y`, `s`, `tau` or `kappa`.
+Missing one would make the PR-01 dedup unsound, so
+`test/accepted_point_reuse.jl` asserts the token's promise directly by
+recomputing the canonical residual and comparing it against the cached values.
+"""
+@inline function _hsd_bump_point_epoch!(state::HSDState)
+    state.point_epoch += 1
+    return state.point_epoch
+end
+
+"""
+    _hsd_residual_is_fresh(state) -> Bool
+
+Whether the cached residual is the canonical one for the current iterate.
+
+True only when the point has not moved since the canonical kernel last ran *and*
+no certificate-flavoured writer has run since. Both conditions are required; the
+second is what the pre-audit code could not express.
+"""
+@inline function _hsd_residual_is_fresh(state::HSDState)
+    return state.residual_canonical && state.residual_epoch == state.point_epoch
 end
 
 # Ownership boundary (TASK-P0-TYPED-CORE).  The route-owned names below are
@@ -463,6 +513,11 @@ function _hsd_state_from_reduction(
         alloc_zeros(T, n), alloc_zeros(T, m), alloc_zeros(T, m), alloc_zeros(T, m),
         alloc_zeros(T, m), z, z, alloc_zeros(T, m), alloc_zeros(T, n),       # trial/scratch
         HSDStepRecord{T}(), 0,
+        # PR-01 lifecycle token. A fresh state has no canonical residual, so
+        # `residual_epoch` starts one behind `point_epoch` (0 vs -1) and the
+        # first entry residual is always computed. `residual_canonical` starts
+        # false because rP/rD are freshly zeroed, not canonical.
+        0, -1, false,
     )
 end
 
@@ -608,6 +663,11 @@ function hsd_residual!(state::HSDState{T}) where {T}
     state.rG = hsd_gap_residual(state)
     state.complementarity = hsd_complementarity(state)
     state.mu = hsd_mu(state)
+    # PR-01: this is the canonical residual for the current iterate. Recording
+    # the point epoch here is what lets `product_hsd_step!` skip a recomputation
+    # it would otherwise perform on an unchanged point.
+    state.residual_epoch = state.point_epoch
+    state.residual_canonical = true
     return nothing::Nothing
 end
 

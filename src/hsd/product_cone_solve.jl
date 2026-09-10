@@ -536,6 +536,8 @@ function _product_hsd_refined_optimal_result!(
     # refined, the scalar HSD equation has the exact solution kappa=0. Keep a
     # small positive representative so the homogeneous point remains valid.
     base.kappa = min(base.kappa, base.tau * tol / T(8))
+    # PR-01: x/s/y/kappa were overwritten above, so the cached residual is stale.
+    _product_hsd_bump_point_epoch!(state)
     _product_hsd_residual!(state)
     if verify_optimal!(
         canonical, base, x_original, s_original, y_original; tol=tol,
@@ -550,6 +552,7 @@ function _product_hsd_refined_optimal_result!(
     copy_owned!(base.s, saved_s)
     copy_owned!(base.y, saved_y)
     base.kappa = saved_kappa
+    _product_hsd_bump_point_epoch!(state)
     _product_hsd_residual!(state)
     return nothing
 end
@@ -680,6 +683,8 @@ function _product_hsd_terminal_verified_result!(
     copy_owned!(base.y, base.yt)
     base.tau = base.tau_t
     base.kappa = base.kappa_t
+    # PR-01: terminal trial committed to base, so the cached residual is stale.
+    _product_hsd_bump_point_epoch!(state)
 
     result = _product_hsd_candidate_result!(
         state, x_original, s_original, y_original, tol,
@@ -693,6 +698,10 @@ function _product_hsd_terminal_verified_result!(
     copy_owned!(base.y, saved_y)
     base.tau = saved_tau
     base.kappa = saved_kappa
+    # PR-01: restored to the saved pair; this is a different point than the
+    # trial that was just certified, so the token advances and the explicit
+    # residual below is required (not a duplicate).
+    _product_hsd_bump_point_epoch!(state)
     _product_hsd_residual!(state)
     restored = if state.symmetric_core isa FixedTraceQ3CoreWorkspace
         _product_hsd_fixed_trace_hkm_neighborhood!(
@@ -767,6 +776,7 @@ function product_hsd_solve!(
     end
     if base.workspace.rank_incompatible
         copy_owned!(base.x, base.workspace.rank_ray)
+        _product_hsd_bump_point_epoch!(state)
         if verify_dual_infeasibility!(
             base.canonical, base, x_original, s_original; tol=certificate_tol,
         )

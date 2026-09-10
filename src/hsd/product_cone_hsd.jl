@@ -293,6 +293,15 @@ mutable struct ProductConeHSDState{
     terminal_recovery::ProductHSDTerminalRecoveryCache{T}
 end
 
+# PR-01 lifecycle token, delegated to the owning `HSDState`. The token lives
+# there (not here) because `_cert_residual!` writes residue on the `HSDState`
+# and must be able to clear the canonical mark; see `src/hsd/hsd.jl`.
+@inline _product_hsd_bump_point_epoch!(state::ProductConeHSDState) =
+    _hsd_bump_point_epoch!(state.base)
+
+@inline _product_hsd_residual_is_fresh(state::ProductConeHSDState) =
+    _hsd_residual_is_fresh(state.base)
+
 function ProductConeHSDState(
     canonical::CanonicalConicProgram{T},
     driver::HotRouteCache{T,R};
@@ -754,6 +763,8 @@ function product_hsd_cold_start!(state::ProductConeHSDState{T}) where {T}
     initialize_primal_dual!(state.runtime, base.s, base.y)
     base.tau = one(T)
     base.kappa = one(T)
+    # PR-01: cold start replaced the iterate.
+    _product_hsd_bump_point_epoch!(state)
     return state
 end
 
@@ -3947,13 +3958,21 @@ end
 end
 
 """Per-epoch frozen residual refresh; the fixed-trace core supplies the
-structured (bit-identical) A kernels, every other route keeps `hsd_residual!`."""
+structured (bit-identical) A kernels, every other route keeps `hsd_residual!`.
+
+Records the PR-01 lifecycle token: after this returns, the cached residual is
+the canonical one for the current `point_epoch`.
+"""
 function _product_hsd_residual!(state::ProductConeHSDState{T}) where {T}
     core = state.symmetric_core
     if core isa FixedTraceQ3CoreWorkspace{T}
-        return _fixed_trace_hsd_residual!(state.base, core)
+        _fixed_trace_hsd_residual!(state.base, core)
+    else
+        hsd_residual!(state.base)
     end
-    return hsd_residual!(state.base)
+    state.base.residual_epoch = state.base.point_epoch
+    state.base.residual_canonical = true
+    return nothing
 end
 
 """Line-search trial residual; the fixed-trace core supplies the structured
@@ -4075,7 +4094,17 @@ Base.@noinline function product_hsd_step!(state::ProductConeHSDState{T,R,RT,NS,C
     base.workspace.rank_incompatible && return HSDStepDirectionFailed
     timings = state.phase_timings
     t0 = time_ns()
-    _product_hsd_residual!(state)
+    # PR-01: the accepted-point residual is already cached when nothing has
+    # moved the iterate since the canonical kernel last ran. That is the common
+    # path: this step's trailing residual (below) is followed by the next step's
+    # entry residual with no intervening iterate write. Correctness depends on
+    # `_product_hsd_residual_is_fresh` being false whenever `_cert_residual!`
+    # ran (it writes a non-bit-identical rP/rD) or the iterate moved; both are
+    # recorded by the lifecycle token. Skipping recomputes nothing the direction
+    # build would not otherwise read.
+    if !_product_hsd_residual_is_fresh(state)
+        _product_hsd_residual!(state)
+    end
     timings.residual_seconds += Float64(time_ns() - t0) * 1.0e-9
     if !isfinite(base.mu)
         return HSDStepDirectionFailed

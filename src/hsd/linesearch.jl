@@ -284,6 +284,8 @@ Base.@noinline function _product_hsd_line_search!(
     copy_owned!(base.y, base.yt)
     base.tau = base.tau_t
     base.kappa = base.kappa_t
+    # PR-01: the accepted iterate moved, so the cached residual is stale.
+    _product_hsd_bump_point_epoch!(state)
     state.diagnostic = :none
     base.record.backtracking = backtracking
     base.record.primal_step = alpha
