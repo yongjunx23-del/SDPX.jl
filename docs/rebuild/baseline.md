@@ -44,11 +44,38 @@ in `src/hsd/initialize.jl`), there is no residual-freshness token in
 `src/hsd/hsd.jl`, no `sigma_used`/`correction_norm`/`retry_reason`, and
 `_block_shape_code` still accepts only `:dense_lower`.
 
-**MFLA drift.** The packet freezes MFLA at `b38dea1` (v0.4.0, 2026-08-30), but
-the local checkout is at `50e6e0b` (2026-09-01), i.e. **local is ahead of the
-frozen SHA**. This is a semantic relocation A00 must record: MFLA tasks (M01–M03,
-P02) must state which SHA they measured against, and a result obtained at
-`50e6e0b` may not be attributed to `b38dea1`. Not yet resolved — see §4.
+**MFLA drift — resolved as far as A00 can resolve it.**
+
+The packet freezes MFLA at `b38dea1` (v0.4.0, 2026-08-30); the local checkout is
+at `50e6e0b` (2026-09-01). The drift is exactly three commits:
+
+| Commit | Subject |
+|---|---|
+| `920f810` | `bench(phase5): add Float64x4 kernel microbenchmark suite` |
+| `5885060` | `perf(ldlt): thread independent weighted-panel rows` |
+| `50e6e0b` | `test(phase5): document triangular solve parallelism ceiling` |
+
+Diffstat: 6 files, +207/−18. `Project.toml` version is **`0.4.0` at both
+revisions** — the threading behaviour changed without a version bump, which is
+itself worth noting for any capability claim keyed on version.
+
+Scope of the numeric change: `src/factorizations/ldlt.jl` has a **single hunk**
+at `_factor_ldlt_panel!` (around lines 592–667). Checked explicitly: the diff
+contains **zero** occurrences of `_bk_`, `pivot`, `2x2` or `normalize`. So the
+BK pivot grammar — the subject of anchor **S12**, which task A01 uses to build
+its 2×2 pivot oracle — is **unchanged** by the drift. A01's oracle therefore
+remains valid against the local checkout.
+
+BFLA: **no drift at all**. Local `f95d3e6` equals the frozen SHA exactly.
+
+Consequence, binding on M01–M03, P02 and B03:
+- The drift is threading-only. A task claiming a *numeric* result may measure at
+  either revision, because the pivot grammar is identical.
+- A task claiming a *threading or performance* result **must** state which
+  revision it measured. `5885060` changes threaded weighted-panel rows, so a
+  parallelism claim at `b38dea1` would be a claim about code that lacks the
+  change.
+- No result may be attributed to `b38dea1` if it was measured at `50e6e0b`.
 
 ## 2. Provider versions
 
@@ -102,7 +129,7 @@ Recorded because the packet forbids presenting a prototype as production.
 | Sparse route beyond Float64 | **unverified** | `:sparse_augmented` is fail-closed for every non-Float64 `T` |
 | `SparseQDLDLCache` | **unverified in CI** | exercised only when MFLA+QDLDL are installed; skips otherwise |
 | Session symbolic lease | **exists but UNWIRED** | `src/factor_cache/session_symbolic_lease.jl` header states "Not wired into Prepared execution yet" |
-| MFLA `b38dea1` vs `50e6e0b` | **unresolved** | local ahead of frozen SHA; no task has declared which it measures |
+| MFLA `b38dea1` vs `50e6e0b` | **resolved (threading-only)** | 3 commits, single hunk in `_factor_ldlt_panel!`; BK pivot grammar unchanged; version not bumped |
 | BFLA local SHA | **matches** | `f95d3e6` = frozen |
 | PSD large-scale storage | **not characterised** | see PR-09 evidence gap; no measurement recorded |
 | Thread scaling 16/64 | **not measurable here** | `Sys.CPU_THREADS` reports 4 on this host |
