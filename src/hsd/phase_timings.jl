@@ -50,6 +50,9 @@ Base.@kwdef mutable struct ProductHSDPhaseTimings
     accepted_update_seconds::Float64 = 0.0
     certification_seconds::Float64 = 0.0
     refinement_iterations::Int = 0
+    # Relaxing liveness profile: 1 when the opt-in relaxed profile was active
+    # for this solve. Recording only; no acceptance gate reads it.
+    relaxed_liveness::Int = 0
     # Exclusive fixed-trace Q3 sub-buckets (children of
     # `kkt_factorization_seconds`; add them, do not add both parent and child).
     q3_metric_seconds::Float64 = 0.0
@@ -114,6 +117,7 @@ function phase_timings_snapshot(timings::ProductHSDPhaseTimings)
         accepted_update_seconds=timings.accepted_update_seconds,
         certification_seconds=timings.certification_seconds,
         refinement_iterations=timings.refinement_iterations,
+        relaxed_liveness=timings.relaxed_liveness,
         q3_metric_seconds=timings.q3_metric_seconds,
         q3_factor_seconds=timings.q3_factor_seconds,
         q3_homogeneous_seconds=timings.q3_homogeneous_seconds,

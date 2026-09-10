@@ -1854,6 +1854,34 @@ function _public_native_hsd_core(
         # operator is small enough to rank-reveal densely: use the dense
         # authority rather than failing closed.  Ordered before the
         # fail-closed check so the check sees the replacement.
+        # Relaxing liveness profile (opt-in, off by default). An in-band sparse
+        # rank pivot proceeds instead of failing closed. This is a LIVENESS
+        # relaxation only: the reduction is re-typed as ready/preserve-original
+        # so the ordinary path runs, but nothing is verified by doing so and no
+        # acceptance gate changes - the strict original-coordinate verifier
+        # still decides whether any certificate may be reported, and the
+        # diagnostics record `relaxed_liveness`. Genuine rank deficiency
+        # (`SparseEqualityExpandedRequired`) and unsupported precision are NOT
+        # relaxed: those are verdicts, not ambiguities.
+        if settings.relaxed_liveness &&
+           row_reduction isa SparseEqualityReduction &&
+           row_reduction.status === SparseEqualityRankAmbiguous
+            row_reduction = SparseEqualityReduction(
+                SparseEqualityReady,
+                :preserve_original,
+                row_reduction.sparse_rank,
+                row_reduction.Ar,
+                row_reduction.cr,
+                row_reduction.V,
+                row_reduction.cnull,
+                row_reduction.rank,
+                row_reduction.rank_tolerance,
+                row_reduction.objective_tolerance,
+                false,
+                row_reduction.incompatible,
+                row_reduction.ray,
+            )
+        end
         if row_reduction isa SparseEqualityReduction &&
            (row_reduction.status !== SparseEqualityReady ||
             row_reduction.mode !== :preserve_original) &&
@@ -2070,6 +2098,7 @@ function _public_native_hsd_core(
             symmetric_core_current_rss=peak_rss,
             symmetric_core_precision_bits=effective_precision,
             schur_threads=settings.limits.threads,
+            relaxed_liveness=settings.relaxed_liveness,
             iteration_knobs=settings.iteration_knobs,
             allow_expanded_bordered_fallback=allow_expanded_bordered_fallback,
             execution_context=execution_context,

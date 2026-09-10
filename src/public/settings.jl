@@ -227,6 +227,18 @@ struct Settings{T<:AbstractFloat}
     # Whole-epoch nonsymmetric backend selector (R0-P4).  `Native...` keeps
     # every historical consumer; the experimental value is fail-closed.
     nonsymmetric_backend::NonsymmetricBackendChoice
+    # Opt-in relaxing liveness profile. Off by default, so the shipped
+    # contract is unchanged. When on, two internal *liveness* gates stop
+    # refusing and the solve is allowed to proceed:
+    #   * an in-band sparse rank pivot proceeds instead of failing closed, and
+    #   * the bordered numeric factor is used without the componentwise
+    #     certificate replay.
+    # It does NOT relax acceptance: the strict original-coordinate verifier and
+    # every tolerance are untouched, so `:optimal` is still only ever reported
+    # when the strict gate passes, and a relaxed solve that fails it reports its
+    # existing failure status. Runs with this flag set record
+    # `relaxed_liveness` and the certificate-skip count in diagnostics.
+    relaxed_liveness::Bool
 
     function Settings{T}(
         tolerances::Tolerances{T},
@@ -248,6 +260,7 @@ struct Settings{T<:AbstractFloat}
         blas_threads::Union{Nothing,Int},
         iteration_knobs::NamedTuple,
         nonsymmetric_backend::NonsymmetricBackendChoice=NativeNonsymmetricBackend,
+        relaxed_liveness::Bool=false,
     ) where {T<:AbstractFloat}
         _validate_engine(engine)
         _validate_symbol(scaling, (:auto, :none, :equilibrate), "scaling")
@@ -297,6 +310,7 @@ struct Settings{T<:AbstractFloat}
             blas_threads,
             iteration_knobs,
             nonsymmetric_backend,
+            relaxed_liveness,
         )
     end
 end
@@ -409,6 +423,7 @@ function Settings(
         sigma=nothing, beta=nothing, gamma=nothing, predictor=:classic,
     ),
     nonsymmetric_backend::NonsymmetricBackendChoice=NativeNonsymmetricBackend,
+    relaxed_liveness::Bool=false,
 ) where {T<:AbstractFloat}
     _validate_symbol(equilibration, (:off, :ruiz), "equilibration")
     equilibration === :ruiz && !(scaling in (:auto, :equilibrate)) &&
@@ -435,6 +450,7 @@ function Settings(
         blas_threads,
         iteration_knobs,
         nonsymmetric_backend,
+        relaxed_liveness,
     )
 end
 

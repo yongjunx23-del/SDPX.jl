@@ -278,6 +278,9 @@ mutable struct ProductConeHSDState{
     iteration_beta::Union{Nothing,T}
     iteration_gamma::Union{Nothing,T}
     iteration_predictor::Symbol
+    # Opt-in relaxing liveness profile. Recording and gating only for the
+    # liveness relaxation chosen at plan time; no acceptance gate reads it.
+    relaxed_liveness::Bool
     # One-shot route restart uses a terminal expanded executor. Ordinary
     # expanded requests retain the historical expanded->bordered fallback.
     allow_expanded_bordered_fallback::Bool
@@ -315,6 +318,7 @@ function _product_cone_hsd_state(
     allow_expanded_bordered_fallback::Bool=true,
     execution_context::Union{Nothing,NativeExecutionContext}=nothing,
     prepared_key_context::Union{Nothing,NamedTuple}=nothing,
+    relaxed_liveness::Bool=false,
 ) where {T<:AbstractFloat,R<:AbstractFactorCache{T}}
     if kkt_route === :sparse_augmented
         prepare_symmetric_core = true
@@ -331,6 +335,8 @@ function _product_cone_hsd_state(
         ))
     end
     phase_timings = ProductHSDPhaseTimings()
+    # Recording only: no gate reads these.
+    phase_timings.relaxed_liveness = relaxed_liveness ? 1 : 0
     symmetric_core = if prepare_symmetric_core
         prepared_core = _prepare_product_hsd_symmetric_core(
             base;
@@ -487,6 +493,7 @@ function _product_cone_hsd_state(
         get(iteration_knobs, :beta, nothing),
         get(iteration_knobs, :gamma, nothing),
         get(iteration_knobs, :predictor, :classic),
+        relaxed_liveness,
         allow_expanded_bordered_fallback,
         ProductHSDTerminalRecoveryCache(T),
     )
@@ -505,6 +512,7 @@ function ProductConeHSDState(
         sigma=nothing, beta=nothing, gamma=nothing, predictor=:classic,
     ),
     allow_expanded_bordered_fallback::Bool=true,
+    relaxed_liveness::Bool=false,
 ) where {T<:AbstractFloat}
     prepare_symmetric_core = prepare_symmetric_core || (kkt_route === :sparse_augmented)
     rss = symmetric_core_current_rss === nothing ? Int(Sys.maxrss()) : symmetric_core_current_rss
@@ -524,6 +532,7 @@ function ProductConeHSDState(
         schur_threads=schur_threads,
         iteration_knobs=iteration_knobs,
         allow_expanded_bordered_fallback=allow_expanded_bordered_fallback,
+        relaxed_liveness=relaxed_liveness,
     )
 end
 
