@@ -15,10 +15,10 @@
 # Writes `validation/clarabel_borrowing/baseline_receipt.json`.
 
 using SDPX
-using SHA
 using Dates
 using TOML
 using Printf
+using LinearAlgebra: BLAS
 
 const HERE = @__DIR__
 const REPO = normpath(joinpath(HERE, "..", ".."))
@@ -59,8 +59,8 @@ end
 
 function _lp_simple()
     model = SDPX.Model(Float64)
-    x = SDPX.variable!(model, :x, 2; domain=SDPX.Nonnegatives(2))
-    SDPX.constraint!(model, :sum, sum(x), SDPX.EqualTo(1.0))
+    x = SDPX.variable!(model, :x, 2; domain=SDPX.Nonnegative())
+    SDPX.constraint!(model, :sum, x[1] + x[2] - 1.0, SDPX.ZeroCone())
     SDPX.objective!(model, SDPX.Minimize(), x[1] + 2 * x[2])
     return model
 end
@@ -78,7 +78,7 @@ end
 function _psd_2x2()
     model = SDPX.Model(Float64)
     X = SDPX.variable!(model, :X, 2, 2; domain=SDPX.PSDCone())
-    SDPX.constraint!(model, :trace, SDPX.tr(X), SDPX.EqualTo(1.0))
+    SDPX.constraint!(model, :trace, X[1, 1] + X[2, 2] - 1.0, SDPX.ZeroCone())
     SDPX.objective!(model, SDPX.Minimize(), X[1, 1])
     return model
 end
@@ -88,7 +88,7 @@ const CASES = (
     BaselineCase(:soc_unit_disk, :soc, _soc_unit_disk, -1.0),
     BaselineCase(:soc_k32, :soc, () -> _soc_scaled(32), -1.0),
     BaselineCase(:soc_k128, :soc, () -> _soc_scaled(128), -1.0),
-    BaselineCase(:psd_2x2, :psd, _psd_2x2, 0.5),
+    BaselineCase(:psd_2x2, :psd, _psd_2x2, 0.0),
 )
 
 """Run one case and project the receipt fields the plan asks for."""
@@ -105,9 +105,12 @@ function _receipt(case::BaselineCase)
             verbosity=0,
             limits=SDPX.Limits(iterations=500, time=120.0, threads=1),
         )
+        # The native HSD engine publishes neither iteration history nor a
+        # performance trace, so request only what it does publish. Asking for
+        # `history`/`trace` is a hard error, not a silent downgrade.
         outputs = SDPX.Outputs(
             :all, :all, :all; objectives=true, certificate=:full,
-            diagnostics=:full, history=true, trace=false,
+            diagnostics=:full, history=false, trace=false,
         )
         result = SDPX.optimize!(model; settings, outputs)
     catch exception
@@ -125,11 +128,10 @@ function _receipt(case::BaselineCase)
     row["dual_objective"] = Float64(certificate.dual_objective)
     row["objective_error"] =
         abs(Float64(certificate.primal_objective) - case.expected_objective)
-    row["iterations"] = try
-        length(SDPX.iteration_history(result))
-    catch
-        -1
-    end
+    # The native engine does not publish per-iteration history; record that
+    # honestly with an explicit sentinel rather than substituting a different
+    # quantity or omitting the field.
+    row["iterations"] = "not_published_by_engine"
 
     # Effective route facts: the plan wants the *executed* route, not the
     # requested one, because those differ under fallback.
@@ -141,21 +143,12 @@ function _receipt(case::BaselineCase)
         :equilibration, :fallback_reason,
     )
         value = hasproperty(selected, field) ? getproperty(selected, field) : nothing
-        row[String(field)] = value === nothing ? nothing : String(value)
+        row[String(field)] = value === nothing ? "absent" : String(value)
     end
 
-    # Phase timings, when the engine recorded them.
-    timings = try
-        SDPX.performance_trace(result).phase_timings
-    catch
-        nothing
-    end
-    if timings !== nothing
-        for field in propertynames(timings)
-            value = getproperty(timings, field)
-            value isa Real && (row["phase_" * String(field)] = Float64(value))
-        end
-    end
+    # Phase timings: the public trace is not published by this engine, so they
+    # are not available here. Recorded as absent rather than omitted silently.
+    row["phase_timings_available"] = false
     return row
 end
 
@@ -190,7 +183,7 @@ function main()
         "case_count" => length(rows),
         "failure_count" => length(failures),
     )
-    target = joinpath(HERE, "baseline_receipt.json")
+    target = joinpath(HERE, "baseline_receipt.toml")
     open(target, "w") do io
         TOML.print(io, payload; sorted=true)
     end

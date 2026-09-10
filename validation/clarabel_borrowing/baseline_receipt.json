@@ -1,0 +1,29 @@
+blas_threads = 4
+case_count = 5
+failure_count = 2
+failures = ["lp_simple", "psd_2x2"]
+generated = "2026-09-11T02:27:20.890"
+julia_version = "1.12.6"
+precision_bits = 53
+schema = "sdpx-baseline-receipt/1"
+sdpx_head = "fdbe6f2c78e92dc69e256deeeb88e1d6629dcccc"
+threads = 1
+worktree_dirty = true
+
+[[cases]]
+exception = """UndefVarError: `Nonnegatives` not defined in `SDPX`\nSuggestion: check for spelling errors or missing imports."""
+family = "lp"
+id = "lp_simple"
+seconds = 0.20432012500000002
+status = "threw"
+[[cases]]
+certificate_method = "original_coordinates"
+certificate_valid = true
+dual_objective = -1.000000000000433
+equilibration = "off"
+executed_factorization_kernel = "cholmod"
+executed_kkt_route = "bordered"
+executed_kkt_storage = "sparse"
+fallback_reason = "none"
+family = "soc"
+id = "soc_unit_disk"
