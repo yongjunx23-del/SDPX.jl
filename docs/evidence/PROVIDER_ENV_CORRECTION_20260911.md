@@ -141,3 +141,30 @@ This is a property of the toolchain, not of SDPX, and it changes no solver route
 4. **A missing provider stays an infrastructure result, never a numeric one.**
    This correction does not license reading a provider failure as a numeric
    failure, nor the reverse.
+
+## 8. Measurement discipline: this environment is capability-*enabled*
+
+`REBUILD_ENV` is not a drop-in replacement for the default project, and a figure
+measured in it is not comparable to one measured in the default environment
+unless that is stated.
+
+- The default project resolves no provider, so `Pkg.test()` exercises **Float64
+  only**. Under `REBUILD_ENV` the SDPX provider extensions are active and QDLDL
+  is resolvable, so routes that skip or fail closed in the default environment
+  can actually execute.
+- Every measured result must therefore state **which environment** produced it,
+  alongside the repo SHA and — for MFLA — the provider revision. A timing or
+  allocation figure taken under `REBUILD_ENV` and compared against a
+  default-environment figure would be comparing two different configurations and
+  attributing the difference to the patch under test.
+- This is ADR-003 §7 applied to the environment axis: the environment is part of
+  the measurement identity exactly as the manifest and the thread count already
+  are.
+
+A concrete instance, since it is easy to get wrong: `Pkg.test()` cannot be green
+while the packet's work is uncommitted, because
+`benchmark/optimization/v2_fresh_process_profile.jl:162` defines
+`_source_clean()` as an empty `git status --porcelain` and any untracked file
+fails the `test_clean` stage. So a green default-environment `Pkg.test()` is a
+*post-commit* result, while `REBUILD_ENV` runs can be taken at any time — the two
+are not interchangeable evidence.
