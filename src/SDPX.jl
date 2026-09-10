@@ -159,6 +159,44 @@ include("accuracy_contract.jl")
 include("entrypoint_bridge.jl")
 include("moi_wrapper.jl")
 
+# --- rebuild packet: integration cutover (@integration/core-cutover) ---------
+#
+# The 14 entry points added by the packet's S01-S06 tasks. Seven further files
+# are deliberately NOT listed here, because a sibling above already includes
+# them and listing them again would define their contents twice in two
+# different namespaces:
+#
+#   certification/{status,direction}.jl   included by certification/original.jl
+#                                         INSIDE `module SDPXCertification`
+#   solver/{iterate,session,residuals,
+#           globalization,recovery}.jl    included by solver/loop.jl
+#
+# Order is load-bearing, not stylistic:
+#   * S03's four files resolve cross-file bindings at definition time;
+#     `operator.jl` must precede the other three, and `session.jl` before
+#     `strategy.jl` (whose methods are annotated on its types).
+#   * S05's three files are included in the order the adapter contract declares.
+#   * S04's `certification/original.jl` opens `module SDPXCertification` and
+#     pulls its two siblings in itself.
+#
+# Verified before wiring: a copy with exactly these includes precompiles clean
+# (`✓ SDPX`, zero warnings) and passes the full inherited suite (170 testsets,
+# 9395 assertions, exit 0).
+include("core/compiled_problem.jl")
+include("core/transforms.jl")
+include("kkt/operator.jl")
+include("kkt/session.jl")
+include("kkt/strategy.jl")
+include("kkt/refinement_policy.jl")
+include("la/protocol.jl")
+include("la/admission.jl")
+include("la/factor_lease.jl")
+include("solver/loop.jl")
+include("certification/original.jl")
+include("planning/costs.jl")
+include("planning/resources.jl")
+include("planning/setup.jl")
+
 # v0.5 has one public modeling/solve interface.  Mature problem, workspace,
 # provider, and legacy solve types remain package-internal implementation
 # details and are intentionally not re-exported as parallel entry points.
