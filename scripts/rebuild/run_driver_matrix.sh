@@ -42,6 +42,14 @@ run() {  # run <name> <workdir> <project> <script> [ENVS="K=V ..."] [ARGS="--fla
     local name="$1" wd="$2" proj="$3" script="$4" envs="${5:-}" args="${6:-}"
     local log="$OUT/$name.log"
     printf '%-26s ' "$name"
+    # Batch-5 drivers are added here as their tasks are dispatched. A driver that
+    # does not exist yet is SKIPPED, not failed: this script is meant to be runnable
+    # throughout a wave so the parent can verify each report the moment it lands,
+    # and "not written yet" is not a red result.
+    if [ ! -f "$wd/$script" ]; then
+        echo "SKIP  driver not written yet: $wd/$script"
+        return 0
+    fi
     ( cd "$wd" && env $envs julia --project="$proj" -t1 "$script" $args ) > "$log" 2>&1
     local rc=$?
     # A driver that exits 0 while its summary shows failures is the failure mode
@@ -77,6 +85,20 @@ run Q01_rules      "$SDPX" "$ENV"  test/rebuild/dependency_rules.jl
 run M01            "$MFLA" "$ENV"  test/rebuild/M01.jl
 run B01_sandbox    "$BFLA" "$ENV"  test/rebuild/B01.jl
 run B01_wired      "$BFLA" "$ENV"  test/rebuild/B01_wired.jl
+
+# --- batch 5 ------------------------------------------------------------------
+# Dispatched in waves, one task per repository per wave. Skipped until written.
+# The MFLA/BFLA legs must stay separate PROCESSES with -t1 (the two-process rule).
+# B03 is the threading task and is run alone on purpose: a contended measurement
+# window on this 4-core host is a different measurement.
+run M02            "$MFLA" "$ENV"  test/rebuild/M02.jl
+run M03            "$MFLA" "$ENV"  test/rebuild/M03.jl
+run P02            "$MFLA" "$ENV"  test/rebuild/P02.jl
+run B02            "$BFLA" "$ENV"  test/rebuild/B02.jl
+run B03            "$BFLA" "$ENV"  test/rebuild/B03.jl
+run B04            "$BFLA" "$ENV"  test/rebuild/B04.jl
+run P03            "$BFLA" "$ENV"  test/rebuild/P03.jl
+run S07            "$SDPX" "$ENV"  test/rebuild/S07.jl
 
 echo
 echo "done. logs in $OUT"
