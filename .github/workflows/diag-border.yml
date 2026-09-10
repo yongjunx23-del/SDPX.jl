@@ -56,7 +56,7 @@ jobs:
           println("CERT_VALID=", SDPX.certificate(result).valid)
           println("ITERS=", SDPX.iterations(result))
           JLEOF
-          julia --startup-file=no diag_gate.jl 2>&1 | tee gate_trace.txt
+          julia --startup-file=no --project=. diag_gate.jl 2>&1 | tee gate_trace.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:
