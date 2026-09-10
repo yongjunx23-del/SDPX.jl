@@ -47,6 +47,11 @@ mutable struct SymmetricBorderedWorkspace{
     row_exponent::Vector{Int}
     permutation::Vector{Int}
     factor_error::Matrix{T}
+    # Per-column scratch for the bordered factor certificate, so its k-outer /
+    # i-inner traversal needs no allocation. Dedicated rather than shared so
+    # the certificate never aliases another phase's scratch.
+    certificate_product::Vector{T}
+    certificate_work::Vector{T}
     permuted_rhs::Vector{T}
     staged_y::Vector{T}
     forward_residual::Vector{T}
@@ -109,6 +114,10 @@ function SymmetricBorderedWorkspace(
         zeros(Int, dimension),
         Vector{Int}(undef, dimension),
         alloc_zeros(T, dimension, dimension),
+        # factor_error is followed by its per-column certificate scratch, then
+        # the remaining solve-owned vectors, in struct field order.
+        alloc_zeros(T, dimension),
+        alloc_zeros(T, dimension),
         alloc_zeros(T, dimension),
         alloc_zeros(T, dimension),
         alloc_zeros(T, dimension),
@@ -1378,6 +1387,25 @@ end
     return true
 end
 
+"""
+    _product_bordered_factor_certificate!(
+        workspace::SymmetricBorderedWorkspace{T},
+    )
+
+Certify the bordered numeric factor by comparing the explicit factorization
+map `P*M` against the product of the stored `L` (unit diagonal) and `U`
+factors in the componentwise form the bound `gamma(T, 4n)` was derived for.
+
+Entry `(i, j)` sums `L[i, k] * U[k, j]` for `k = 1:min(i, j)` **in ascending
+`k`** and, in the same order, the absolute values that make up the allowance.
+The loop nest is ordered `j` outer, `k` middle, `i` inner precisely so that
+both accumulations keep that per-entry ascending-`k` order exactly while the
+inner loop runs down a single contiguous column of the stored factor: the
+vertex of the product is never reassociated, so every `factor_error` entry and
+every accept/reject decision is bit-identical to the plain `i, j, k` nest,
+which only differs in memory traffic. The inner loop is a map over `i` (no
+reduction across `i`), so `@simd` cannot change any summation order.
+"""
 @inline function _product_bordered_factor_certificate!(
     workspace::SymmetricBorderedWorkspace{T},
 ) where {T}
@@ -1388,22 +1416,31 @@ end
     F = lu_factor_storage(workspace.driver.route)
     P = workspace.permutation
     E = workspace.factor_error
+    product = workspace.certificate_product
+    product_work = workspace.certificate_work
     gamma = _product_bordered_gamma(T, 4n)
     isfinite(gamma) || return false
     @inbounds for j in 1:n
         for i in 1:n
-            product = zero(T)
-            product_work = zero(T)
-            for k in 1:min(i, j)
-                lik = i == k ? one(T) : F[i, k]
-                term = lik * F[k, j]
-                product += term
-                product_work += abs(term)
+            product[i] = zero(T)
+            product_work[i] = zero(T)
+        end
+        for k in 1:j
+            u = F[k, j]
+            magnitude = abs(u)
+            product[k] += u
+            product_work[k] += magnitude
+            @simd for i in (k + 1):n
+                term = F[i, k] * u
+                product[i] += term
+                product_work[i] += abs(term)
             end
+        end
+        for i in 1:n
             pm = workspace.factor_matrix[P[i], j]
-            error = pm - product
+            error = pm - product[i]
             E[i, j] = error
-            allowance = gamma * (abs(pm) + product_work)
+            allowance = gamma * (abs(pm) + product_work[i])
             _product_bordered_zero_safe_close(error, allowance) || return false
         end
     end
