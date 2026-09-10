@@ -144,6 +144,46 @@ end
 #=====================================================================#
 
 """
+    ProductHSDTerminalRecoveryCache{T}
+
+Solve-owned snapshot of the loop-invariant operators used by the terminal
+recovery candidate (`_product_hsd_refined_optimal_result!`).
+
+`Ad`, `b` and the cone layout are fixed for the lifetime of a solve, so the
+least-squares factorization of the primal operator and the dense
+`(n+1) x m` dual operator `[A'; b']` - together with its factorization - do not
+change between recovery attempts either. Building and factorizing them once per
+solve instead of once per attempt removes repeated `O(m n^2)` work without
+changing a single floating-point operation: for every non-square operator
+`A \\ rhs == qr(A[, ColumnNorm()]) \\ rhs` holds bit-identically, which is the
+factorization `\\` selects internally. Square operators keep the plain `\\`
+dispatch and are deliberately never cached.
+
+`key` identifies the exact operator instance (identity, shape, arithmetic). A
+key mismatch rebuilds from scratch, so a changed operator can never reuse a
+stale factorization; `builds` and `reuses` make the distinction observable in
+diagnostics. Ownership stays inside the solve that built it.
+"""
+mutable struct ProductHSDTerminalRecoveryCache{T<:AbstractFloat}
+    key::UInt
+    primal::Any
+    dual_operator::Union{Nothing,Matrix{T}}
+    dual::Any
+    builds::Int
+    reuses::Int
+end
+
+ProductHSDTerminalRecoveryCache(::Type{T}) where {T<:AbstractFloat} =
+    ProductHSDTerminalRecoveryCache{T}(zero(UInt), nothing, nothing, nothing, 0, 0)
+
+@inline function _product_hsd_terminal_recovery_key(
+    ::Type{T}, A::AbstractMatrix, b::AbstractVector,
+) where {T}
+    return hash((objectid(A), size(A, 1), size(A, 2),
+                 objectid(b), length(b), T))
+end
+
+"""
     ProductConeHSDState{T,R,RT}
 
 Typed native product-cone HSD execution state.  `base` owns the frozen HSD
@@ -215,6 +255,13 @@ mutable struct ProductConeHSDState{
     # One-shot route restart uses a terminal expanded executor. Ordinary
     # expanded requests retain the historical expanded->bordered fallback.
     allow_expanded_bordered_fallback::Bool
+    # Loop-invariant terminal-recovery operators. The reduced operator `Ad`,
+    # the right-hand side `b` and the cone layout are fixed for the lifetime of
+    # a solve, so the two least-squares factorizations the terminal recovery
+    # candidate needs do not change between attempts either. They are built
+    # once per solve and reused; ownership stays inside this state and the
+    # cache is never shared across solves.
+    terminal_recovery::ProductHSDTerminalRecoveryCache{T}
 end
 
 function ProductConeHSDState(
@@ -407,6 +454,7 @@ function _product_cone_hsd_state(
         get(iteration_knobs, :gamma, nothing),
         get(iteration_knobs, :predictor, :classic),
         allow_expanded_bordered_fallback,
+        ProductHSDTerminalRecoveryCache(T),
     )
 end
 

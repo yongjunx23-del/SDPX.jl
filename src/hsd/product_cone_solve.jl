@@ -97,6 +97,61 @@ function _product_hsd_owned_dense(
     return dense
 end
 
+"""
+    _product_hsd_terminal_primal_factor(A)
+
+Factorize the primal least-squares operator exactly the way `\\` does
+trivially, or return `nothing` when the operator is square (where `\\` uses LU,
+so a cached QR would change the arithmetic). Verified bit-identical for every
+non-square dense and sparse operator used here.
+"""
+@inline function _product_hsd_terminal_primal_factor(A::Matrix{T}) where {T}
+    size(A, 1) == size(A, 2) && return nothing
+    return qr(A, ColumnNorm())
+end
+
+@inline function _product_hsd_terminal_primal_factor(A::SparseMatrixCSC{T,Int}) where {T}
+    size(A, 1) == size(A, 2) && return nothing
+    return qr(A)
+end
+
+@inline function _product_hsd_terminal_primal_factor(A::AbstractMatrix{T}) where {T}
+    size(A, 1) == size(A, 2) && return nothing
+    return qr(A, ColumnNorm())
+end
+
+"""
+    _product_hsd_terminal_dual_operator(A, b)
+
+Dense `(n+1) x m` operator `[A'; b']` used by the Float64 dual recovery. Loop
+invariant, so it is materialized once per solve instead of once per attempt.
+"""
+function _product_hsd_terminal_dual_operator(
+    A::AbstractMatrix{T}, b::AbstractVector{T},
+) where {T}
+    n, m = size(A, 2), size(A, 1)
+    operator = alloc_zeros(T, n + 1, m)
+    @inbounds for column in 1:m
+        for row in 1:n
+            _store_owned_scalar!(
+                operator, CartesianIndex(row, column), A[column, row],
+            )
+        end
+        _store_owned_scalar!(
+            operator, CartesianIndex(n + 1, column), b[column],
+        )
+    end
+    return operator
+end
+
+@inline function _product_hsd_terminal_dual_factor(
+    operator::Union{Nothing,Matrix{T}},
+) where {T}
+    operator === nothing && return nothing
+    size(operator, 1) == size(operator, 2) && return nothing
+    return qr(operator, ColumnNorm())
+end
+
 function _product_hsd_terminal_la_backend(::Type{T}) where {T<:AbstractFloat}
     T === Float64 && return nothing
     config = plan_la_backend(
@@ -245,6 +300,36 @@ function _product_hsd_refined_optimal_result!(
     end
     backend = _product_hsd_terminal_la_backend(T)
     T !== Float64 && backend === nothing && return nothing
+    # Loop-invariant terminal-recovery operators (see
+    # `ProductHSDTerminalRecoveryCache`). `Ad`, `b` and the cone layout are
+    # fixed for the solve, so the primal least-squares factorization and the
+    # dense `(n+1) x m` dual operator `[A'; b']` (with its factorization) are
+    # built once and reused by every later recovery attempt. The cached path is
+    # bit-identical by construction: for a non-square operator `A \ rhs` is
+    # exactly `qr(A[, ColumnNorm()]) \ rhs`. Float64 owns the cached path;
+    # every other arithmetic keeps the existing provider-driven refinement
+    # unchanged, and square operators keep the plain `\` dispatch.
+    recovery = state.terminal_recovery
+    primal_factor = nothing
+    dual_operator = nothing
+    dual_factor = nothing
+    if T === Float64
+        key = _product_hsd_terminal_recovery_key(T, A, canonical.b)
+        if recovery.key != key
+            recovery.primal = _product_hsd_terminal_primal_factor(refinement_A)
+            recovery.dual_operator =
+                _product_hsd_terminal_dual_operator(A, canonical.b)
+            recovery.dual =
+                _product_hsd_terminal_dual_factor(recovery.dual_operator)
+            recovery.key = key
+            recovery.builds += 1
+        else
+            recovery.reuses += 1
+        end
+        primal_factor = recovery.primal
+        dual_operator = recovery.dual_operator
+        dual_factor = recovery.dual
+    end
     x = base.x ./ base.tau
     s = base.s ./ base.tau
     y = base.y ./ base.tau
@@ -253,6 +338,8 @@ function _product_hsd_refined_optimal_result!(
     try
         if base.n == 0
             _product_hsd_refinement_maxabs(primal_residual) <= tol || return nothing
+        elseif primal_factor !== nothing
+            x .+= primal_factor \ (-primal_residual)
         else
             _product_hsd_apply_primal_refinement!(
                 x, A, refinement_A, primal_residual, backend,
@@ -293,40 +380,48 @@ function _product_hsd_refined_optimal_result!(
 
         dual_residual = transpose(A) * y + canonical.c
         gap = dot(canonical.c, x) + dot(canonical.b, y)
-        dual_dense_A = T === Float64 ? refinement_A :
-                       _product_hsd_owned_dense(A)
-        _product_hsd_apply_dual_refinement!(
-            y, A, dual_dense_A, canonical.b, dual_residual, gap, backend,
-        ) || return nothing
-        affine_dual = alloc_zeros(T, base.n + 1, base.m)
-        @inbounds for column in 1:base.m
-            for row in 1:base.n
-                _store_owned_scalar!(
-                    affine_dual, CartesianIndex(row, column), A[column, row],
-                )
+        if dual_factor !== nothing
+            # Same rhs and same operator the uncached helper builds; only the
+            # factorization is reused instead of rebuilt per attempt.
+            rhs = alloc_zeros(T, base.n + 1)
+            @inbounds for row in 1:base.n
+                _store_owned_scalar!(rhs, row, -dual_residual[row])
             end
-            _store_owned_scalar!(
-                affine_dual, CartesianIndex(base.n + 1, column),
-                canonical.b[column],
-            )
+            _store_owned_scalar!(rhs, base.n + 1, -gap)
+            y .+= dual_factor \ rhs
+        else
+            dual_dense_A = T === Float64 ? refinement_A :
+                           _product_hsd_owned_dense(A)
+            _product_hsd_apply_dual_refinement!(
+                y, A, dual_dense_A, canonical.b, dual_residual, gap, backend,
+            ) || return nothing
         end
 
         # For K_exp^*, L_E(u,v,w)=(u-v,-u,w). When the u coordinate is
         # structurally absent from A' and b', replacing u by v preserves both
         # affine equations and selects the stable x=0 boundary representative.
+        # The operator is only materialized when an Exp block actually exists:
+        # on a pure SOC/linear model the loop below never reads it.
         if !in_canonical_cone(canonical, y; dual=true, tol=tol)
-            for block in canonical.cone_layout.blocks
-                block.cone === :exp || continue
-                u = block.offset
-                structurally_free = true
-                @inbounds for row in axes(affine_dual, 1)
-                    if !iszero(affine_dual[row, u])
-                        structurally_free = false
-                        break
+            exp_operator = dual_operator
+            if exp_operator === nothing && !isempty(state.runtime.exp)
+                exp_operator =
+                    _product_hsd_terminal_dual_operator(A, canonical.b)
+            end
+            if exp_operator !== nothing
+                for block in canonical.cone_layout.blocks
+                    block.cone === :exp || continue
+                    u = block.offset
+                    structurally_free = true
+                    @inbounds for row in axes(exp_operator, 1)
+                        if !iszero(exp_operator[row, u])
+                            structurally_free = false
+                            break
+                        end
                     end
+                    structurally_free &&
+                        _store_owned_scalar!(y, u, y[u + 1])
                 end
-                structurally_free &&
-                    _store_owned_scalar!(y, u, y[u + 1])
             end
         end
     catch exception
