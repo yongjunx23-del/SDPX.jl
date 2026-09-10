@@ -80,7 +80,7 @@ A dedicated depot is prepended so the environment's writes do not disturb
 |---|---|---|
 | SDPX | 0.6.1 | `dev` → main checkout |
 | MultiFloatLinearAlgebra | **0.4.0** | `dev` → workspace; matches frozen `50e6e0b` |
-| BigFloatLinearAlgebra | **0.3.0** | `dev` → workspace; matches frozen `f95d3e6` |
+| BigFloatLinearAlgebra | **0.3.0** | `dev` → workspace. The checkout is now `9d9683c` = `v0.3.0-1-g9d9683c`, one commit **past** the frozen `f95d3e6`, because B01 was committed on top of it — see §9 |
 | MultiFloats | 3.3.2 | satisfies `[compat] MultiFloats = "3"` |
 | GenericLinearAlgebra | 0.4.1 | |
 | QDLDL | 0.4.1 | plus AMD 0.5.4 (see §5) |
@@ -168,3 +168,44 @@ while the packet's work is uncommitted, because
 fails the `test_clean` stage. So a green default-environment `Pkg.test()` is a
 *post-commit* result, while `REBUILD_ENV` runs can be taken at any time — the two
 are not interchangeable evidence.
+
+## 9. The BFLA checkout is one packet commit past the freeze
+
+The environment devs the BFLA **working tree**, so whatever revision that checkout
+is at is what loads. Committing B01 moved it:
+
+    git -C BigFloatLinearAlgebra.jl describe --tags            -> v0.3.0-1-g9d9683c
+    git -C BigFloatLinearAlgebra.jl rev-parse v0.3.0^{commit}  -> f95d3e6…
+
+So BFLA now sits at `9d9683c`, one commit past the packet's frozen `f95d3e6`.
+This was reported by the Q01 worker, who correctly refused to record BF numbers
+under the frozen SHA.
+
+**Attribution rule: name the revision actually measured.** A result taken now is a
+`9d9683c` result and may not be reported as a `f95d3e6` result — the same rule
+`baseline.md` §1.2 already applies to MFLA ("No result may be attributed to
+`b38dea1` if it was measured at `50e6e0b`").
+
+What *can* be stated, because it is verified rather than assumed:
+
+    git diff --stat f95d3e6..HEAD                          -> 5 files, 1679 insertions(+), 0 deletions
+    git diff f95d3e6..HEAD -- src/BigFloatLinearAlgebra.jl -> empty (entry point byte-identical)
+
+The five added files are `src/contracts/{context,factor_summary,ownership}.jl`,
+`src/mpfr_context.jl` and `test/rebuild/B01.jl`, and none of them appears in the
+entry point's include graph. (Near-miss checked explicitly: the included
+`ownership.jl` is the pre-existing `src/ownership.jl`, not B01's
+`src/contracts/ownership.jl`.) Zero deletions plus an unchanged include graph
+means `using BigFloatLinearAlgebra` executes identical code at either revision.
+
+That is an equivalence of **loaded code**. It is not a licence to label a
+measurement with the frozen SHA, and it is not a numeric equivalence claim.
+
+**The equivalence expires.** It holds only while B01's files stay un-wired. Once
+I01/I02 adds an `include` for them the entry point changes and every BF result
+must be re-attributed. The same will apply to SDPX as soon as I01 wires the new
+modules into `src/SDPX.jl`.
+
+Generalisation worth carrying: the dev'ed checkouts move as packet tasks are
+committed, so read `git rev-parse HEAD` at measurement time. A SHA quoted in a
+brief, a task card, or an older report is not evidence of what was measured.
