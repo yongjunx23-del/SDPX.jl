@@ -21,6 +21,7 @@ using Test, SDPX, LinearAlgebra
         )
         @test SDPX.blas_threads() == 7
         @test SDPX.blas_backend() == :test_controller
+        ambient_blas_before = LinearAlgebra.BLAS.get_num_threads()
         model = SDPX.Model(Float64)
         x = SDPX.variable!(model, :x, 1; domain=SDPX.Reals())
         SDPX.constraint!(model, :lo, x[1] - 1.0, SDPX.Nonnegative())
@@ -44,7 +45,12 @@ using Test, SDPX, LinearAlgebra
         selected = SDPX.diagnostics(result).selected_algorithms
         @test selected.ambient_blas_threads == 7
         @test selected.ambient_blas_backend == :test_controller
-        @test LinearAlgebra.BLAS.get_num_threads() == 1
+        # The solve must not mutate actual BLAS threading.  Assert the
+        # invariant (unchanged from before the solve) rather than a hardcoded
+        # ambient count: the documented standard correctness environment pins
+        # BLAS to one thread, but a runner that does not set it still has to
+        # satisfy the real contract.
+        @test LinearAlgebra.BLAS.get_num_threads() == ambient_blas_before
     finally
         SDPX._register_blas_thread_controller!(
             old_getter, old_setter, old_backend)
