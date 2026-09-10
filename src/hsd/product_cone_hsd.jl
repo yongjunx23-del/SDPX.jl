@@ -223,6 +223,10 @@ mutable struct ProductConeHSDState{
     gb::Vector{T}
     schur_g_inputs::Vector{Vector{T}}
     schur_g_outputs::Vector{Vector{T}}
+    # Dense `nr x m` staging rows `Wt[j, :] = G*Ar[:, j]` for the row-major Schur
+    # contraction. Empty when the byte-budget gate declines the staged path, in
+    # which case the gather path runs; the two are bit-identical.
+    schur_wt::Matrix{T}
     ds_hat::Vector{T}
     dy_hat::Vector{T}
     soc_g_error_bound::Vector{T}
@@ -419,6 +423,13 @@ function _product_cone_hsd_state(
     schur_slots = parallel_schur ? Threads.maxthreadid() : 0
     schur_g_inputs = [alloc_zeros(T, m) for _ in 1:schur_slots]
     schur_g_outputs = [alloc_zeros(T, m) for _ in 1:schur_slots]
+    # Staging is admitted only for bitstype arithmetic (plain accumulation is
+    # then a plain store) and only when the dense buffer fits the budget.
+    stage_schur = isbitstype(T) && base.workspace.nr > 0 && m > 0 &&
+        saturating_bytes(sizeof(T), base.workspace.nr, m) <=
+            _PRODUCT_HSD_SCHUR_STAGE_BUDGET_BYTES
+    schur_wt = stage_schur ?
+        alloc_zeros(T, base.workspace.nr, m) : alloc_zeros(T, 0, 0)
     return ProductConeHSDState{
         T,R,typeof(runtime),typeof(ns_schur),typeof(coupled),
         typeof(symmetric_bordered),typeof(expanded),typeof(sparse_schur),
@@ -432,6 +443,7 @@ function _product_cone_hsd_state(
         alloc_zeros(T, m),
         schur_g_inputs,
         schur_g_outputs,
+        schur_wt,
         alloc_zeros(T, m),
         alloc_zeros(T, m),
         alloc_zeros(T, m),
@@ -1093,6 +1105,11 @@ end
     return result
 end
 
+# Byte budget for the dense `nr x m` Schur staging buffer. The staged and
+# gather assemblies produce a bit-identical `H`, so this is purely a memory
+# valve: past the budget the gather path runs instead of allocating the buffer.
+const _PRODUCT_HSD_SCHUR_STAGE_BUDGET_BYTES = 64 * 1024^2
+
 Base.@noinline function _product_hsd_form_schur_column!(
     state::ProductConeHSDState{T}, j::Int,
     g_input::Vector{T}, g_output::Vector{T},
@@ -1119,10 +1136,106 @@ Base.@noinline function _product_hsd_form_schur_column!(
 end
 
 """
+    _product_hsd_stage_schur_row!(state, j, g_input, g_output)
+
+Stage `Wt[j, :] = G * Ar[:, j]` into the solve-owned dense buffer. `g_input`
+and `g_output` are the caller's scratch; `Wt[j, :]` holds exactly the vector
+`_product_hsd_apply_symmetric_G!` produces for column `j`, which is the vector
+the gather path feeds to its dot products.
+"""
+Base.@noinline function _product_hsd_stage_schur_row!(
+    state::ProductConeHSDState{T}, j::Int,
+    g_input::Vector{T}, g_output::Vector{T},
+) where {T}
+    A = state.base.workspace.Ar
+    Wt = state.schur_wt
+    zero_owned!(g_input)
+    @inbounds for ptr in nzrange(A, j)
+        _store_owned_scalar!(g_input, A.rowval[ptr], A.nzval[ptr])
+    end
+    _product_hsd_apply_symmetric_G!(state.runtime, g_output, g_input)
+    @inbounds for row in 1:state.base.m
+        _store_owned_scalar!(Wt, CartesianIndex(j, row), g_output[row])
+    end
+    return nothing
+end
+
+"""
+    _product_hsd_contract_schur_row!(H, Wt, A, i, nr)
+
+Accumulate row `i` of `H = Ar' G Ar` and mirror it into column `i`. Entry
+`(i, j)`, `j >= i`, sums `Ar[k, i] * Wt[j, k]` over the stored entries `k` of
+column `i` of `Ar` in ascending storage order - the same terms in the same
+order as the gather path, which is why the result is bit-identical - but the
+inner loop now walks a contiguous staging row instead of gathering through the
+sparse column. Row `i` is the only writer of cells `(i, j >= i)` and `(j > i, i)`,
+so rows may be distributed across tasks without changing any summation order.
+"""
+Base.@noinline function _product_hsd_contract_schur_row!(
+    H::Matrix{T}, Wt::Matrix{T}, A::SparseMatrixCSC{T,Int}, i::Int, nr::Int,
+) where {T}
+    @inbounds for ptr in nzrange(A, i)
+        row = A.rowval[ptr]
+        coefficient = A.nzval[ptr]
+        @simd for j in i:nr
+            H[i, j] += coefficient * Wt[j, row]
+        end
+    end
+    @inbounds for j in (i + 1):nr
+        H[j, i] = H[i, j]
+    end
+    return nothing
+end
+
+"""
+    _product_hsd_form_schur_staged!(state)
+
+Row-major assembly of the same `H = Ar' G Ar` the gather path builds, routed
+through the dense staging buffer. Bit-identical to
+`_product_hsd_form_schur_column!` and only different in memory traffic.
+"""
+Base.@noinline function _product_hsd_form_schur_staged!(
+    state::ProductConeHSDState{T},
+) where {T}
+    base = state.base
+    A = base.workspace.Ar
+    H = base.workspace.H
+    Wt = state.schur_wt
+    nr = base.workspace.nr
+    if isempty(state.schur_g_inputs)
+        for j in 1:nr
+            _product_hsd_stage_schur_row!(
+                state, j, state.g_input, state.g_output,
+            )
+        end
+    else
+        Threads.@threads :static for j in 1:nr
+            slot = Threads.threadid()
+            _product_hsd_stage_schur_row!(
+                state, j,
+                state.schur_g_inputs[slot],
+                state.schur_g_outputs[slot],
+            )
+        end
+    end
+    if isempty(state.schur_g_inputs)
+        for i in 1:nr
+            _product_hsd_contract_schur_row!(H, Wt, A, i, nr)
+        end
+    else
+        Threads.@threads :static for i in 1:nr
+            _product_hsd_contract_schur_row!(H, Wt, A, i, nr)
+        end
+    end
+    return nothing
+end
+
+"""
 Assemble `H=Ar'GAr` and the shared homogeneous border without materialising
 the global `m x m` operator `G`. Independent Schur columns use setup-owned
 thread scratch for pure orthant/SOC products; mixed and PSD products retain
 the serial path because their block kernels own mutable local workspaces.
+The staged row-major path is selected when the state owns a staging buffer.
 """
 Base.@noinline function _product_hsd_form_schur_border!(
     state::ProductConeHSDState{T,R,RT,NS,CW,SB,EW,SW,SCW},
@@ -1132,7 +1245,9 @@ Base.@noinline function _product_hsd_form_schur_border!(
     H = base.workspace.H
     nr = base.workspace.nr
     zero_owned!(H)
-    if isempty(state.schur_g_inputs)
+    if !isempty(state.schur_wt)
+        _product_hsd_form_schur_staged!(state)
+    elseif isempty(state.schur_g_inputs)
         @inbounds for j in 1:nr
             _product_hsd_form_schur_column!(
                 state, j, state.g_input, state.g_output,
