@@ -2638,6 +2638,58 @@ end
     return true
 end
 
+# Diagnostic-only (P0-03): pinpoint which triangular-certificate component
+# rejected a solution, and by how much.  Reached only after the certificate
+# has already returned false, so it cannot change a solve.
+Base.@noinline function _sdpx_triangular_certificate_report(
+    workspace, solution, rhs, operations::Int,
+)
+    get(ENV, "SDPX_DEBUG_DIRECTION", "0") == "1" || return nothing
+    T = eltype(solution)
+    n = workspace.dimension
+    _product_bordered_recompute_staged!(workspace, solution, rhs) ||
+        return println(stderr, "SDpxTriCert recompute_failed")
+    F = lu_factor_storage(workspace.driver.route)
+    f = workspace.forward_residual
+    u = workspace.backward_residual
+    y = workspace.staged_y
+    gamma = _product_bordered_gamma(T, operations)
+    worst_ratio = 0.0
+    worst_index = 0
+    worst_kind = :none
+    for i in 1:n
+        forward_work = abs(y[i])
+        for j in 1:(i - 1)
+            forward_work += abs(F[i, j] * y[j])
+        end
+        allowance = gamma * forward_work
+        ratio = allowance == 0 ? (f[i] == 0 ? 0.0 : Inf) :
+            Float64(abs(f[i]) / allowance)
+        if ratio > worst_ratio
+            worst_ratio = ratio
+            worst_index = i
+            worst_kind = :forward
+        end
+        backward_work = abs(y[i])
+        for j in i:n
+            backward_work += abs(F[i, j] * solution[j])
+        end
+        allowance = gamma * backward_work
+        ratio = allowance == 0 ? (u[i] == 0 ? 0.0 : Inf) :
+            Float64(abs(u[i]) / allowance)
+        if ratio > worst_ratio
+            worst_ratio = ratio
+            worst_index = i
+            worst_kind = :backward
+        end
+    end
+    println(stderr, "SDpxTriCert n=", n, " operations=", operations,
+        " gamma=", Float64(gamma), " worst_kind=", worst_kind,
+        " worst_index=", worst_index, " worst_ratio=", worst_ratio,
+        " max_f=", Float64(maximum(abs, f)), " max_u=", Float64(maximum(abs, u)))
+    return nothing
+end
+
 @inline function _product_bordered_staged_solve!(
     workspace::SymmetricBorderedWorkspace{T},
 ) where {T}
@@ -2662,7 +2714,10 @@ end
     end
     _product_bordered_triangular_solution_ok!(
         workspace, z, workspace.factor_rhs, 8n,
-    ) || return false
+    ) || begin
+        _sdpx_triangular_certificate_report(workspace, z, workspace.factor_rhs, 8n)
+        return false
+    end
     copy_owned!(workspace.certified_solution, z)
     workspace.accumulated_candidate = false
     workspace.candidate_epoch = workspace.factor_epoch
