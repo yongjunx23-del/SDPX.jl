@@ -18,12 +18,38 @@ struct HSDKKTStartReport{T<:AbstractFloat}
     dual_centering_shift::T
 end
 
-function _failed_hsd_start_report(::Type{T}, reason::Symbol) where {T<:AbstractFloat}
+"""
+    _failed_hsd_start_report(::Type{T}, reason::Symbol, factor_count, rhs_solves)
+    _failed_hsd_start_report(::Type{T}, reason::Symbol; factor_count, rhs_solves)
+
+Report a failed KKT-derived start **without erasing the numerical work already
+performed**.
+
+The pre-audit helper always returned `factor_count = 0, rhs_solves = 0`, so a
+run that had already executed a pivoted LDL inertia probe and a pivoted LU
+factorization (and possibly both RHS solves) reported zero factors. That is the
+counting incompleteness recorded as F01 in the Clarabel-borrowing plan: the
+report is the only public accounting of start-up factor cost, and a failed
+start is exactly the case an operator needs to cost.
+
+Both spellings are accepted so call sites may pass the counts positionally or
+by keyword; the keyword form exists to keep the long call sites readable.
+"""
+function _failed_hsd_start_report(
+    ::Type{T}, reason::Symbol, factor_count::Integer, rhs_solves::Integer,
+) where {T<:AbstractFloat}
     infinity = T(Inf)
     return HSDKKTStartReport{T}(
-        false, reason, 0, 0, zero(T), infinity, infinity, infinity,
-        infinity, zero(T), zero(T), zero(T), zero(T), zero(T), zero(T),
+        false, reason, Int(factor_count), Int(rhs_solves), zero(T),
+        infinity, infinity, infinity, infinity,
+        zero(T), zero(T), zero(T), zero(T), zero(T), zero(T),
     )
+end
+
+function _failed_hsd_start_report(
+    ::Type{T}, reason::Symbol; factor_count::Integer=0, rhs_solves::Integer=0,
+) where {T<:AbstractFloat}
+    return _failed_hsd_start_report(T, reason, factor_count, rhs_solves)
 end
 
 @inline function _hsd_start_residual_norms(A, b, c, x, s, y)
@@ -160,6 +186,15 @@ function kkt_derived_start!(state::ProductConeHSDState{T}) where {T<:AbstractFlo
     dimension = n + m
     dimension > 0 || return _failed_hsd_start_report(T, :empty_system)
 
+    # F01 accounting. `factors` counts every numerical factorization *attempt*
+    # that actually starts (the inertia LDL probe and the LU factor are two
+    # distinct numeric factors over the same assembled matrix), and `solves`
+    # counts RHS solves with one unit per right-hand side. Both are threaded
+    # through every early return so a failed start still reports the work it
+    # performed instead of collapsing to zero.
+    factors = 0
+    solves = 0
+
     scale = max(norm(A, Inf), norm(b, Inf), norm(c, Inf), one(T))
     regularization = sqrt(eps(T)) * scale
     matrix = alloc_zeros(T, dimension, dimension)
@@ -167,15 +202,23 @@ function kkt_derived_start!(state::ProductConeHSDState{T}) where {T<:AbstractFlo
     threshold = T(32) * eps(T) * max(norm(matrix, Inf), one(T))
 
     inertia_factor = GenericPivotedLDL(T, dimension)
+    factors += 1
     factorize_pivoted_ldl!(
         inertia_factor, matrix; threshold=threshold,
-    ) || return _failed_hsd_start_report(T, :affine_kkt_inertia_factorization)
+    ) || return _failed_hsd_start_report(
+        T, :affine_kkt_inertia_factorization, factors, solves,
+    )
     inertia_factor.inertia == KKTInertia(n, m, 0) ||
-        return _failed_hsd_start_report(T, :affine_kkt_wrong_inertia)
+        return _failed_hsd_start_report(
+            T, :affine_kkt_wrong_inertia, factors, solves,
+        )
 
     factor = GenericPivotedLU(T, dimension)
+    factors += 1
     factorize_pivoted_lu!(factor, matrix; threshold=threshold) ||
-        return _failed_hsd_start_report(T, :affine_kkt_factorization)
+        return _failed_hsd_start_report(
+            T, :affine_kkt_factorization, factors, solves,
+        )
     rhs = alloc_zeros(T, dimension, 2)
     @inbounds for i in 1:m
         _store_owned_scalar!(rhs, CartesianIndex(n + i, 1), b[i])
@@ -184,8 +227,9 @@ function kkt_derived_start!(state::ProductConeHSDState{T}) where {T<:AbstractFlo
         _store_owned_scalar!(rhs, CartesianIndex(j, 2), -c[j])
     end
     solution = alloc_zeros(T, size(rhs, 1), size(rhs, 2))
+    solves += size(rhs, 2)
     solve_pivoted_lu!(solution, factor, rhs) ||
-        return _failed_hsd_start_report(T, :affine_kkt_solve)
+        return _failed_hsd_start_report(T, :affine_kkt_solve, factors, solves)
 
     x = copy_owned!(alloc_zeros(T, n), @view solution[1:n, 1])
     y = copy_owned!(alloc_zeros(T, m), @view solution[(n + 1):(n + m), 2])
@@ -202,10 +246,14 @@ function kkt_derived_start!(state::ProductConeHSDState{T}) where {T<:AbstractFlo
     residual_before = _hsd_start_residual_norms(A, b, c, x, s, y)
     primal_ok, primal_interior_shift =
         _strict_shift_symmetric_product!(state.runtime, s)
-    primal_ok || return _failed_hsd_start_report(T, :primal_interior_shift)
+    primal_ok || return _failed_hsd_start_report(
+        T, :primal_interior_shift, factors, solves,
+    )
     dual_ok, dual_interior_shift =
         _strict_shift_symmetric_product!(state.runtime, y)
-    dual_ok || return _failed_hsd_start_report(T, :dual_interior_shift)
+    dual_ok || return _failed_hsd_start_report(
+        T, :dual_interior_shift, factors, solves,
+    )
 
     identity = alloc_zeros(T, m)
     _product_symmetric_identity!(state.runtime, identity)
@@ -219,7 +267,9 @@ function kkt_derived_start!(state::ProductConeHSDState{T}) where {T<:AbstractFlo
             _cold_start_identity_mass_shifts(
                 dot(identity, s), dot(identity, y), identity_degree,
             )
-        mass_ok || return _failed_hsd_start_report(T, :identity_mass_floor)
+        mass_ok || return _failed_hsd_start_report(
+            T, :identity_mass_floor, factors, solves,
+        )
         @inbounds for i in 1:m
             s[i] += primal_mass_shift * identity[i]
             y[i] += dual_mass_shift * identity[i]
@@ -229,7 +279,9 @@ function kkt_derived_start!(state::ProductConeHSDState{T}) where {T<:AbstractFlo
             _cold_start_centering_shifts(
                 complementarity, dot(identity, s), dot(identity, y),
             )
-        centered || return _failed_hsd_start_report(T, :cross_centering)
+        centered || return _failed_hsd_start_report(
+            T, :cross_centering, factors, solves,
+        )
         @inbounds for i in 1:m
             s[i] += primal_centering_shift * identity[i]
             y[i] += dual_centering_shift * identity[i]
@@ -237,12 +289,14 @@ function kkt_derived_start!(state::ProductConeHSDState{T}) where {T<:AbstractFlo
     end
 
     product_strictly_interior(state.runtime, s, y) ||
-        return _failed_hsd_start_report(T, :post_centering_interior)
+        return _failed_hsd_start_report(
+            T, :post_centering_interior, factors, solves,
+        )
     try_update_scaling!(state.runtime, s, y, one(T)) ||
-        return _failed_hsd_start_report(T, :initial_scaling)
+        return _failed_hsd_start_report(T, :initial_scaling, factors, solves)
     residual_after = _hsd_start_residual_norms(A, b, c, x, s, y)
     all(isfinite, x) && all(isfinite, s) && all(isfinite, y) ||
-        return _failed_hsd_start_report(T, :nonfinite_start)
+        return _failed_hsd_start_report(T, :nonfinite_start, factors, solves)
 
     copy_owned!(base.x, x)
     copy_owned!(base.s, s)
@@ -250,7 +304,7 @@ function kkt_derived_start!(state::ProductConeHSDState{T}) where {T<:AbstractFlo
     base.tau = one(T)
     base.kappa = one(T)
     return HSDKKTStartReport{T}(
-        true, :none, 1, 2, regularization,
+        true, :none, factors, solves, regularization,
         residual_before[1], residual_before[2],
         residual_after[1], residual_after[2],
         primal_interior_shift, dual_interior_shift,
