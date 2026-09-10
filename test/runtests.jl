@@ -649,9 +649,20 @@ end
     @test selected.executed_kkt_storage === :sparse
     @test selected.executed_factorization_kernel === :cholmod_symmetric_ldl
     @test selected.la_executed_provider === :cholmod
+    # PR-03 fail-closed boundary. `:sparse_augmented` is Float64/CHOLMOD only
+    # (src/public/settings.jl:233). Every other arithmetic must be refused at
+    # the public boundary BEFORE any route is planned -- there is no path by
+    # which BigFloat or Float64x2/x3/x4 reaches the sparse symbolic cache.
+    # Previously only BigFloat was asserted here; the MultiFloat types had no
+    # assertion anywhere in the repository.
     @test_throws ArgumentError SDPX.Settings{BigFloat}(
         kkt_route=:sparse_augmented,
     )
+    for T in (Float64x2, Float64x3, Float64x4)
+        @test_throws ArgumentError SDPX.Settings{T}(
+            kkt_route=:sparse_augmented,
+        )
+    end
 end
 
 include(joinpath(@__DIR__, "exp_logarithmic.jl"))

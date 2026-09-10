@@ -1,0 +1,191 @@
+{
+ "schema": "sdpx-clarabel-source-manifest/1",
+ "generated": "2026-09-11",
+ "repositories": {
+  "SDPX.jl": {
+   "head": "5d233c8a7ec01550b3ef4208a26a860673b1a9ed",
+   "license": "MIT",
+   "version": "0.6.1"
+  },
+  "Clarabel.jl": {
+   "head": "fbc5dd01576d47fda53861a992a02e93c8dbd03e",
+   "reviewed_pin": "fbc5dd01576d47fda53861a992a02e93c8dbd03e",
+   "license": "Apache-2.0",
+   "version": "0.11.1"
+  }
+ },
+ "files": {
+  "C01": {
+   "repo": "Clarabel.jl",
+   "path": "src/solver.jl",
+   "sha256": "42de37792f30f85783274fd775541d8bcfa02c26368d154b4b7cbafcd26cbccf",
+   "lines": 534
+  },
+  "C02": {
+   "repo": "Clarabel.jl",
+   "path": "src/kktsystem.jl",
+   "sha256": "59e75a03bd0e93f14408fdb996c9d31058fd83322e48ec301e24ef19bbc2e30b",
+   "lines": 232
+  },
+  "C03": {
+   "repo": "Clarabel.jl",
+   "path": "src/kktsolvers/kktsolver_directldl.jl",
+   "sha256": "64024f052ad6589fe0edfebbc2183f5fc7e8d8c4a7ce8a87ccabd4ae9cef8d7e",
+   "lines": 466
+  },
+  "C04": {
+   "repo": "Clarabel.jl",
+   "path": "src/cones/coneops_socone.jl",
+   "sha256": "d2cdf45f13d5815df4a8ffb1cf535cac764aeaeb60b3160a90e489ddd700d84f",
+   "lines": 512
+  },
+  "C05": {
+   "repo": "Clarabel.jl",
+   "path": "src/kktsolvers/direct-ldl/directldl_datamaps.jl",
+   "sha256": "20b35768e652a8ff9a8247d55ede13c50affdcde7ec5f343158eadbacbf49ea4",
+   "lines": 214
+  },
+  "C06": {
+   "repo": "Clarabel.jl",
+   "path": "src/kktsolvers/direct-ldl/directldl_qdldl.jl",
+   "sha256": "51aeb56e8632199c23ba72070804c498dc9611dc42c3182a145b59f2ade1a041",
+   "lines": 96
+  },
+  "C07": {
+   "repo": "Clarabel.jl",
+   "path": "src/cones/coneops_psdtrianglecone.jl",
+   "sha256": "485674029b81febd62bf355a1753704dea28faf127096abec298f624182e60f1",
+   "lines": 540
+  },
+  "C08": {
+   "repo": "Clarabel.jl",
+   "path": "src/data_updating.jl",
+   "sha256": "7e65bb4d8912add4bf5e3566dd47d0c9e9a765b119769acf8db7a8cd201a5555",
+   "lines": 250
+  },
+  "C09": {
+   "repo": "Clarabel.jl",
+   "path": "LICENSE.md",
+   "sha256": "6e2f382771f8aab58e4868ddd0afe0c2fefe6b54f9681493a9c3d0f32906cfe1",
+   "lines": 190
+  },
+  "C10": {
+   "repo": "Clarabel.jl",
+   "path": "src/Clarabel.jl",
+   "sha256": "25811695465e2e4dc1283c26c56e6c70a1e3b4adf3d858b7cda83e4e5cc0e0d9",
+   "lines": 104
+  },
+  "S01": {
+   "repo": "SDPX.jl",
+   "path": "src/hsd/native_hsd_public.jl",
+   "sha256": "8d75a4a5db20380d959e012e75a0c8b975e3922b7b8108d6e82a0dfc6f31d471",
+   "lines": 2050
+  },
+  "S02": {
+   "repo": "SDPX.jl",
+   "path": "src/hsd/product_cone_hsd.jl",
+   "sha256": "1c44eb529bae479042c397e60a2c5879072e3a5a7f4572703f51969475d7cbca",
+   "lines": 3615
+  },
+  "S03": {
+   "repo": "SDPX.jl",
+   "path": "src/hsd/linesearch.jl",
+   "sha256": "e868be6c9b43195e18851ec509eec75951144dd033a7ca2e417b2c29b56d31e3",
+   "lines": 274
+  },
+  "S04": {
+   "repo": "SDPX.jl",
+   "path": "src/hsd/product_cone_solve.jl",
+   "sha256": "b180fa694c5bb2021b7c4d54e1020bbace82c4a26c62c981da699b2fd5da5a1f",
+   "lines": 764
+  },
+  "S05": {
+   "repo": "SDPX.jl",
+   "path": "src/kkt/symmetric_core.jl",
+   "sha256": "b3fff2bafdb79021b1d40c1fc1516bb3c1e4ea012c90d96be18d4564a0e0ccbd",
+   "lines": 2396
+  },
+  "S06": {
+   "repo": "SDPX.jl",
+   "path": "src/cones/runtime/types.jl",
+   "sha256": "f80444d461b1954fbd1b1bee2bf87941aa3b25ef5be870393026459f0705158e",
+   "lines": 246
+  },
+  "S07": {
+   "repo": "SDPX.jl",
+   "path": "src/factor_cache/routes/experimental_sparse_core.jl",
+   "sha256": null,
+   "status": "ABSENT",
+   "note": "Plan cites src/factor_cache/routes/experimental_sparse_core.jl and a type `ExperimentalSparseCoreCache`. Neither exists at the reviewed revision: no file of that name and no occurrence of that identifier anywhere in the tracked tree. The concrete type the plan describes is `SparseQDLDLCache` in src/factor_cache/routes/qdldl_sparse.jl (line 92)."
+  },
+  "S08": {
+   "repo": "SDPX.jl",
+   "path": "src/factor_cache/routes.jl",
+   "sha256": "a0d1443fc6e0788a1929133ac3ea2925c18d03cef0e1ceb507f5f1de656fd2eb",
+   "lines": 29
+  },
+  "S09": {
+   "repo": "SDPX.jl",
+   "path": "src/kkt/system.jl",
+   "sha256": "84b2cd70df10724091cb7f35e04871ba60478a28385d1643a1df160a9df2ae40",
+   "lines": 539
+  },
+  "S10": {
+   "repo": "SDPX.jl",
+   "path": "docs/evidence/P3_01_BETA_EXPERIMENT.md",
+   "sha256": null,
+   "status": "ABSENT",
+   "note": "Plan cites docs/evidence/P3_01_BETA_EXPERIMENT.md for the CSDR beta single-factor record (0.9->105, 0.95->107, 0.98->118). No such file exists in the tracked tree at any revision, and no file in docs/evidence/ records those numbers. The beta experiment values in plan Section F06 are therefore unsourced in this repository."
+  },
+  "S11": {
+   "repo": "SDPX.jl",
+   "path": ".github/workflows/test.yml",
+   "sha256": "4b3c32152150a88644f78111fbd941299ccb6839b9cf8f47870721a29049a05e",
+   "lines": 176
+  },
+  "S12": {
+   "repo": "SDPX.jl",
+   "path": "LICENSE",
+   "sha256": "94f83a3f88d413ca7b26dd44d88e329e80db42b673034869b3c574fc5102a72b",
+   "lines": 22
+  },
+  "S13": {
+   "repo": "SDPX.jl",
+   "path": "src/hsd/initialize.jl",
+   "sha256": "b3e06499132307175619746231f9c39a2699df60a566738ca610ae06f63f0e05",
+   "lines": 321
+  },
+  "S14": {
+   "repo": "SDPX.jl",
+   "path": "src/cones/symmetric/SymmetricCones.jl",
+   "sha256": "8c40a6c0ea58f1bc44f3d7b07ca4b29ed52903c29d35a0126a46adb38df3fe5a",
+   "lines": 74
+  },
+  "S15": {
+   "repo": "SDPX.jl",
+   "path": "docs/design/NEWTON_SYSTEM.md",
+   "sha256": "e4d3f7a39576921d896d6aef57601279624dd1ed9ed9f5dd98e3c7f724bf90fa",
+   "lines": 517
+  },
+  "S16": {
+   "repo": "SDPX.jl",
+   "path": "src/SDPX.jl",
+   "sha256": "f779a642866c8ca61ae81a913d4072d0e845b1e2bb39b91cb4dd3aeb7c6a70a9",
+   "lines": 151
+  },
+  "S17": {
+   "repo": "SDPX.jl",
+   "path": "src/cones/runtime/symmetric_api.jl",
+   "sha256": "74d620d15e4fb93b9e15e2ef43fb58a4f256b727dbf518d581074dfa521579f0",
+   "lines": 1178
+  }
+ },
+ "replacement_locations": {
+  "S07": "src/factor_cache/routes/qdldl_sparse.jl",
+  "S10": null
+ },
+ "verification": {
+  "method": "grep -rn over the tracked tree excluding .git; git log --all -- <path>",
+  "generated": "2026-09-11"
+ }
+}
