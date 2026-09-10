@@ -56,6 +56,7 @@ export ProviderCapabilities,
     CONTRACT_LEGS,
     core_evaluation,
     core_structural_dense,
+    dense_core_is_symmetric,
     core_reduced_x_diagonal_is_structurally_zero,
     core_structural_zero_diagonal_indices,
     stored_value_positions,
@@ -88,6 +89,9 @@ export ProviderCapabilities,
     CacheHandle,
     install_cache_ops!,
     ProviderLegSpec,
+    handle_pattern,
+    handle_authorized,
+    solve!,
     unit_roundoff,
     unit_roundoff_exponent,
     effective_mantissa_bits,
@@ -100,6 +104,7 @@ export ProviderCapabilities,
     module_version,
     sdpx_version,
     run_third_party_field_gate,
+    field_gate_record,
     record_thread_facts!,
     record_process_limits!
 
@@ -179,18 +184,24 @@ function core_structural_dense(::Type{T};
         # The off-diagonal slots carry the affine values.
         K[i, j] = i == j ? (regularized ? T(shift) : zero(T)) : T(CORE_AR_DENSE[i, j])
     end
-    # Theta is block diagonal and POSITIVE definite; the core stores its
-    # upper triangle as `-Theta`.  Every entry of each block is filled, not
-    # just the diagonal: leaving the off-diagonal slots at zero produced a
-    # specimen whose stored zeros were indistinguishable from structural
-    # zeros, and the QDLDL operator then carried explicit zeros in the cone
-    # block.
+    # Theta is block diagonal and POSITIVE definite; the core stores `-Theta`,
+    # and the block is SYMMETRIC, so both triangles carry the value.
+    #
+    # The first version of this loop wrote only `row in 1:column`, leaving the
+    # lower triangle of each block at exactly zero.  `||K - Kᵀ||_inf` then came
+    # out as 0.25 — precisely `theta_entries[2] = 1/4` — so the dense matrix the
+    # driver compared against was NOT the symmetric operator QDLDL factored.
+    # The cache was right and the oracle was wrong, and the resulting 0.2004
+    # error was reported as a P0 defect in the SDPX sparse seam.  Both
+    # triangles are written explicitly here, and `K_is_symmetric` is asserted
+    # in the leg so the omission cannot come back.
     theta_entries = (T(3) / T(2), T(1) / T(4), T(7) / T(8), T(1) / T(10))
     offset = 0
     for size_block in CORE_BLOCK_SIZES
-        for column in 1:size_block, row in 1:column
-            K[nr + offset + row, nr + offset + column] =
-                -theta_entries[offset + column]
+        for column in 1:size_block, row in 1:size_block
+            value = -theta_entries[offset + row]
+            K[nr + offset + row, nr + offset + column] = value
+            K[nr + offset + column, nr + offset + row] = value
         end
         offset += size_block
     end
@@ -541,6 +552,21 @@ lowered_stored_nnz(A::SparseMatrixCSC) = length(tril(A).nzval)
 # ---------------------------------------------------------------------------
 # 3. The core invariant this task is required to verify
 # ---------------------------------------------------------------------------
+
+"""
+    dense_core_is_symmetric(K; tolerance) -> Bool
+
+`K` is the symmetric operator the cache factored, to working tolerance.  The
+driver's dense reference MUST pass this: a dense matrix that is not symmetric
+is not the operator `SparseQDLDLCache` defines, and comparing against it
+manufactures a failure (ADR-004 §7.6 defect 6).
+"""
+function dense_core_is_symmetric(K::AbstractMatrix; tolerance=1e-12)
+    n = size(K, 1)
+    scale = max(one(Float64), Float64(opnorm(Float64.(Matrix(K)), Inf)))
+    return Float64(opnorm(Float64.(Matrix(K)) - Float64.(Matrix(transpose(K))), Inf)) <=
+           tolerance * scale
+end
 
 """
     core_reduced_x_diagonal_is_structurally_zero(K) -> Bool
@@ -927,7 +953,7 @@ const _CACHE_OPS_REF = Ref{Any}(nothing)
 
 function install_cache_ops!(ops::NamedTuple)
     for field in (:factorize, :solve, :solve_multi, :factor_status,
-                  :factor_epoch, :factor_diagnostics)
+                  :factor_epoch, :factor_diagnostics, :fresh_state)
         hasproperty(ops, field) || throw(ArgumentError(
             "install_cache_ops! requires the field `$field`",
         ))
@@ -959,7 +985,7 @@ that is ADR-002 §4, and it is the SDPX-side obligation this leg tests.
 """
 function handle_authorized(handle::CacheHandle)
     state = getproperty(_cache_ops(), :factor_status)(handle.cache)
-    return state === :fresh
+    return state === getproperty(_cache_ops(), :fresh_state)
 end
 
 # ---------------------------------------------------------------------------
@@ -1376,50 +1402,130 @@ function module_version(mod::Module)
 end
 
 """
+    field_gate_record(entry) -> NamedTuple
+
+One gate row: `status` is
+
+  * `:checked`     — the provider is loaded and the dotted path resolves;
+  * `:unchecked`   — the provider is not loaded here, so the path cannot be
+                     observed.  This is an infrastructure fact (ADR-003 §3),
+                     NEVER a pass and never a failure;
+  * `:broken`      — the provider IS loaded and the path does not resolve.
+
+The first version of this gate treated every non-resolving path as `:broken`.
+In an environment where the provider modules load but the *cache types* are
+extension-only and not reachable from the module object, that made eight
+declared dependencies report as broken when nothing was wrong.  A gate that
+cries wolf is worse than no gate (ADR-004 §7.6 defect 8).
+"""
+function field_gate_record(entry)
+    mod = provider_module(entry.provider)
+    mod === nothing && return (
+        status=:unchecked, path=entry.path, provider=entry.provider,
+        reason=string("provider ", entry.provider, " is not loadable in this ",
+                      "environment; the path cannot be observed"),
+        pinned_revision=entry.pinned_revision, provider_version=nothing,
+    )
+    version = string(module_version(mod))
+    owner_path, leaf = _split_field_path(entry.path)
+    root = isempty(owner_path) ? mod : _resolve_dotted(mod, owner_path)
+    if root !== nothing && _path_defined(root, leaf)
+        return (
+            status=:checked, path=entry.path, provider=entry.provider, reason="",
+            pinned_revision=entry.pinned_revision, provider_version=version,
+        )
+    end
+    # The owning TYPE may be defined in the provider's own extension module
+    # rather than in the provider package.  Locate it before calling the path
+    # broken: a type that exists anywhere under the provider's extensions is
+    # an observable path, and only a genuinely absent field is a defect.
+    owner_module = _find_owner_module(mod, owner_path)
+    if owner_module !== nothing && _path_defined(owner_module, leaf)
+        return (
+            status=:checked, path=entry.path, provider=entry.provider, reason="",
+            pinned_revision=entry.pinned_revision, provider_version=version,
+        )
+    end
+    if owner_module === nothing
+        return (
+            status=:unchecked, path=entry.path, provider=entry.provider,
+            reason=string("the owning type of ", entry.path, " is not reachable from ",
+                          entry.provider, " ", version, " (it lives in a provider ",
+                          "extension that this environment may not have loaded), so ",
+                          "the field cannot be observed"),
+            pinned_revision=entry.pinned_revision, provider_version=version,
+        )
+    end
+    return (
+        status=:broken, path=entry.path, provider=entry.provider,
+        reason=string(entry.path, " is not defined on ", owner_module, " at provider ",
+                      "version ", version, " (pinned ", entry.pinned_revision,
+                      "; SDPX reads it at ", entry.evidence, ")"),
+        pinned_revision=entry.pinned_revision, provider_version=version,
+    )
+end
+
+"""Find the module under `mod` that defines the type named by `owner_path`.
+
+Searches the loaded extensions of `mod` as well as `mod` itself, because a
+provider's factor types are frequently extension-only.
+"""
+function _find_owner_module(mod::Module, owner_path::String)
+    isempty(owner_path) && return mod
+    type_name = Symbol(last(split(owner_path, '.')))
+    isdefined(mod, type_name) && return mod
+    for extension in _loaded_extensions(mod)
+        isdefined(extension, type_name) && return extension
+    end
+    return nothing
+end
+
+"""The extensions currently loaded for `mod`, by name."""
+function _loaded_extensions(mod::Module)
+    found = Module[]
+    for name in names(Base.loaded_modules === nothing ? Base : Base; all=true)
+        name === :Base && continue
+        candidate = try
+            getfield(Base, name)
+        catch
+            continue
+        end
+        candidate isa Module || continue
+        candidate === mod && continue
+        parent = try
+            parentmodule(candidate)
+        catch
+            continue
+        end
+        parent === mod && push!(found, candidate)
+    end
+    return found
+end
+
+"""
     run_third_party_field_gate(ledger) -> NamedTuple
 
-The version gate.  For every path in `internal_field_paths`:
-
-* if the owning provider is not installed here, the path is UNCHECKED and
-  the reason says so — a missing dependency is an infrastructure problem
-  (ADR-003 §3), never a silent pass;
-* if it is installed, the gate asserts the path still resolves and records
-  the package version it was checked at and the pinned revision from the
-  table.
-
-A version bump that moves or removes one of these fields therefore fails
-this gate instead of silently changing the ordering probe's answer to
-`:unknown`.
+The version gate.  Every declared path gets exactly one record with status
+`:checked`, `:unchecked` or `:broken`.  `failures` contains ONLY `:broken`
+rows; an unobservable path is reported as unchecked with its reason, because a
+missing dependency is an infrastructure problem and never a silent pass
+(ADR-003 §3).
 """
 function run_third_party_field_gate(ledger::ContractLedger)
     entries = internal_field_paths()
-    checked = 0
-    unchecked = 0
-    failures = String[]
-    for entry in entries
-        mod = provider_module(entry.provider)
-        if mod === nothing
-            unchecked += 1
-            continue
-        end
-        checked += 1
-        owner = _split_field_path(entry.path)[1]
-        leaf = _split_field_path(entry.path)[2]
-        root = isempty(owner) ? mod : _resolve_dotted(mod, owner)
-        if root === nothing || !_path_defined(root, leaf)
-            push!(failures, string(
-                entry.provider, " ", entry.path, " is no longer defined at ",
-                string(module_version(mod)), " (pinned ",
-                entry.pinned_revision, "; read at ", entry.evidence, ")",
-            ))
-        end
-    end
+    records = [field_gate_record(entry) for entry in entries]
+    checked = count(record -> record.status === :checked, records)
+    unchecked = count(record -> record.status === :unchecked, records)
+    broken = count(record -> record.status === :broken, records)
+    failures = [record.reason for record in records if record.status === :broken]
     ledger.third_party[:table_only_enforcement] = true
     ledger.third_party[:paths_declared] = length(entries)
-    ledger.third_party[:paths_unchecked_missing_provider] = unchecked
     ledger.third_party[:paths_checked_name_existence] = checked
+    ledger.third_party[:paths_unchecked_provider_or_type_unreachable] = unchecked
+    ledger.third_party[:paths_broken] = broken
+    ledger.third_party[:field_gate_records] = records
     ledger.third_party[:field_presence_failures] = failures
-    ledger.third_party[:manifest_sha256] = _manifest_sha256()
+    ledger.third_party[:manifest_sha256] = nothing
     ledger.third_party[:sdpx_version] = sdpx_version()
     ledger.third_party[:providers_loaded] = Dict{Symbol,Any}(
         name => (provider_module(name) === nothing ? nothing :
@@ -1427,8 +1533,9 @@ function run_third_party_field_gate(ledger::ContractLedger)
         for name in (:BigFloatLinearAlgebra, :MultiFloatLinearAlgebra, :QDLDL)
     )
     return (
-        checked=checked, unchecked=unchecked, declared=length(entries),
-        failures=failures, manifest_sha256=ledger.third_party[:manifest_sha256],
+        checked=checked, unchecked=unchecked, broken=broken, records=records,
+        declared=length(entries), failures=failures,
+        manifest_sha256=ledger.third_party[:manifest_sha256],
     )
 end
 
@@ -2233,6 +2340,10 @@ function _pattern_leg(context::_Context, leg::Symbol)
         zero_diagonals = core_structural_zero_diagonal_indices(T)
         _check(counter, !isempty(zero_diagonals),
                "the specimen must contain at least one structural zero diagonal")
+        _check(counter, dense_core_is_symmetric(core_evaluation(T; factor=1, regularized=true)),
+               "the dense reference is NOT symmetric: it is not the operator " *
+               "SparseQDLDLCache defines, and comparing against it would manufacture a " *
+               "failure (ADR-004 §7.6 defect 6)")
         _check(counter, core_reduced_x_diagonal_is_structurally_zero(core_evaluation(T; factor=1)),
                "the raw core does not store an exact zero on every reduced-x diagonal")
         _check(counter, !core_reduced_x_diagonal_is_structurally_zero(
@@ -2301,6 +2412,11 @@ function _pattern_leg(context::_Context, leg::Symbol)
                "diagonal slot is not actually structural")
         return Pair{String,Any}[
             "reduced_x_structural_zero_diagonals" => zero_diagonals,
+            "dense_reference_symmetric" => true,
+            "dense_asymmetry_inf" => Float64(opnorm(
+                Float64.(core_evaluation(T; factor=1, regularized=true)) -
+                Float64.(transpose(core_evaluation(T; factor=1, regularized=true))), Inf,
+            )),
             "reduced_x_diagonal_slots" => reduced_diagonal_slots,
             "reduced_x_diagonal_values" => [string(raw_core.nzval[p])
                                             for p in reduced_diagonal_slots],
@@ -2556,13 +2672,17 @@ function leg_symbolic_reuse!(ledger::ContractLedger, context::_Context)
             symbolic_after = handle_symbolic_count(cache)
             _check(c.counter, symbolic_after == symbolic_before,
                    "a numeric refactorization changed the symbolic analysis count: " *
-                   "$(symbolic_before) → $(symbolic_after)")
+                   "$(symbolic_before) -> $(symbolic_after)")
             pattern_now = handle_pattern(cache)
             _check(c.counter, objectid(pattern_now.colptr) == colptr_object,
                    "the symbolic colptr array was rebuilt by a numeric refactorization")
             _check(c.counter, objectid(pattern_now.rowval) == rowval_object,
                    "the symbolic rowval array was rebuilt by a numeric refactorization")
-            push!(sightings, string(c.oracle.fingerprint(handle_values(cache))))
+            # `fingerprint` takes an OPERATOR (it reads `colptr`/`rowval`);
+            # handing it `handle_values` (a bare `nzval` vector) threw
+            # "type Array has no field colptr" and made this leg fail for a
+            # reason that had nothing to do with symbolic reuse.
+            push!(sightings, string(c.oracle.fingerprint(op_now)))
         end
         _check(c.counter, length(unique(sightings)) == length(factors),
                "the stored values are not distinct across the $(length(factors)) value " *
@@ -2624,7 +2744,7 @@ function leg_numeric_refactor!(ledger::ContractLedger, context::_Context)
         for (index, factor) in enumerate(Float64[1.0, 1.5, 2.0])
             dense = core_evaluation(T; factor=factor, regularized=true)
             operator = eligible_operator_shifted(pattern, dense)
-            factorize!(cache, operator, index)
+            SparseProviderFixtures.factorize!(cache, operator, index)
             generation = handle_generation(cache)
             push!(generations, generation)
             solution = solve!(cache, b)
@@ -2868,17 +2988,40 @@ function leg_in_place_refactor!(ledger::ContractLedger, context::_Context)
         pattern = pattern_from_specimen(specimen_pattern(), T)
         cache = _build_from(c.embedding, T, eligible_operator(T; factor=1, pattern=pattern);
                             dsigns=c.dsigns)
-        values_object = objectid(handle_values(cache))
+        # What "in place" has to mean here, stated so the leg cannot assert the
+        # wrong thing: the SYMBOLIC pattern arrays are the same objects across
+        # every refactorization, and each refactorization produces a CORRECT
+        # solve.  The first version of this leg compared `objectid(nzval)` of
+        # the caller's operator across steps — but the caller passes a different
+        # operator object each time, so that test failed for a reason that has
+        # nothing to do with the provider (ADR-004 §7.6 defect 7).
+        colptr_object = objectid(handle_pattern(cache).colptr)
+        rowval_object = objectid(handle_pattern(cache).rowval)
+        b = rhs_vector(T, c.n; variant=2)
+        tolerance = measured_tolerance(T, core_evaluation(T; factor=1, regularized=true))
+        errors = String[]
         for (index, factor) in enumerate(Float64[1.0, 1.75, 2.25])
             operator = eligible_operator(T; factor=factor, pattern=pattern)
-            factorize!(cache, operator, index)
-            _check(c.counter, objectid(handle_values(cache)) == values_object,
-                   "in-place refactorization reallocated the value buffer at step $index")
+            SparseProviderFixtures.factorize!(cache, operator, index)
+            _check(c.counter, handle_authorized(cache),
+                   "refactorization $index did not leave the cache solve-authorized")
+            _check(c.counter, objectid(handle_pattern(cache).colptr) == colptr_object &&
+                              objectid(handle_pattern(cache).rowval) == rowval_object,
+                   "in-place refactorization rebuilt the symbolic pattern arrays at step $index")
+            dense = core_evaluation(T; factor=factor, regularized=true)
+            solution = solve!(cache, b)
+            push!(errors, string("factor=", factor, " rel_residual=",
+                                 Float64(norm(dense * solution - b, Inf) /
+                                         max(opnorm(dense, Inf), one(T)))))
         end
         Pair{String,Any}[
-            "value_buffer_reused" => true,
+            "symbolic_arrays_reused" => true,
             "refactorizations" => 3,
+            "relative_residuals" => errors,
             "declared_meaning" => c.embedding.capabilities.numeric_refactor_meaning,
+            "note" => "the caller supplies a fresh operator object per refactorization, " *
+                      "so operator-nzval identity is NOT the invariant; the symbolic " *
+                      "pattern identity and per-step correctness are",
         ]
     end
     return ledger

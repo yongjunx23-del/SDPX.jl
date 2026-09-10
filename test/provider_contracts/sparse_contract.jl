@@ -55,6 +55,7 @@ F.install_cache_ops!((
     factor_status=SDPX.factor_status,
     factor_epoch=SDPX.factor_epoch,
     factor_diagnostics=SDPX.factor_diagnostics,
+    fresh_state=SDPX.Fresh,
 ))
 
 # ---------------------------------------------------------------------------
@@ -616,6 +617,19 @@ end
         @test A1.colptr == template.colptr
     end
 
+    @testset "the dense reference is the symmetric operator the cache factors" begin
+        # ADR-004 §7.6 defect 6: the first version of the Theta block wrote only
+        # its upper triangle, so the dense reference was asymmetric by 0.25 and
+        # every seam leg "failed" against a matrix QDLDL was never given.
+        for factor in (1.0, 1.5, 2.0)
+            K = F.core_evaluation(Float64; factor=factor, regularized=true)
+            @test opnorm(K - transpose(K), Inf) == 0.0
+            @test F.dense_core_is_symmetric(K)
+            @test K[5, 6] == K[6, 5] != 0.0
+            @test K[7, 8] == K[8, 7] != 0.0
+        end
+    end
+
     @testset "structural zeros are exact and structural" begin
         K = F.core_evaluation(Float64; factor=1)
         @test F.core_reduced_x_diagonal_is_structurally_zero(K)
@@ -772,8 +786,17 @@ end
     @testset "third-party field gate is centralized and version-pinned" begin
         gate = F.run_third_party_field_gate(ledger)
         @test gate.declared == length(F.internal_field_paths())
-        @test gate.checked + gate.unchecked == gate.declared
+        @test gate.checked + gate.unchecked + gate.broken == gate.declared
         @test isempty(gate.failures)
+        # Every declared path gets exactly one record with a legal status, and
+        # an unobservable path carries its reason rather than passing silently.
+        @test length(gate.records) == gate.declared
+        for record in gate.records
+            @test record.status in (:checked, :unchecked, :broken)
+            if record.status !== :checked
+                @test !isempty(record.reason)
+            end
+        end
         @test ledger.third_party[:table_only_enforcement] === true
         @test ledger.third_party[:sdpx_version] isa String
         # Every declared path names a provider, a pinned revision and the file
@@ -788,7 +811,7 @@ end
         # than claim it checked them.
         if !_MFLA_PRESENT && !_BFLA_PRESENT
             @test gate.checked == 0
-            @test gate.unchecked == gate.declared
+            @test gate.unchecked + gate.broken == gate.declared
         end
     end
 

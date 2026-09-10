@@ -109,7 +109,10 @@ runs and disagrees is `:fail`. There is no fourth outcome and no silent pass
 construction, not by promise:** the shared thing is the driver and the leg
 list; the per-provider thing is the oracle. Measured identities:
 `:mfla_dense_generic_solve` and `:bfla_dense_generic_solve`, asserted
-pairwise distinct in the same testset that runs them.
+pairwise distinct in the same testset that runs them; and, after the §7.1 fix,
+the two legs report genuinely different errors (§7.2). Before the fix they
+reported the *same* error — which was the bug wearing the costume of the
+acceptance criterion.
 
 ## 4. Asymmetry that must be declared, not smoothed over
 
@@ -207,57 +210,88 @@ ADR; this one deliberately does not pre-authorize it.
 
 ## 7. Findings (measured, this round)
 
-### 7.1 The SDPX sparse QDLDL seam returns wrong answers — P0
+### 7.1 WITHDRAWN: "the SDPX sparse QDLDL seam returns wrong answers"
 
-Both providers, both rounds, same specimen, same magnitude:
+**This ADR initially reported a P0 defect in the SDPX sparse seam. That
+finding is WITHDRAWN, and the defect is P01's own.** It is recorded here in
+full because a withdrawn P0 with its reason is evidence, and because the way
+it was wrong is worth more than the fact that it was.
 
-| Leg | MFLA (`Float64x2`) | BFLA (`BigFloat`, 256 bits) |
-|---|---|---|
-| error vs the provider's own oracle on the same operator | **0.20035761024843557** | **0.20035761024843557** |
-| tolerance (`max(64,4n)·u·κ`) | 5.05e-29 | 1.77e-74 |
+*What was claimed.* SDPX's `SparseQDLDLCache` solve returned answers that were
+not the solution of the system it was given: error `0.20035761024843557` on
+both MFLA (`Float64x2`) and BFLA (`BigFloat`, 256 bits), and `1.9e10` against
+a dense solve of "exactly what the operator stores". The identical value
+across two unrelated arithmetics was read as proof of a structural,
+arithmetic-independent defect in the SDPX path.
 
-The identical value across two unrelated arithmetics rules out provider
-rounding. A direct check isolates it to the SDPX route, not the data:
+*What is actually true.* The dense matrix the driver compared against was
+**asymmetric**. `core_structural_dense` wrote only the upper triangle of each
+Theta block, leaving the lower triangle at exactly zero:
 
 ```
-# build the dense matrix of exactly what the operator stores, then solve it
-# twice: once through SDPX's SparseQDLDLCache, once with a dense solve.
-Kop = zeros(T, 8, 8); for j, p in the operator's slots: Kop[rowval[p], j] = nzval[p]
-SDPX.factorize!(cache, operator, 1); SDPX.solve!(cache, y, b)
-Kop \ b          ->  err = 1.9198321536764786e10
-dense core \ b   ->  err = 0.20035761024843557
+||K - Kᵀ||_inf              = 0.25      (= theta_entries[2] = 1/4, the missing mirror)
+||Symmetric(K, :U) - K||_inf = 0.25
 ```
 
-`1.9e10` is not a rounding discrepancy; the sparse return path is returning
-something that is not the solution of the system it was given. **This is
-reported as a defect, not attributed to MFLA or BFLA**: the same fixture
-driven through each provider's *own* cache passes at 0.0 and 4.3e-78 (§7.2).
+`SparseQDLDLCache` defines the symmetric operator by its stored upper
+triangle. Measured on the same cache, same operator, same right-hand side:
 
-Scope note, stated conservatively: one 8×8 symmetric quasi-definite specimen
-with a caller-owned `1e-3` shift, `Float64x2` and `BigFloat` at 256 bits,
-`-t1`. It does **not** establish that every sparse solve is wrong; it
-establishes that this one is, reproducibly, and that the harness that would
-have caught it did not exist before this task.
+| comparison | error |
+|---|---|
+| residual against the **asymmetric** `K` (the buggy oracle) | 4.564355131576526e-1 |
+| residual against **`Symmetric(K, :U)`** (the operator that was factored) | **6.7053176943786e-30** |
+| `‖y − Symmetric(K,:U)\b‖_inf` | 6.760784476776953e-30 |
+| `‖y − K_asym\b‖_inf` | 2.0035761024843557e-1 |
 
-### 7.2 The provider-level contract passes on both libraries
+The cache's answer solves the symmetric operator it was given, to `Float64x2`
+rounding. **`SparseQDLDLCache` is correct. The oracle was not.**
 
-Same driver, same legs, per-provider oracles, separate processes:
+*Why the reasoning failed.* The signature was right and the attribution was
+backwards. "The error is identical across two arithmetics" is evidence of a
+structural mismatch — and it was one, between two different *matrices*, not
+inside the provider path. Reproducing a failure is not the same as validating
+the test that produced it. This is the exact failure the packet's
+"不以实现者自报代替证据" rule exists to prevent, and it was committed by both
+P01 (which reported it) and the orchestrator (which escalated it to
+"CONFIRMED P0 in production SDPX" on the strength of a reproduction nobody had
+validated). The lesson recorded here: **a numeric failure must be attributed
+only after the reference has been shown to describe the system under test.**
 
-| Leg | MFLA | BFLA |
+### 7.2 The SDPX sparse seam passes every contract leg, on both providers
+
+After the Theta mirror was fixed, the SDPX sparse seam runs the full contract
+for both providers with no failures:
+
+| embedding | legs | pass | fail | skip | unsupported | assertions |
+|---|---|---|---|---|---|---|
+| `mfla` (`MultiFloat{Float64,2}`) | 13 | **10** | **0** | 0 | 3 | 80 |
+| `bfla` (`BigFloat`, 256 bits) | 13 | **9** | **0** | 0 | 4 | 74 |
+
+The 3/4 unsupported legs are the declared asymmetries, each with a reason:
+`kernel_threads` and `process_limits` (nothing measured, so `null`), the gate
+for the provider-neutral leg, and `in_place_refactor` for BFLA (BFLA publishes
+no sparse LDL of its own, so there is no BigFloat in-place refactorization to
+exercise).
+
+Numeric evidence, error against **each provider's own oracle**:
+
+| | MFLA | BFLA |
 |---|---|---|
-| `symbolic_reuse` | pass (3 assertions) | pass (3) |
-| `numeric_refactor` | pass (6) | pass (6) |
-| `multi_rhs` | pass (4) | pass (4) |
-| `reuse_after_failure` | pass (5) | pass (5) |
+| `numeric_refactor` | pass (6 assertions) | pass (6) |
+| errors over three value sets | `1.232595164407831e-32`, `1.5407439555097887e-33`, `6.933347799794049e-33` | `0.0`, `4.3180842775472223e-78`, `0.0` |
+| relative residuals | `1.54e-33`, `2.24e-33`, `1.76e-33` | `4.32e-78`, `3.14e-78`, `1.23e-78` |
+| measured unit roundoff | `4.930380657631324e-32` (105 effective mantissa bits) | `1.727233711018889e-77` (256 bits) |
+| tolerance | `7.368157853882897e-30` | `2.581247071387205e-75` |
 
-Measured error against each provider's own oracle: MFLA
-`1.232595164407831e-32` (tolerance `5.79e-119`… actual bound 2.58e-75 class
-per provider), BFLA `0.0` / `4.3180842775472223e-78` / `0.0`. BFLA's measured
-unit roundoff is `1.727233711018889e-77` at 256 bits
-(`effective_mantissa_bits = 256.0`).
+The two error columns are now **different**, which is the point of acceptance
+item 1: one driver, two oracles. The former equality was the bug's signature.
 
-**`reuse_after_failure` confirms ADR-002 §8/§9 on the real libraries.** After
-a wrong-dimension factor input is rejected, BFLA still reports
+Provider-level legs (each provider's own dense cache, same driver) pass on
+both: `symbolic_reuse`, `numeric_refactor`, `multi_rhs`, `reuse_after_failure`,
+4 legs / 18 assertions each.
+
+**`reuse_after_failure` confirms ADR-002 §8/§9 on the real libraries.** After a
+wrong-dimension factor input is rejected, BFLA still reports
 `issuccess == true` and still holds the previous factor; MFLA likewise retains
 its previous status. Both are entitled to. The obligation is SDPX's, and no
 SDPX adapter is exercised by that leg.
@@ -281,24 +315,20 @@ Verified in `src/kkt/symmetric_core.jl`:
   zero (`iszero`, not "small"), and the raw core has no other zero on that
   diagonal.
 
-So the claim is true of the code as written and nothing in the core violates
-it. The one semantic caveat, recorded rather than glossed: the reduced-x
-diagonal slot is structural in the sense of *addressing*, and its value is
-exactly zero — which is precisely why the core must never be handed to QDLDL
-as-is, and why the fixture's negative controls (empty column, lower-triangle
-storage, `Int32` indices, unknown ordering) all must be **refused**.
+The one semantic caveat, recorded rather than glossed: the reduced-x diagonal
+slot is structural in the sense of *addressing*, and its value is exactly
+zero — which is precisely why the core must never be handed to QDLDL as-is,
+and why the fixture's negative controls (empty column, lower-triangle storage,
+`Int32` indices, unknown ordering) all must be **refused**.
 
 ### 7.4 Provider declarations disagree with provider behaviour
-
-Two facts found while wiring the live legs, both of which the gate must
-capture rather than averaging away:
 
 * `SparseQDLDLProviderOrderingAvailable(BigFloat, :natural)` returns `true`
   (`ext/SDPXBigFloatLinearAlgebraExt.jl:1147`), but the actual construction
   refuses it: `ArgumentError: QDLDL provider ordering natural is unavailable
   for BigFloat; no ordering fallback`. The declared capability and the
-  behaviour disagree. The contract now declares `ordering_natural = false`
-  for BFLA and asserts *both* directions, so this cannot silently become a
+  behaviour disagree. The contract declares `ordering_natural = false` for
+  BFLA and asserts *both* directions, so this cannot silently become a
   fallback.
 * BFLA's `sparse_ldlt_available(BigFloat)` is `false` until `QDLDL` is
   actually loaded in the process. A capability probe that never loads QDLDL
@@ -310,47 +340,63 @@ capture rather than averaging away:
 **Confirmed orphaned, unchanged.** `grep -rn "GenericSparseCholeskyFactor"
 --include=*.jl .` returns **11 hits, all inside `src/sparse_la.jl`** (the type
 at `:718`, methods at `:804, :878, :1012, :1043, :1049, :1055, :1115, :1126`,
-two backend fields at `:1405, :1425, :1438`) and **zero external references**
-from `test/`, `ext/`, `validation/`, `benchmark/`, or any other source file.
-It has precision-aware refactorization and no caller. This ADR does **not**
-wire it in: wiring an orphan into a live route is a behaviour change that
-belongs to an implementation task with its own evidence, not to a contract
-ADR. Recorded as an open finding.
+backend fields at `:1405, :1425, :1438`) and **zero external references** from
+`test/`, `ext/`, `validation/`, `benchmark/`, or any other source file. This
+ADR does **not** wire it in: wiring an orphan into a live route is a behaviour
+change that belongs to an implementation task with its own evidence.
 
 ### 7.6 Defects found in this task's own work
 
-Recorded because ADR-003 §4 requires it; each one disabled or falsified a leg
-before it was fixed.
+Recorded because ADR-003 §4 requires it. Eight defects, in the order they
+falsified a leg; the first is the withdrawn P0 above.
 
-1. `upper_only(K)` was `sparse(UpperTriangular(Matrix(K)))`, which keeps the
+1. **The dense reference was asymmetric** (§7.1). The Theta block got only its
+   upper triangle, so every seam leg was compared against a matrix QDLDL was
+   never given, and the resulting failure was misattributed to production
+   code. Fixed by mirroring the block, and `dense_core_is_symmetric` plus an
+   explicit `opnorm(K - Kᵀ, Inf) == 0.0` assertion now guard it.
+2. `upper_only(K)` was `sparse(UpperTriangular(Matrix(K)))`, which keeps the
    **full** parent sparsity for the lower triangle (`nnz` stayed 16 for a
    matrix with 9 strict-upper nonzeros). Pattern and values disagreed, QDLDL
    refused the operator as "not upper triangle", and four legs reported a
    provider failure that was the fixture's.
-2. The specimen pattern was restated by hand three times, each version wrong
-   in a different place (untransposed affine block, a cone-block column
-   overwritten instead of appended, a diagonal-prefix/emission variable
-   captured by a later loop). The operator then stored nonzero values in the
-   strictly lower triangle. Fixed by deriving the slot set from the same
-   dense definition the values come from.
-3. The unit roundoff was first measured by bisecting `(1 + u) - 1 != 0`,
-   which for `Float64x2` converges on `2^-1074` — the tolerance came out
-   **eleven orders of magnitude too tight**, and every MFLA numeric leg
-   "failed" on rounding. Now measured as `eps(T)` and reported with
-   `effective_mantissa_bits` beside the nominal width.
-4. `CacheHandle` was immutable, so `handle_values` returned the operator from
-   construction; three legs compared a stale operator against a fresh oracle
-   and reported a false provider failure.
-5. `factorize!(handle, ...)` collided with `LinearAlgebra.factorize!` under
-   bare-name resolution and silently returned an LU object. Now called
-   qualified.
+3. The specimen pattern was restated by hand three times, each version wrong
+   in a different place (untransposed affine block; a cone-block column
+   overwritten instead of appended; a diagonal-prefix/emission variable
+   captured by a later loop). The operator then stored nonzeros in the
+   strictly lower triangle. Fixed by deriving the slot set from the same dense
+   definition the values come from.
+4. The unit roundoff was first measured by bisecting `(1 + u) - 1 != 0`, which
+   for `Float64x2` converges on `2^-1074` — the tolerance came out **eleven
+   orders of magnitude too tight**, and every MFLA numeric leg "failed" on
+   rounding. Now measured as `eps(T)`, reported with `effective_mantissa_bits`.
+5. `CacheHandle` was immutable, so `handle_values` returned the operator from
+   construction; three legs compared a stale operator against a fresh oracle.
+6. `factorize!(handle, ...)` collided with `LinearAlgebra.factorize!` under
+   bare-name resolution and silently returned an LU object, which surfaced as
+   `type Array has no field colptr` in the `symbolic_reuse` leg.
+7. `in_place_refactor` asserted `objectid(nzval)` of the *caller's* operator
+   across steps, but the driver passes a different operator object each step,
+   so it failed for a reason unrelated to the provider. It now asserts
+   symbolic-array identity plus per-step correctness.
+8. The third-party field gate treated every non-resolving path as `:broken`,
+   so in an environment where the providers load but their cache types are
+   extension-only it reported all eight declared dependencies as broken when
+   nothing was wrong. A gate that cries wolf is worse than no gate. It now
+   distinguishes `:checked` / `:unchecked` / `:broken`, and only `:broken`
+   fails.
+
+Every one of these eight was found by running the test, not by reading it,
+and each was a false accusation against a provider or against SDPX before it
+was a bug in P01. That ratio is the honest summary of this task.
 
 ## 8. Consequences
 
-* **The sparse seam is not releasable at the measured revision** (§7.1). It is
-  internal, unwired, and fail-closed, so nothing public is broken — but no
-  capability claim about it may be made until the defect is fixed and this
-  contract passes.
+* **The sparse seam passes this contract on both providers at the measured
+  revisions** (§7.2). That is a statement about *this* fixture, at *these*
+  revisions, in *separate* processes — not a production qualification. The
+  seam remains internal and unwired, and native high-precision routing remains
+  unqualified.
 * **A capability claim still needs environment + revision + test**
   (ADR-002 §7). The four accounting blocks — `symbolic_reuse`,
   `numeric_refactor`, `kernel_threads`, `process_limits` — are reported
