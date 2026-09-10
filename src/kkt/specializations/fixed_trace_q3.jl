@@ -893,6 +893,9 @@ mutable struct FixedTraceQ3CoreWorkspace{T,S,C,E,P}
     negated_dual::Vector{T}
     residual::NewtonResidual{T}
     primal_operator_norm::T
+    # P1-02: direction-independent dual column absolute sums, built once from
+    # the frozen sparse pattern.  Never recomputed on the hot path.
+    dual_column_norms::Vector{T}
     dkappa::T
     last_dtau::T
     denominator::T
@@ -981,6 +984,28 @@ function _fixed_trace_primal_operator_norm(
     return norm
 end
 
+"""Setup-cached column absolute sums `abs(c[j]) + sum(abs(A[:,j]))`.
+
+Accumulated in exactly the order `_shared_dual_stats` uses, so a gate that
+consumes the cached value is bit-identical to one that recomputes it.
+"""
+function _fixed_trace_dual_column_norms(
+    system::NewtonSystem{T},
+) where {T<:AbstractFloat}
+    A = system.A
+    c = system.c
+    n = length(c)
+    norms = alloc_zeros(T, n)
+    @inbounds for j in 1:n
+        row_norm = abs(c[j])
+        for pointer in nzrange(A, j)
+            row_norm += abs(A.nzval[pointer])
+        end
+        norms[j] = row_norm
+    end
+    return norms
+end
+
 function prepare_fixed_trace_q3_core_state(
     system::NewtonSystem{T}, plan;
     workers::Integer=Threads.nthreads(),
@@ -1026,6 +1051,7 @@ function prepare_fixed_trace_q3_core_state(
         alloc_zeros(T, m), alloc_zeros(T, n),
         NewtonResidual(system),
         _fixed_trace_primal_operator_norm(system),
+        _fixed_trace_dual_column_norms(system),
         zero(T), zero(T), zero(T), :regular,
         core_dimension, -1, 0, 0, -1, 0, 0, 0, 0,
         nothing, 0,

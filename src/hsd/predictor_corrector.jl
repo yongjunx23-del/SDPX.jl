@@ -975,9 +975,11 @@ function _product_hsd_symmetric_core_direction!(
     end
     t0 = time_ns()
     refinement_wall0 = timings.refinement_seconds
+    _core_t0 = time_ns()
     predictor_candidate, predictor_residual, _ = fixed_trace ?
         _core_solve_raw!(core, predictor_system; compute_residual=false) :
         _core_solve_raw!(core, predictor_system)
+    timings.core_solve_seconds += Float64(time_ns() - _core_t0) * 1.0e-9
     # Disjoint phase partition: the refine wall share inside this call was
     # accumulated directly into `refinement_seconds` by `_core_refine!`;
     # the solve bucket keeps the remainder of the call wall, extended
@@ -988,14 +990,19 @@ function _product_hsd_symmetric_core_direction!(
     copy_owned!(base.ds, predictor_candidate.ds)
     base.dtau = predictor_candidate.dtau
     base.dkappa = predictor_candidate.dkappa
+    _scatter_t0 = time_ns()
     _product_hsd_core_scatter!(state)
+    timings.core_scatter_seconds += Float64(time_ns() - _scatter_t0) * 1.0e-9
     _hsd_direction_finite(base) || begin
         state.diagnostic = fixed_trace ?
             :disjoint_fixed_head_q3_predictor_nonfinite :
             :symmetric_core_predictor_nonfinite
         return false
     end
-    if !_product_hsd_newton_residual_ok(state, predictor_scalar)
+    _gate_t0 = time_ns()
+    _gate_ok = _product_hsd_newton_residual_ok(state, predictor_scalar)
+    timings.core_gate_seconds += Float64(time_ns() - _gate_t0) * 1.0e-9
+    if !_gate_ok
         state.diagnostic = fixed_trace ?
             :disjoint_fixed_head_q3_predictor_residual_failed :
             :symmetric_core_predictor_residual_failed

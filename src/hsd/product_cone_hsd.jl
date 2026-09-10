@@ -2026,6 +2026,47 @@ end
     return componentwise, group_residual, group_work
 end
 
+"""Dual residuals using setup-cached column absolute sums.
+
+`column_norms[j]` must be `abs(c[j]) + sum(abs(A[:,j]))` accumulated in the
+same order as `_shared_dual_stats`.  The per-nonzero accumulation of that
+term is then skipped; the residual arithmetic and every reduction are
+unchanged, so the returned tuple is identical to `_shared_dual_stats`.
+"""
+@inline function _shared_dual_stats_cached(
+    A::SparseMatrixCSC{T,Int}, c::AbstractVector{T}, dy::AbstractVector{T},
+    dtau::T, rD::AbstractVector{T}, column_norms::AbstractVector{T},
+) where {T<:AbstractFloat}
+    m = length(dy)
+    n = length(c)
+    componentwise = true
+    group_residual = zero(T)
+    rhs_norm = zero(T)
+    direction_norm = abs(dtau)
+    @inbounds for k in 1:m
+        direction_norm = max(direction_norm, abs(dy[k]))
+    end
+    operator_norm = zero(T)
+    @inbounds for j in 1:n
+        cdt = c[j] * dtau
+        residual = muladd(c[j], dtau, rD[j])
+        local_work = abs(rD[j]) + abs(cdt)
+        for ptr in nzrange(A, j)
+            term = A.nzval[ptr] * dy[A.rowval[ptr]]
+            residual = muladd(
+                A.nzval[ptr], dy[A.rowval[ptr]], residual,
+            )
+            local_work += abs(term)
+        end
+        componentwise &= _product_hsd_newton_close(residual, local_work)
+        group_residual = max(group_residual, abs(residual))
+        rhs_norm = max(rhs_norm, abs(rD[j]))
+        operator_norm = max(operator_norm, column_norms[j])
+    end
+    group_work = operator_norm * direction_norm + rhs_norm
+    return componentwise, group_residual, group_work
+end
+
 """Gap residual/work with production muladd accumulation (verbatim)."""
 @inline function _shared_gap_terms(
     rG::T, dkappa::T,
@@ -2380,11 +2421,21 @@ end
     # the cross-column max/and reduction is exact (floating-point max and
     # boolean conjunction), so a deterministic fixed-partition threaded
     # reduction reproduces the serial result bit for bit.
+    # P1-02: the dual operator norm (`max_j (abs(c[j]) + sum_j abs(A[:,j]))`)
+    # depends only on frozen data, never on the direction.  The fixed-trace
+    # core caches the per-column sums at setup; every other route recomputes
+    # them exactly as before.
+    core = state.symmetric_core
+    norms = core isa FixedTraceQ3CoreWorkspace ? core.dual_column_norms : nothing
     threaded = _dual_newton_stats_threaded!(
-        base.A, base.c, base.dy, base.dtau, base.rD,
+        base.A, base.c, base.dy, base.dtau, base.rD, norms,
     )
     threaded === nothing || return threaded
-    return _shared_dual_stats(base.A, base.c, base.dy, base.dtau, base.rD)
+    norms === nothing &&
+        return _shared_dual_stats(base.A, base.c, base.dy, base.dtau, base.rD)
+    return _shared_dual_stats_cached(
+        base.A, base.c, base.dy, base.dtau, base.rD, norms,
+    )
 end
 
 @inline function _product_hsd_symmetric_dual_residual_ok(

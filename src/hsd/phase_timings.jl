@@ -61,6 +61,12 @@ Base.@kwdef mutable struct ProductHSDPhaseTimings
     q3_local_elimination_seconds::Float64 = 0.0
     q3_panel_transform_seconds::Float64 = 0.0
     q3_gram_seconds::Float64 = 0.0
+    # Children of predictor_linear_solve_seconds / corrector_linear_solve_seconds
+    # on the fixed-trace route; the solve bucket keeps the remainder of the
+    # call wall so the three never double-count.
+    core_solve_seconds::Float64 = 0.0
+    core_scatter_seconds::Float64 = 0.0
+    core_gate_seconds::Float64 = 0.0
 end
 
 """Reset every phase accumulator to zero (used at solve start)."""
@@ -86,6 +92,9 @@ function reset_phase_timings!(timings::ProductHSDPhaseTimings)
     timings.q3_local_elimination_seconds = 0.0
     timings.q3_panel_transform_seconds = 0.0
     timings.q3_gram_seconds = 0.0
+    timings.core_solve_seconds = 0.0
+    timings.core_scatter_seconds = 0.0
+    timings.core_gate_seconds = 0.0
     return timings
 end
 
@@ -114,5 +123,8 @@ function phase_timings_snapshot(timings::ProductHSDPhaseTimings)
         q3_local_elimination_seconds=timings.q3_local_elimination_seconds,
         q3_panel_transform_seconds=timings.q3_panel_transform_seconds,
         q3_gram_seconds=timings.q3_gram_seconds,
+        core_solve_seconds=timings.core_solve_seconds,
+        core_scatter_seconds=timings.core_scatter_seconds,
+        core_gate_seconds=timings.core_gate_seconds,
     )
 end
