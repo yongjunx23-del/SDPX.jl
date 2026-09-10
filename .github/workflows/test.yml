@@ -7,6 +7,10 @@ on:
     tags: ['*']
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+  # P0-03: allow the platform matrix to be validated on a development branch
+  # before it is merged, so an ISA-dependent numerical failure is found on the
+  # candidate rather than after `main` turns red.
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
