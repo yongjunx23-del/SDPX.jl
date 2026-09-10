@@ -61,3 +61,66 @@ task); anything about factorization fill, memory in situ, or speed; and nothing
 about PSD, Exp or Power. Exponent `eta` was taken as 1 (SDPX's normalized
 scaling point); the `eta^2` scaling of the general Clarabel form is verified
 algebraically by inspection only, not by this gate.
+
+---
+
+# Addendum: the production mapping is NOT Clarabel's formula
+
+Date: 2026-09-11. Follow-up after implementing `soc_rank2_parameters`.
+
+## What the plan warned about, and what actually happens
+
+Plan Section 3.2: *"实际移植必须先建立 SDPX `apply_Theta!` 与该 H 的坐标/缩放对应；
+不要从 SDPX NT state 取一个名称相似的 w 就直接套公式。"*
+
+Taking that warning literally and measuring, Clarabel's `(D, u, v)` formulas —
+which assume `Theta = Q_w = 2*w*w' - J` with `w0^2 - ||w_tail||^2 == 1` — are
+**wrong for SDPX by ~1e-1**, not by rounding.
+
+Measured from the executable kernel `SymmetricCones.quadratic_apply!` (which is
+what `theta_apply!` calls), SDPX's operator is
+
+```
+alpha = w0^2 + ww,   beta = w0^2 - ww,   ww = ||w_tail||^2
+
+Theta = [ alpha          2*w0*w_tail'              ]
+        [ 2*w0*w_tail    beta*I + 2*w_tail*w_tail' ]
+```
+
+Clarabel's `Q_w` has `2*w0^2 - 1` in the (1,1) entry; SDPX has
+`w0^2 + ww`. They differ only there, by `2*ww`. SDPX's `nt_scaling!` does not
+produce Clarabel's normalized point — `w0^2 - ww` is not 1 (measured values
+1.06, 1.13, 1.38 for k = 3, 8, 16), and it is not a function of `mu` either
+(it is invariant to scaling `(s,y)` together, as it must be).
+
+## The mapping that does hold
+
+Writing `Theta = D + u*u' - v*v'` with `u = [u0; u1*w_tail]`,
+`v = [0; v1*w_tail]`, `D = [d0; beta*ones]`, matching the first column
+(`u0*u1 = 2*w0`) and the tail block (`u1^2 - v1^2 = 2`) gives an exact identity:
+`u0 = sqrt(alpha/2)`, `u1 = 2*w0/u0`, `v1 = sqrt(u1^2 - 2)`, `d0 = alpha - u0^2`.
+
+**Verified to 2.2e-16** against `theta_apply!` for k in 2/3/5/8/16/32/64/128/512
+across three seeds, in both assembled-matrix and action form
+(`test/soc_rank2_mapping.jl`, 217 assertions).
+
+## Consequence for the plan
+
+The plan's Section 3.2 treats the coordinate correspondence as a preliminary
+step. It is not preliminary — it changes the formula. Any implementation that
+copied Clarabel's `update_scaling!` rank-2 block onto `SOCNTScaling.w` would
+have produced a silently wrong KKT operator that no amount of downstream
+verification would have been likely to catch, because the *dense* path would
+still have been correct. This is recorded as the sharpest argument in favour of
+the plan's own "build an independent reference first" rule.
+
+## Status
+
+`src/cones/symmetric/soc_rank2.jl` provides the mapping and the storage
+predicate. It is **not wired into any route**: no KKT pattern, no assembly, no
+solve path calls it. Wiring it in is the remaining PR-02 work and must keep the
+dense path for k < 6.
+
+`test/soc_rank2_mapping.jl` includes a negative control asserting that
+Clarabel's parameters do *not* fit SDPX's metric, so a future "fix" back to the
+published formula fails loudly instead of silently.

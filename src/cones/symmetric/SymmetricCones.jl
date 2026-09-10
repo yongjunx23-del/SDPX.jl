@@ -19,11 +19,15 @@ module SymmetricCones
 using LinearAlgebra
 using LinearAlgebra: mul!, BLAS
 import Base: eltype, length, sqrt
+# `BigFloat` is mutable, so setup stores into cone-owned buffers need owned
+# MPFR objects rather than aliases. Same convention as the HSD core.
+import MutableArithmetics
 
 include("types.jl")
 include("eigen.jl")
 include("nonnegative.jl")
 include("soc.jl")
+include("soc_rank2.jl")
 include("psd.jl")
 
 # ---------------------------------------------------------------------------
