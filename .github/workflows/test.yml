@@ -86,6 +86,13 @@ jobs:
       - uses: julia-actions/julia-runtest@v1
         env:
           JULIA_NUM_THREADS: ${{ matrix.threads }}
+          # Documented standard correctness environment.  The suite's
+          # thread-sensitive controls are written against it (single-threaded
+          # BLAS/OMP/MKL); leaving it unset let a runner's core count leak into
+          # an ambient-BLAS assertion.
+          OPENBLAS_NUM_THREADS: '1'
+          OMP_NUM_THREADS: '1'
+          MKL_NUM_THREADS: '1'
 
   # bench-smoke removed (2026-09-01): the bootstrap benchenv project does not
   # instantiate on CI (pre-existing failure, never green) and the micro smoke
