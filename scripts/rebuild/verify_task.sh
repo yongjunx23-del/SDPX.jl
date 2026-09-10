@@ -99,15 +99,48 @@ echo "--- 2b. worker log vs parent re-run --------------------------------------
 # flakiness or contention — or that a testset total DROPPED between the recorded run
 # and the committed file, which is invisible in either log alone.
 WORKER_LOG=""
-while IFS= read -r cand; do
-    case "$(basename "$cand")" in PARENT_*) continue ;; esac
-    # `ls -t` lists NEWEST first, so the FIRST non-PARENT entry is the worker's most
-    # recent run. Assigning unconditionally in this loop order would keep the oldest.
-    WORKER_LOG="$cand"
-    break
-done < <(ls -t "$ROOT/rebuild-reports/$ID"/*.log 2>/dev/null || true)
+# Do NOT guess this from filenames. A task directory holds driver logs, `pkgtest`
+# logs, precompile gates, `revisions.log` and empty files, and every name-based
+# heuristic picked the wrong one: `ls -t` alone chose `revisions.log` (B02), and
+# "contains the task id" chose `B02_pkgtest.log`. The report already says which
+# command ran the driver and which artifact holds its output — read it instead.
+WORKER_LOG=$(python3 - "$ROOT" "$ID" "$DRIVER" <<'PY' 2>/dev/null || true
+import json, os, sys
+root, tid, driver = sys.argv[1], sys.argv[2], sys.argv[3]
+path = os.path.join(root, "rebuild-reports", tid, "report.json")
+try:
+    report = json.load(open(path, encoding="utf-8"))
+except Exception:
+    sys.exit(0)
+stem = os.path.basename(driver)
+for cmd in report.get("commands") or []:
+    if stem not in (cmd.get("command") or ""):
+        continue
+    for field in ("stdout_artifact", "stderr_artifact"):
+        text = str(cmd.get(field) or "").strip()
+        token = text.split()[0] if text.split() else ""
+        if "/" not in token:
+            continue
+        cand = token if os.path.isabs(token) else os.path.join(root, token)
+        if os.path.isfile(cand):
+            with open(cand, encoding="utf-8", errors="replace") as handle:
+                if "Test Summary" in handle.read():
+                    print(cand)
+                    sys.exit(0)
+sys.exit(0)
+PY
+)
+# Fallback only when the report does not name one: newest log that has a summary.
+if [ -z "$WORKER_LOG" ]; then
+    while IFS= read -r cand; do
+        case "$(basename "$cand")" in PARENT_*) continue ;; esac
+        grep -q '^Test Summary' "$cand" 2>/dev/null || continue
+        WORKER_LOG="$cand"
+        break
+    done < <(ls -t "$ROOT/rebuild-reports/$ID"/*.log 2>/dev/null || true)
+fi
 if [ -n "$WORKER_LOG" ] && [ -f "$ROOT/rebuild-reports/$ID/PARENT_verify_driver.log" ]; then
-    echo "  newest worker log: $(basename "$WORKER_LOG")"
+    echo "  worker log named by the report: $(basename "$WORKER_LOG")"
     python3 "$SDPX/scripts/rebuild/compare_test_logs.py" \
         "$WORKER_LOG" "$ROOT/rebuild-reports/$ID/PARENT_verify_driver.log" || true
 elif [ -z "$WORKER_LOG" ]; then
