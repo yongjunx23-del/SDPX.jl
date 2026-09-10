@@ -695,7 +695,6 @@ include(joinpath(@__DIR__, "predictor_rescue.jl"))
 include(joinpath(@__DIR__, "certificate_layout_storage.jl"))
 include(joinpath(@__DIR__, "certificate_scratch_ownership.jl"))
 include(joinpath(@__DIR__, "multifloat_trial_tail.jl"))
-<<<<<<< HEAD
 include(joinpath(@__DIR__, "factor_pair_backend_selector.jl"))
 include(joinpath(@__DIR__, "factor_pair_internal_namespace.jl"))
 include(joinpath(@__DIR__, "factor_pair_hsd_canonical.jl"))
@@ -711,9 +710,8 @@ include(joinpath(@__DIR__, "session_symbolic_lease.jl"))
 include(joinpath(@__DIR__, "test_r2_full_qualification.jl"))
 include(joinpath(@__DIR__, "..", "validation", "scientific_core", "exp_runtime",
     "test_compensated_exp_reference.jl"))
-=======
 include(joinpath(@__DIR__, "initialize_counting.jl"))
->>>>>>> 5ead912 (fix(hsd): countable KKT-start factor accounting + frozen math contract)
+include(joinpath(@__DIR__, "core_route_planner.jl"))
 include(joinpath(@__DIR__, "..", "benchmark", "optimization", "test_profile_catalog.jl"))
 include(joinpath(@__DIR__, "..", "benchmark", "optimization", "test_compare_contract.jl"))
 include(joinpath(@__DIR__, "..", "benchmark", "optimization", "test_measure_target.jl"))

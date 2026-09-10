@@ -1990,9 +1990,45 @@ function _public_native_hsd_core(
         ) : length(fixed_trace_plan.zero_rows) +
             length(fixed_trace_plan.reduction.free_ids)
         compact_dimension = saturating_sum_bytes(product_rank, 1)
-        use_compact_schur = settings.kkt_route === :bordered &&
+        # PR-05: structure-aware route choice.
+        #
+        # The pre-audit rule was the single dimension comparison
+        # `full > 4 * compact`, which cannot see dense cone block shape, factor
+        # fill, precision or provider behaviour. `plan_core_route` scores both
+        # representations from already-frozen setup data (no trial
+        # factorization, no allocation that scales with the problem) and
+        # records its reasons.
+        #
+        # It is NOT yet the default. The plan requires a representative
+        # end-to-end improvement, with paired receipts, before the default
+        # policy may change; an uncalibrated cost model that silently
+        # re-routes production solves is exactly the "hidden heuristic" the
+        # task boundary forbids. So the model runs in shadow by default (its
+        # decision is computed and reported, the execution route is unchanged)
+        # and only takes effect when SDPX_CORE_ROUTE_PLANNER=model is set
+        # explicitly for an evidence run.
+        core_route_plan = plan_core_route(;
+            full_dimension=full_core_dimension,
+            compact_dimension=compact_dimension,
+            ar_nnz=nnz(row_reduction.Ar),
+            canonical_nnz=nnz(solve_reduced.A),
+            block_sizes=_product_hsd_core_block_sizes(
+                solve_reduced, fixed_trace_plan,
+            ),
+            T=T,
+            kkt_route=settings.kkt_route,
+            fixed_trace=fixed_trace_plan !== nothing,
+        )
+        legacy_use_compact_schur = settings.kkt_route === :bordered &&
             fixed_trace_plan === nothing &&
-            full_core_dimension > 4 * compact_dimension
+            legacy_dimension_rule(full_core_dimension, compact_dimension)
+        planner_authoritative =
+            get(ENV, "SDPX_CORE_ROUTE_PLANNER", "legacy") == "model"
+        use_compact_schur = planner_authoritative ?
+            (plan_uses_compact_schur(core_route_plan) &&
+             settings.kkt_route === :bordered &&
+             fixed_trace_plan === nothing) :
+            legacy_use_compact_schur
         core_dimension = use_compact_schur ? compact_dimension : full_core_dimension
         block_sizes=_product_hsd_core_block_sizes(
             solve_reduced,fixed_trace_plan,
