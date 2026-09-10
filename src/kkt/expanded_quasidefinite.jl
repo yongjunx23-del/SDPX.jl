@@ -66,13 +66,17 @@ mutable struct GenericPivotedLDL{T<:AbstractFloat}
     minimum_pivot::T
     failed_pivot::Int
     success::Bool
+    # Solve scratch, owned by the factor: the `P'` write-back scatters `y` back
+    # to the original ordering, which cannot be done in place. Holding it here
+    # keeps `solve_pivoted_ldl!` allocation-free across repeated calls.
+    scratch::Vector{T}
 end
 
 function GenericPivotedLDL(::Type{T}, dimension::Int) where {T<:AbstractFloat}
     return GenericPivotedLDL{T}(
         zeros(T, dimension, dimension), Matrix{T}(I, dimension, dimension),
         zeros(T, dimension), collect(1:dimension), KKTInertia(0, 0, dimension),
-        zero(T), T(Inf), 0, false,
+        zero(T), T(Inf), 0, false, zeros(T, dimension),
     )
 end
 
@@ -182,6 +186,104 @@ function factorize_pivoted_ldl!(
     end
     factor.inertia = KKTInertia(positive, negative, zeros_count)
     factor.success = true
+    return true
+end
+
+"""
+    solve_pivoted_ldl!(destination, factor, rhs) -> Bool
+
+Solve `A * destination = rhs` from the symmetric factor computed by
+`factorize_pivoted_ldl!`, which produces `P*A*P' = L*D*L'` with `permutation`
+holding the row order of the permuted system (`permuted[i] = A[perm[i], :]`).
+
+The solve is four passes over the factor, all in place on `destination`, plus an
+owned scatter through the factor's `scratch`:
+
+    y = L \\ (D \\ (L' \\ (P * rhs)))      then    destination[perm[i]] = y[i]
+
+`P*rhs` is a gather and `P'*y` a scatter; the scatter cannot be done in place
+because the permutation is not its own inverse, so it stages through `scratch`.
+Everything is preallocated on the factor, so repeated solves allocate nothing.
+
+This exists so a caller that already paid for an inertia-certified LDL factor
+(the KKT-derived start) can reuse it for the right-hand sides instead of paying
+a second, structurally different LU factorization of the same matrix.
+"""
+function solve_pivoted_ldl!(
+    destination::AbstractVector{T}, factor::GenericPivotedLDL{T},
+    rhs::AbstractVector{T},
+) where {T<:AbstractFloat}
+    factor.success || return false
+    dimension = size(factor.schur, 1)
+    length(rhs) == dimension || throw(DimensionMismatch(
+        "LDL RHS dimension mismatch",
+    ))
+    length(destination) == dimension || throw(DimensionMismatch(
+        "LDL destination dimension mismatch",
+    ))
+    length(factor.scratch) == dimension || throw(DimensionMismatch(
+        "LDL solve scratch dimension mismatch",
+    ))
+    permutation = factor.permutation
+    L = factor.L
+    diagonal = factor.diagonal
+
+    # P * rhs: destination[i] = rhs[perm[i]].
+    @inbounds for i in 1:dimension
+        destination[i] = rhs[permutation[i]]
+        isfinite(destination[i]) || return false
+    end
+    # Unit-lower forward solve: L * z = P*rhs.
+    @inbounds for row in 1:dimension
+        value = destination[row]
+        for j in 1:(row - 1)
+            value -= L[row, j] * destination[j]
+        end
+        isfinite(value) || return false
+        destination[row] = value
+    end
+    # Diagonal solve. The factorization already rejected pivots at or below its
+    # threshold, so a non-finite quotient here is a genuine breakdown.
+    @inbounds for row in 1:dimension
+        value = destination[row] / diagonal[row]
+        isfinite(value) || return false
+        destination[row] = value
+    end
+    # Upper solve: L' * y = D \\ z.
+    @inbounds for row in dimension:-1:1
+        value = destination[row]
+        for j in (row + 1):dimension
+            value -= L[j, row] * destination[j]
+        end
+        isfinite(value) || return false
+        destination[row] = value
+    end
+    # P' * y: scatter back to the original ordering through owned scratch.
+    scratch = factor.scratch
+    @inbounds for i in 1:dimension
+        scratch[i] = destination[i]
+    end
+    @inbounds for i in 1:dimension
+        destination[permutation[i]] = scratch[i]
+    end
+    return true
+end
+
+"""Column-batched LDL solve. One factorization, one pass per right-hand side."""
+function solve_pivoted_ldl!(
+    destination::AbstractMatrix{T}, factor::GenericPivotedLDL{T},
+    rhs::AbstractMatrix{T},
+) where {T<:AbstractFloat}
+    size(rhs, 2) == size(destination, 2) || throw(DimensionMismatch(
+        "LDL batched solve column count mismatch",
+    ))
+    for j in axes(rhs, 2)
+        # One implementation: the single-vector path, driven per column. The
+        # factor's own scratch is reused, so a batch allocates nothing.
+        solve_pivoted_ldl!(
+            view(destination, :, j), factor, view(rhs, :, j),
+        ) || return false
+    end
     return true
 end
 

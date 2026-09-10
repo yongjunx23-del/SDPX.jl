@@ -187,11 +187,13 @@ function kkt_derived_start!(state::ProductConeHSDState{T}) where {T<:AbstractFlo
     dimension > 0 || return _failed_hsd_start_report(T, :empty_system)
 
     # F01 accounting. `factors` counts every numerical factorization *attempt*
-    # that actually starts (the inertia LDL probe and the LU factor are two
-    # distinct numeric factors over the same assembled matrix), and `solves`
-    # counts RHS solves with one unit per right-hand side. Both are threaded
-    # through every early return so a failed start still reports the work it
-    # performed instead of collapsing to zero.
+    # that actually starts, and `solves` counts RHS solves with one unit per
+    # right-hand side. Both are threaded through every early return so a failed
+    # start still reports the work it performed instead of collapsing to zero.
+    #
+    # Since PR-04A a successful start performs exactly one numerical factor (the
+    # pivoted LDL that doubles as the inertia authority and the solver), so a
+    # green path reports factors == 1, solves == 2.
     factors = 0
     solves = 0
 
@@ -212,13 +214,18 @@ function kkt_derived_start!(state::ProductConeHSDState{T}) where {T<:AbstractFlo
         return _failed_hsd_start_report(
             T, :affine_kkt_wrong_inertia, factors, solves,
         )
-
-    factor = GenericPivotedLU(T, dimension)
-    factors += 1
-    factorize_pivoted_lu!(factor, matrix; threshold=threshold) ||
-        return _failed_hsd_start_report(
-            T, :affine_kkt_factorization, factors, solves,
-        )
+    # PR-04A: one numerical factor serves both the inertia authority and the two
+    # right-hand sides. The pivoted LDL already produced `P*A*P' = L*D*L'` with a
+    # verified `KKTInertia(n, m, 0)`; `solve_pivoted_ldl!` consumes exactly that
+    # factor. The previous code paid for a second, structurally different
+    # pivoted LU factorization of the same matrix purely to obtain a solve
+    # routine -- double the startup factor cost for no extra information.
+    #
+    # Reusing the inertia factor is safe because the inertia check above is the
+    # gate: the LDL is accepted only when its signature matches the expected
+    # quasidefinite pattern, which is also what makes it invertible. A start
+    # that reaches this point still reports factors == 1; the failure paths that
+    # run before it report 0 or 1 truthfully.
     rhs = alloc_zeros(T, dimension, 2)
     @inbounds for i in 1:m
         _store_owned_scalar!(rhs, CartesianIndex(n + i, 1), b[i])
@@ -228,7 +235,7 @@ function kkt_derived_start!(state::ProductConeHSDState{T}) where {T<:AbstractFlo
     end
     solution = alloc_zeros(T, size(rhs, 1), size(rhs, 2))
     solves += size(rhs, 2)
-    solve_pivoted_lu!(solution, factor, rhs) ||
+    solve_pivoted_ldl!(solution, inertia_factor, rhs) ||
         return _failed_hsd_start_report(T, :affine_kkt_solve, factors, solves)
 
     x = copy_owned!(alloc_zeros(T, n), @view solution[1:n, 1])
