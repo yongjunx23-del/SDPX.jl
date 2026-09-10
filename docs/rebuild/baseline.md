@@ -169,3 +169,29 @@ repositories. This is now verified, not inherited from the packet's self-check.
 - Did not re-measure any performance number. The start-point comparison and
   allocation figures cited are from the rebased work at the same revision.
 - Did not delete, retire, or rename any source file. That is I01/I03's authority.
+
+---
+
+## 6. Commit-attribution defect in this round's history (recorded 2026-09-11)
+
+Two parent commits used `git add -A` while worker A01 was live, so A01's files
+landed under unrelated messages:
+
+| Commit | Message says | Also contains |
+|---|---|---|
+| `1fa77a6` | Q01 — manifest, three-phase measurement, dependency rules | `test/rebuild/fixtures.jl`, `test/rebuild/reference_oracles.jl`, `test/rebuild/A01.jl` |
+| `0822ac4` | D01 — ADR-005 future scope | a **mid-write** snapshot of `test/rebuild/A01.jl` |
+
+No content was lost, and the final revision of `A01.jl` is what is committed
+(`1200a9b7…`). But a reader diffing the log will attribute A01's work to Q01 and
+D01. This note exists so that is not mistaken for an actual Q01 or D01
+deliverable.
+
+**Procedural rule adopted:** while workers are live, stage **explicit paths** and
+never `git add -A`. The packet's own attribution requirement ("每个提交报告：源 SHA、
+改动范围…") is why this matters — a receipt whose commit message names the wrong
+task is not a receipt.
+
+Task reports themselves live outside the repository, in
+`../../rebuild-reports/<ID>/`, per the packet's convention that a report is not a
+production source file.
