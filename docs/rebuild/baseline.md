@@ -98,6 +98,19 @@ Consequence for the packet: ADR-002 must not assume a provider environment
 exists, and any task whose acceptance depends on MF/BF must state how that
 environment is produced and record its Manifest.
 
+**Update 2026-09-11 — see
+`docs/evidence/PROVIDER_ENV_CORRECTION_20260911.md`.** Everything above is still
+true of the *default* project, but the operational conclusion drawn from it was
+too strong. No conforming `REBUILD_ENV` existed; one is now built and verified
+by `scripts/bootstrap_env.jl` — MFLA 0.4.0, BFLA 0.3.0, MultiFloats 3.3.2 and
+QDLDL 0.4.1 all load, with the SDPX provider extensions active. A MF/BF leg that
+still cannot run now needs a *specific* reason; `not_run` on availability
+grounds is no longer defensible. MF and BF legs must run in **separate**
+processes (`-t1`). Note also that the workspace-local
+`.julia-depot/environments/extenv` must not be used as `REBUILD_ENV`: it
+resolves MFLA 0.2.0 / BFLA 0.1.1 from the registry against the frozen
+0.4.0/0.3.0, and its `dev` path is dangling.
+
 ## 3. Inherited gates
 
 These existed before this packet and are inherited, not invented here.
@@ -117,6 +130,16 @@ These existed before this packet and are inherited, not invented here.
 A00 rule carried forward: an inherited gate is only inherited if it is actually
 run. The three rows marked "not wired" are evidence artefacts, not gates, until
 a task wires them.
+
+**Measured 2026-09-11** (`rebuild-reports/I01_prework/inherited_gate_baseline.log`):
+`Pkg.test()` at `b67f1e6` with packet work uncommitted gives 37 testsets, 3329
+assertions passing, and exactly one non-green testset. That one is **not a
+regression**: `benchmark/optimization/v2_fresh_process_profile.jl:162` defines
+`_source_clean() = isempty(_git("status", "--porcelain"))`, so *any* untracked
+file fails the `test_clean` stage. The suite therefore cannot be green while the
+packet's own work is uncommitted, which makes sequencing part of the gate: the
+"re-run the existing suites" step of I01 must run on a clean tree, and a green
+result has to be demonstrated *after* committing, not before.
 
 ## 4. Unverified and partially verified capabilities
 
