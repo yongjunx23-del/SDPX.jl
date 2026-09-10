@@ -37,32 +37,31 @@ next turned into a production adapter, that adapter is **adapted** material and
 must carry the in-file Apache-2.0 attribution note described in
 `THIRD_PARTY_NOTICES.md`, plus its own gate.
 
-## Corrections to the plan established during PR-00
+## RETRACTED: the "corrections to the plan" that were published here
 
-Three plan claims were checked against the frozen revision and did not hold.
-They are recorded here because a plan step that assumes an absent artifact is
-unexecutable, and "the document says so" is not evidence.
+**Everything in the original version of this section has been retracted.** It
+claimed that three artifacts cited by the plan did not exist and that the plan's
+baseline SHA was invalid. All of those claims were artifacts of a stale local
+checkout and were wrong.
 
-1. **`src/factor_cache/routes/experimental_sparse_core.jl` does not exist**
-   (plan F04, PR-03 落点, index S07). No file of that name at any tracked
-   revision, and the identifier `ExperimentalSparseCoreCache` occurs nowhere in
-   the source tree — only in the plan itself. The concrete type the plan
-   describes is `SparseQDLDLCache` in
-   `src/factor_cache/routes/qdldl_sparse.jl` (line 92).
-2. **`src/factor_cache/session_symbolic_lease.jl` does not exist** (plan PR-08
-   落点). Same verification. It exists only on unmerged branches.
-3. **`docs/evidence/P3_01_BETA_EXPERIMENT.md` does not exist** (plan F06, index
-   S10). No tracked file, at any revision, records the beta numbers the plan
-   cites (105 / 107 / 118 steps). The plan's own F06 caveat — that these are
-   "existing repository records" — is therefore unsupported here. F06's
-   *conclusion* (do not raise beta by default) is separately defensible, but
-   its stated evidence is not present in this repository.
+See `docs/evidence/BASELINE_CORRECTION_20260911.md` for the full account. In
+summary, the earlier round worked from `db42fd2` + 30 uncommitted changes, which
+is **283 commits behind `origin/main`**; the plan had been written against
+`origin/main` at `4b46cda`. Verified since:
 
-Consequence for the plan sequence: PR-03 cannot "advance the existing
-experimental wrapper" because the wrapper is not in the frozen tree. PR-03 must
-either revive the unmerged branch deliberately (with its own review) or target
-`SparseQDLDLCache` directly. PR-08 must build the lease mechanism rather than
-extend it.
+| Retracted claim | Truth |
+|---|---|
+| baseline `2ab596f` absent | present on `origin/main` |
+| `experimental_sparse_core.jl` absent | present on `origin/main`, with a 5-file test family |
+| `session_symbolic_lease.jl` absent | present on `origin/main`, already included by `test/runtests.jl` |
+| `P3_01_BETA_EXPERIMENT.md` absent | present, containing the cited `0.98 -> 118` result |
+| Section 3.1 sign contradicts source | the plan is correct; the sign was changed upstream by `3392e24` |
+
+The 30 "uncommitted changes" were likewise not local work: they are
+**byte-identical** to files already committed upstream.
+
+**PR-03 and PR-08 do NOT need re-scoping.** Their stated landing points exist.
+The earlier instruction to that effect is withdrawn.
 
 ## Claim boundaries
 

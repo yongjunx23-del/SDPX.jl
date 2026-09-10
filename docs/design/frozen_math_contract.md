@@ -1,6 +1,10 @@
 # Frozen mathematical contract (PR-00)
 
-**Frozen: 2026-09-11. Package version 0.6.1. HEAD at freeze: `e49f88b`.**
+**Frozen: 2026-09-11. Package version 0.6.1.**
+
+**Rebased 2026-09-11 onto `origin/main` @ `4b46cda`** (see
+`docs/evidence/BASELINE_CORRECTION_20260911.md` for why the original freeze
+point was on a stale base).
 
 This file is the PR-00 (Clarabel-borrowing plan) freeze of the executable
 mathematical contract. Every later PR must be measured against *this* text,
@@ -20,29 +24,38 @@ ds + H*dy            = h        (cone complementarity)
 κ*dτ + τ*dκ          = r_t      (scalar tau/kappa)
 ```
 
-### Correction to the plan's Section 3.1 (F08 class)
+### RETRACTED: the sign "correction" that was published here
 
-The plan's Section 3.1 states the sign convention is
+An earlier version of this file claimed the plan's Section 3.1 sign convention
+was wrong and that the source used `-c'*dx - b'*dy + dκ`. **That claim is
+retracted.**
 
-```text
-cᵀ dx + bᵀ dy + dκ    = r_g
-```
-
-That is **not** what this source does, and the plan attributes the claim to
-"the current `HSDNewtonRHS`[S09]". The executable source uses the **negative**
-signs:
+At the plan's own baseline (`2ab596f`, on `origin/main`) and at the current
+`origin/main` (`4b46cda`) the executable source reads:
 
 ```text
--c'*dx - b'*dy + dκ   = r_g
+c'*dx + b'*dy + dκ     = homogeneous_gap
 ```
 
-confirming both the `HSDNewtonRHS` docstring and the arithmetic at
-`src/kkt/system.jl` (`gap = dkappa - r_g; gap -= c[j]*dx[j]; gap -= b[i]*dy[i]`).
+with `gap = dkappa - rhs; gap += c[j]*dx[j]; gap += b[i]*dy[i]`.
 
-The plan's own Section 6 therefore applies to itself: a new test must build its
-reference from the current executable equations, not from a plan document. This
-note is the correction of record. No production sign was changed; only the
-documentation claim is refused.
+The minus signs the earlier round observed were real, but only at the stale local
+base `db42fd2`. The sign was changed upstream by
+`3392e24 kkt: define semantic five-equation Newton system`, which landed after
+`db42fd2` and before the plan's baseline. **The plan was right; the reviewer was
+reading old code.**
+
+The equations as frozen at the rebased base:
+
+```text
+A*dx  + ds  - b*dτ   = r_p      (primal affine)
+A'*dy + c*dτ         = r_d      (dual affine)
+c'*dx + b'*dy + dκ   = r_g      (homogeneous gap)
+ds + H*dy            = h        (cone complementarity)
+κ*dτ + τ*dκ          = r_t      (scalar tau/kappa)
+```
+
+See `docs/evidence/BASELINE_CORRECTION_20260911.md`.
 
 ## 2. The KKT operator the elimination is stated over
 
