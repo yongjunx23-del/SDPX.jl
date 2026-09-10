@@ -132,14 +132,32 @@ run. The three rows marked "not wired" are evidence artefacts, not gates, until
 a task wires them.
 
 **Measured 2026-09-11** (`rebuild-reports/I01_prework/inherited_gate_baseline.log`):
-`Pkg.test()` at `b67f1e6` with packet work uncommitted gives 37 testsets, 3329
-assertions passing, and exactly one non-green testset. That one is **not a
-regression**: `benchmark/optimization/v2_fresh_process_profile.jl:162` defines
-`_source_clean() = isempty(_git("status", "--porcelain"))`, so *any* untracked
-file fails the `test_clean` stage. The suite therefore cannot be green while the
-packet's own work is uncommitted, which makes sequencing part of the gate: the
-"re-run the existing suites" step of I01 must run on a clean tree, and a green
-result has to be demonstrated *after* committing, not before.
+`Pkg.test()` at `b67f1e6` with packet work uncommitted. The result must be stated
+carefully, because the dirty-tree condition does **not** merely fail one test — it
+**truncates the run**.
+
+`test/runtests.jl` has **55 includes**; only **11 are before line 28**. Line 28
+begins the include of `benchmark/optimization/test_v2_fresh_process_profile.jl`,
+whose `_require_clean_source` (defined at
+`benchmark/optimization/v2_fresh_process_profile.jl:162` as
+`isempty(_git("status", "--porcelain"))`) throws on any untracked file. A
+throwing include ends execution of `runtests.jl`, so **43 of the 55 includes —
+about 78% of the suite — never execute.**
+
+The honest baseline is therefore: **37 testsets / 3329 assertions pass in the 11
+pre-line-28 includes, then the suite aborts.** It is *not* "the suite is green
+except one gate".
+
+Consequences, which make sequencing part of the gate:
+- A mid-flight `Pkg.test()` result means very little, and "only the dirty-tree
+  failure" is a truncated run, not a clean one.
+- **No full-suite green run exists yet in this packet.** Producing one requires a
+  committed, clean tree; it will be the first execution of those 43 includes, and
+  it is I01's to produce. I03 must not treat "Pkg.test() green" as established
+  before then.
+- Reported independently by workers S04 ("the one real gap in my evidence") and
+  S01, who both noticed the abort; the orchestrator's first recording of this
+  baseline missed it.
 
 ## 4. Unverified and partially verified capabilities
 
