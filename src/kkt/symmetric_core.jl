@@ -141,10 +141,169 @@ end
 """Structural shape code for the per-block Theta triangle storage."""
 @inline function _block_shape_code(shape::Symbol)
     shape === :dense_lower && return UInt8(0x01)
+    shape === :diagonal && return UInt8(0x02)
+    shape === :dense_small && return UInt8(0x03)
+    shape === :soc_rank2 && return UInt8(0x04)
     throw(ArgumentError(
-        "unsupported symmetric core block shape $(shape); only :dense_lower is frozen",
+        "unsupported symmetric core block shape $(shape); supported shapes are " *
+        ":dense_lower, :diagonal, :dense_small and :soc_rank2",
     ))
 end
+
+"""Whether `shape` names a shape this build knows how to store."""
+@inline function _is_supported_block_shape(shape::Symbol)
+    return shape === :dense_lower || shape === :diagonal ||
+           shape === :dense_small || shape === :soc_rank2
+end
+
+"""
+    _block_shape_theta_slots(shape, k) -> Int
+
+Cone-local `nzval` slots a block of size `k` needs for its **diagonal block**
+representation, by declared shape.
+
+- `:dense_lower` and `:dense_small` store the packed symmetric lower triangle,
+  `k(k+1)/2` slots. They are distinct *policy* labels with identical storage:
+  `:dense_small` marks a block deliberately kept dense because it is below the
+  expanded-form crossover (measured `k = 6` by
+  `validation/clarabel_borrowing/soc_rank2_gate.jl`), so a receipt can tell an
+  intentional dense choice from an unimplemented one.
+- `:diagonal` stores only the `k` diagonal entries.
+- `:soc_rank2` stores only the `k` diagonal entries of the diagonal part `D`;
+  its two rank-one terms live in the auxiliary columns counted by
+  [`_block_shape_aux_count`](@ref).
+"""
+function _block_shape_theta_slots(shape::Symbol, k::Integer)
+    k = Int(k)
+    k >= 0 || throw(ArgumentError("block size must be nonnegative"))
+    shape === :dense_lower && return div(Base.checked_mul(k, k + 1), 2)
+    shape === :dense_small && return div(Base.checked_mul(k, k + 1), 2)
+    shape === :diagonal && return k
+    shape === :soc_rank2 && return k
+    _block_shape_code(shape)   # throws the canonical diagnostic
+    return 0                    # unreachable; keeps the return type stable
+end
+
+"""
+    _block_shape_aux_count(shape) -> Int
+
+Number of auxiliary KKT unknowns a block's shape requires.
+
+`soc_rank2` needs two: the positive rank-one term `u` and the negative one `v`,
+which is exactly the structure Clarabel embeds. Every other shape needs none.
+"""
+@inline function _block_shape_aux_count(shape::Symbol)
+    shape === :soc_rank2 && return 2
+    _is_supported_block_shape(shape) || _block_shape_code(shape)
+    return 0
+end
+
+"""
+    _block_shape_aux_column_slots(shape, k) -> Int
+
+Cone-local slots the auxiliary **columns** occupy: each of the `2` auxiliaries
+couples to all `k` rows of its block, so `soc_rank2` needs `2k` structural
+entries. They start as structural zeros and are refilled with `-eta^2*v` and
+`-eta^2*u` respectively, exactly as Clarabel's `csc_fill`/`csc_update` pair does.
+"""
+@inline function _block_shape_aux_column_slots(shape::Symbol, k::Integer)
+    return _block_shape_aux_count(shape) * Int(k)
+end
+
+"""
+    _block_shape_dsigns(shape) -> Tuple
+
+Signs of the auxiliary diagonal entries, in the order the auxiliaries are
+allocated. `soc_rank2` uses `(-1, +1)`: the `v` term enters the extended matrix
+with `-eta^2` and the `u` term with `+eta^2`, which is what makes the extended
+block `diag(-1, +1)` and the elimination reproduce `-Theta` exactly (proved by
+the PR-02 gate).
+"""
+@inline function _block_shape_dsigns(shape::Symbol)
+    shape === :soc_rank2 && return (-1, 1)
+    _is_supported_block_shape(shape) || _block_shape_code(shape)
+    return ()
+end
+
+"""
+    symmetric_core_shape_layout(block_ranges, block_shapes) -> NamedTuple
+
+Cone-local storage layout implied by the declared per-block shapes.
+
+Returns `(theta_slots, aux_column_slots, aux_slots, aux_blocks,
+dimension_extra, cone_local_slots, per_block)` where:
+
+- `theta_slots` is the total diagonal-block slot count,
+- `aux_column_slots` the entries in the auxiliary coupling columns (`2k` per
+  expanded block),
+- `aux_slots` the count of auxiliary diagonal entries (one per auxiliary),
+- `aux_blocks` the number of blocks contributing auxiliaries,
+- `dimension_extra` the number of extra KKT unknowns the extended system needs,
+- `cone_local_slots` the total cone-local numerical payload
+  (`theta_slots + aux_column_slots + aux_slots`), which is the quantity the
+  storage comparison against `k(k+1)/2` must use,
+- `per_block` a vector of `(rows, shape, theta, aux, aux_columns)` records.
+
+This is the pure accounting function: it allocates nothing, touches no pattern,
+and is what the storage tests and the pattern constructor both read, so the
+counted layout and the built layout cannot drift apart.
+"""
+function symmetric_core_shape_layout(
+    block_ranges::AbstractVector{<:UnitRange{Int}},
+    block_shapes::AbstractVector{Symbol},
+)
+    length(block_ranges) == length(block_shapes) || throw(ArgumentError(
+        "block range/shape counts disagree",
+    ))
+    per_block = NamedTuple[]
+    theta_total = 0
+    aux_column_total = 0
+    aux_total = 0
+    aux_blocks = 0
+    for (rows, shape) in zip(block_ranges, block_shapes)
+        k = length(rows)
+        theta = _block_shape_theta_slots(shape, k)
+        aux = _block_shape_aux_count(shape)
+        aux_columns = _block_shape_aux_column_slots(shape, k)
+        theta_total = Base.checked_add(theta_total, theta)
+        aux_column_total = Base.checked_add(aux_column_total, aux_columns)
+        aux_total = Base.checked_add(aux_total, aux)
+        aux > 0 && (aux_blocks += 1)
+        push!(per_block, (
+            rows=rows, shape=shape, theta=theta, aux=aux,
+            aux_columns=aux_columns,
+        ))
+    end
+    return (
+        theta_slots=theta_total,
+        aux_column_slots=aux_column_total,
+        aux_slots=aux_total,
+        aux_blocks=aux_blocks,
+        dimension_extra=aux_total,
+        cone_local_slots=Base.checked_add(
+            Base.checked_add(theta_total, aux_column_total), aux_total,
+        ),
+        per_block=per_block,
+    )
+end
+
+"""
+    symmetric_core_block_shape(block_size; dense_threshold=6) -> Symbol
+
+Default shape policy for a cone block of the given size.
+
+Blocks at or above the measured crossover `k = 6` are declared `:soc_rank2`
+targets; smaller blocks stay dense (`:dense_small`), because below the crossover
+the packed triangle is genuinely smaller. The threshold is the one measured by
+the PR-02 gate, not a tuned constant.
+
+This function only *names* the intended shape. Whether a block is actually
+stored expanded depends on the caller opting in; the default constructor still
+declares `:dense_lower` for every block, so this is a planning helper, not a
+silent strategy change.
+"""
+symmetric_core_block_shape(block_size::Integer; dense_threshold::Integer=6) =
+    Int(block_size) >= Int(dense_threshold) ? :soc_rank2 : :dense_small
 
 """FNV-1a mix helper for the structural pattern signature."""
 @inline function _core_pattern_mix(signature::UInt64, value::Integer)
