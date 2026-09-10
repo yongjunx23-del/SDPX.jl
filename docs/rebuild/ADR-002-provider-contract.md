@@ -99,6 +99,12 @@ revision it measured and, if it differs from `b38dea1`, either (a) justify the
 newer revision with its diff, or (b) measure at the frozen revision. Silently
 measuring the newer one and reporting it as `b38dea1` is forbidden.
 
+> **RESOLVED — see §10 (added 2026-09-11).** M01, the first MFLA task, stated its
+> revision, and §10 records the diffs that satisfy option (a) for both providers.
+> Both checkouts have also moved again since §8/§9 were written, because packet
+> commits landed on top of them, so the revision labels in those two sections are
+> historical rather than current.
+
 ## 7. Consequences
 
 - A capability claim without an environment + revision + test is not accepted.
@@ -202,3 +208,79 @@ This is exactly the packet's §3.6 point — "失败语义需要特别对齐" �
 out the alignment requirement is not that the providers differ, but that **both
 providers' guarantees are about physical retention, while SDPX's need is about
 logical validity.**
+
+## 10. RESOLVED — provider revisions as actually measured (added 2026-09-11)
+
+§6 left the MFLA drift to "the first MFLA task to start", requiring that task to
+state the revision it measured and either justify the newer revision with its
+diff, or measure at the frozen one. That has now happened, and this section
+settles the drift for both providers. It does **not** rewrite §8 or §9, whose
+revision labels were correct when written; read them with this section applied.
+
+Both checkouts have since moved again, because packet tasks were committed on top
+of them. The revisions named in §8 (`BFLA f95d3e6`) and §9 (`MFLA 50e6e0b`) are
+therefore historical.
+
+### The chain, with the diffs that justify it
+
+| Provider | ADR's label | Measured at | Diff from the label | Verdict |
+|---|---|---|---|---|
+| MFLA | `50e6e0b` (and `b38dea1` before it) | **`3ddf8ed`** (v0.4.0+4) | 4 files, **1690 insertions, 0 deletions**; `src/factorizations/` empty; entry point byte-identical | load-code equivalent to `50e6e0b` |
+| BFLA | `f95d3e6` | **`9d9683c`** (v0.3.0+1) | 5 files, **1679 insertions, 0 deletions**; entry point byte-identical; none of the 5 in the include graph | load-code equivalent to `f95d3e6` |
+
+    # MFLA
+    git -C MultiFloatLinearAlgebra.jl diff --stat 50e6e0b 3ddf8ed
+    git -C MultiFloatLinearAlgebra.jl diff 50e6e0b 3ddf8ed -- src/factorizations/
+    git -C MultiFloatLinearAlgebra.jl diff 50e6e0b 3ddf8ed -- src/MultiFloatLinearAlgebra.jl
+    # BFLA
+    git -C BigFloatLinearAlgebra.jl diff --stat f95d3e6 9d9683c
+    git -C BigFloatLinearAlgebra.jl diff f95d3e6 9d9683c -- src/BigFloatLinearAlgebra.jl
+
+Zero deletions + an unchanged module entry point + no new file in the include graph
+means `using <Provider>` executes identical code at either revision. This is the
+justification §6(a) asks for.
+
+For MFLA the remaining step back to the packet's frozen `b38dea1` is already
+settled in `docs/rebuild/baseline.md` §1.1: three commits, a single hunk in
+`_factor_ldlt_panel!`, BK pivot grammar unchanged, version not bumped — threading
+only.
+
+### The rule, restated because it is the part that keeps being violated
+
+**Name the revision actually measured.** A result taken at `3ddf8ed` is a
+`3ddf8ed` result and may not be reported as `50e6e0b`, `b38dea1` or "the frozen
+revision". The load-code equivalence may be *stated alongside* a result; it may
+not replace naming the revision. The same applies to BFLA and `9d9683c`.
+
+Threading and performance claims must additionally name the revision, because for
+MFLA that is precisely where the pre-existing drift lives.
+
+### What each task actually measured
+
+| Task | MFLA | BFLA |
+|---|---|---|
+| M01 | `50e6e0b` (stated in its report) | — |
+| B01 | — | `f95d3e6` |
+| S05 | `3ddf8ed` | `9d9683c` |
+| A01b | `3ddf8ed` | `9d9683c` |
+| Q01 | `3ddf8ed` | `9d9683c` |
+
+No task reported a result under a revision it did not measure, and three
+independently flagged the drift rather than papering over it. §6 is now closed.
+
+### The equivalence EXPIRES
+
+Every statement above holds only while the packet's new files stay **un-wired**.
+The moment I01/I02 adds an `include` for `src/contracts/*.jl` (MFLA) or
+`src/contracts/*.jl` + `src/mpfr_context.jl` (BFLA), the entry point changes, the
+equivalence lapses, and every provider result must be re-attributed to the new
+revision. I01/I02 must re-check this and I03 must not freeze a release on a stale
+equivalence.
+
+### One capability question this does NOT settle
+
+`S05-F1`: MFLA's own `capabilities(MF)` still reports `multi_rhs::Bool` — the
+exact generalization §3 of this ADR rejects. S05 refused to promote it and the
+live leg conservatively reports `MultiRHSPerColumn`. Whether batching is genuinely
+supported is therefore a **decision**, not a measurement, until M01–M03 answers
+it. ADR-002 §3 is not satisfied for MFLA on this point.
