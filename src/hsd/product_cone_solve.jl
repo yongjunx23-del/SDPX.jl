@@ -100,25 +100,24 @@ end
 """
     _product_hsd_terminal_primal_factor(A)
 
-Factorize the primal least-squares operator exactly the way `\\` does
-trivially, or return `nothing` when the operator is square (where `\\` uses LU,
-so a cached QR would change the arithmetic). Verified bit-identical for every
-non-square dense and sparse operator used here.
+Factorize the primal least-squares operator exactly the way `\\` does for a
+non-square dense operator, or return `nothing` when the cached path is not
+provably identical to `\\`.
+
+Only a dense non-square operator is cached: `A \\ rhs` is then exactly
+`qr(A, ColumnNorm()) \\ rhs`, verified bit-identical. Square operators use LU.
+Sparse operators are deliberately excluded: `qr(A)` without a tolerance routes
+through SPQR's `_default_tol`, which reduces over `nonzeros(A)` and therefore
+throws on an operator with no stored entries, whereas `A \\ rhs` does not take
+that path. On the large dense operators this cache targets, `Ad` is a dense
+`Matrix`, so the excluded case is not on the measured path.
 """
 @inline function _product_hsd_terminal_primal_factor(A::Matrix{T}) where {T}
     size(A, 1) == size(A, 2) && return nothing
     return qr(A, ColumnNorm())
 end
 
-@inline function _product_hsd_terminal_primal_factor(A::SparseMatrixCSC{T,Int}) where {T}
-    size(A, 1) == size(A, 2) && return nothing
-    return qr(A)
-end
-
-@inline function _product_hsd_terminal_primal_factor(A::AbstractMatrix{T}) where {T}
-    size(A, 1) == size(A, 2) && return nothing
-    return qr(A, ColumnNorm())
-end
+@inline _product_hsd_terminal_primal_factor(::AbstractMatrix) = nothing
 
 """
     _product_hsd_terminal_dual_operator(A, b)
