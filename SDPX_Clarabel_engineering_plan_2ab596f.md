@@ -12,6 +12,23 @@
 
 ---
 
+## 勘误（2026-09-11，PR-00 执行期间核实）
+
+执行本文时逐条核实，以下论断**在当前仓库中不成立**。正文保持原样以保留审阅记录，但任何依赖下列条目的步骤都必须先按勘误修正。
+
+| 条目 | 正文论断 | 核实结果 | 影响 |
+|---|---|---|---|
+| 基线 SHA | 冻结 SDPX `2ab596fe360fc394698582e7d9cc4a4f548b5386` | 该提交在仓库中**不存在**（`git cat-file` 失败，`git log --all` 无此对象） | 实际基线为 `db42fd2` 加 30 个未提交改动；已分类为 7 个提交（`b587b1b`…`e49f88b`） |
+| F04 / PR-03 落点 / S07 | `src/factor_cache/routes/experimental_sparse_core.jl` 已包装 BF `SparseQDLDLCache` | 该文件在**任何修订中都不存在**；`ExperimentalSparseCoreCache` 标识符在源码树中**零出现**（仅出现在本文第 70 行） | PR-03 无法"推进既有实验包装"。正文所述类型实为 `SparseQDLDLCache`（`src/factor_cache/routes/qdldl_sparse.jl:92`），且它目前**不可从任何公共 `Settings` 到达** |
+| PR-08 落点 | `src/factor_cache/session_symbolic_lease.jl` | 该文件**不存在**（仅存在于未合并分支） | PR-08 必须**新建** lease 机制，而非扩展 |
+| F06 / S10 | `docs/evidence/P3_01_BETA_EXPERIMENT.md` 记录 β 单因素对照 | 该文件**不存在**；仓库中无任何文件记录 105/107/118 这组数字 | F06 的**结论**（不默认提高 β）可独立论证，但其**所称证据不在本仓库** |
+| §3.1 | 当前符号约定为 `cᵀdx + bᵀdy + dκ = r_g`，并称来自 `HSDNewtonRHS`[S09] | 可执行源码使用**负号**：`-c'*dx - b'*dy + dκ = r_g`（`src/kkt/system.jl` 的 `HSDNewtonRHS` 文档串与 `newton_residual!` 算术一致） | 已记入 `docs/design/frozen_math_contract.md`；正文 §6 的规则同样适用于正文自身 |
+| §3.3 存储交叉点 | 未给出阈值，仅称"小 SOC 应保留 dense" | 精确定界为 **k = 6**：k=5 时 17 > 15（dense 更小），k=6 时 20 < 21（expanded 更小） | 任何 `dense_small` 阈值必须 **< 6**；已由 `validation/clarabel_borrowing/soc_rank2_gate.jl` 断言 |
+
+**已独立验证的正文内容：** §3.2 的 rank-2 展开等价性与 §3.3 的字节数（`8390656×4×8 = 268500992 B` ≈ 256.06 MiB，`12290×4×8 = 393280 B` ≈ 384.06 KiB）经独立门禁核实通过（375 项断言），见 `docs/evidence/PR02_SOC_RANK2_GATE_20260911.md`。
+
+---
+
 ## 1. 先明确哪些已经有，哪些还值得借用
 
 | 维度 | Clarabel 实现 | 当前 SDPX 状态 | 应做的工作 |

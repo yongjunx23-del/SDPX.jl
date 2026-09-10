@@ -652,16 +652,33 @@ end
     # PR-03 fail-closed boundary. `:sparse_augmented` is Float64/CHOLMOD only
     # (src/public/settings.jl:233). Every other arithmetic must be refused at
     # the public boundary BEFORE any route is planned -- there is no path by
-    # which BigFloat or Float64x2/x3/x4 reaches the sparse symbolic cache.
-    # Previously only BigFloat was asserted here; the MultiFloat types had no
+    # which BigFloat or a MultiFloat width reaches the sparse symbolic cache.
+    # Previously only BigFloat was asserted here; the MultiFloat widths had no
     # assertion anywhere in the repository.
     @test_throws ArgumentError SDPX.Settings{BigFloat}(
         kkt_route=:sparse_augmented,
     )
-    for T in (Float64x2, Float64x3, Float64x4)
-        @test_throws ArgumentError SDPX.Settings{T}(
-            kkt_route=:sparse_augmented,
-        )
+    # The MultiFloat widths come from the optional MultiFloats provider, which
+    # is a weak dependency. Probe for it rather than naming the types bare: a
+    # bare `Float64x2` here is an UndefVarError that would break the suite in
+    # any environment without the provider. The provider's own extension
+    # module re-exports nothing, so resolve the types from the package.
+    mf_types = try
+        mf = Base.require(Base.PkgId(
+            Base.UUID("bdf0d083-296b-4888-a5b6-7498122e68a5"), "MultiFloats",
+        ))
+        (mf.Float64x2, mf.Float64x3, mf.Float64x4)
+    catch
+        nothing
+    end
+    if mf_types === nothing
+        @test_skip "MultiFloats provider unavailable; width boundary untested"
+    else
+        for T in mf_types
+            @test_throws ArgumentError SDPX.Settings{T}(
+                kkt_route=:sparse_augmented,
+            )
+        end
     end
 end
 
