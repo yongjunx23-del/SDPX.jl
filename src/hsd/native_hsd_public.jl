@@ -496,6 +496,25 @@ end
 
 @inline _native_hsd_dense_rank_fallback_allowed(::AbstractMatrix) = false
 
+# A reduced operator whose pattern is (nearly) dense, or which is simply tiny,
+# can require a row-space basis that the sparse structural reduction cannot
+# express while preserving the original pattern.  The dense column-pivoted QR
+# is a valid rank authority in that case: it neither downcasts nor selects
+# another solver.  Admit it from a conservative materialization estimate so
+# that genuinely large sparse problems keep the existing fail-closed
+# behaviour.  This is the Float64 counterpart of the high-precision dense
+# authority above; without it a small dense Float64 bordered problem was
+# reported as `insufficient_precision` before any iteration.
+@inline function _native_hsd_small_dense_rank_authority_allowed(
+    A::SparseMatrixCSC{T,Int},
+) where {T<:AbstractFloat}
+    m, n = size(A)
+    (m > 0 && n > 0) || return false
+    return m * n <= (1 << 20)          # <= 1e6 entries: <= 8 MiB for Float64
+end
+
+@inline _native_hsd_small_dense_rank_authority_allowed(::AbstractMatrix) = false
+
 @inline function _native_hsd_descriptor_reason(
     reduction::HSDEqualityReduction,
     active_rows::Int,
@@ -1830,6 +1849,18 @@ function _public_native_hsd_core(
                 ) : provider_reduction
         else
             _hsd_rowspace_reduction(solve_reduced)
+        end
+        # Sparse authority could not preserve the original pattern but the
+        # operator is small enough to rank-reveal densely: use the dense
+        # authority rather than failing closed.  Ordered before the
+        # fail-closed check so the check sees the replacement.
+        if row_reduction isa SparseEqualityReduction &&
+           (row_reduction.status !== SparseEqualityReady ||
+            row_reduction.mode !== :preserve_original) &&
+           _native_hsd_small_dense_rank_authority_allowed(solve_reduced.A)
+            row_reduction = _hsd_rowspace_reduction(
+                Matrix(solve_reduced.A), solve_reduced.c,
+            )
         end
         if row_reduction isa SparseEqualityReduction &&
            (row_reduction.status !== SparseEqualityReady ||

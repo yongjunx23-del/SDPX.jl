@@ -1760,38 +1760,31 @@ end
 function _dual_stats_column_range!(
     A::SparseMatrixCSC{MF,Int}, c::AbstractVector{MF},
     dy::AbstractVector{MF}, dtau::MF, rD::AbstractVector{MF},
-    lo::Int, hi::Int, column_norms::Union{Nothing,AbstractVector{MF}}=nothing,
+    lo::Int, hi::Int,
+    cached_norm::Union{Nothing,MF}=nothing,
 ) where {T,N,MF<:MultiFloat{T,N}}
     cw = true
     gr = zero(MF)
-    on = zero(MF)
-    cached = column_norms !== nothing
+    on = cached_norm === nothing ? zero(MF) : cached_norm
     @inbounds for j in lo:hi
         cdt = c[j] * dtau
         residual = muladd(c[j], dtau, rD[j])
         local_work = abs(rD[j]) + abs(cdt)
-        # `column_norms[j]` is the direction-independent column absolute sum
-        # `abs(c[j]) + sum(abs(A[:,j]))`, accumulated in this exact order at
-        # setup.  When it is supplied the per-nonzero accumulation is skipped
-        # and the value is identical; only the repeated work is removed.
-        row_norm = cached ? column_norms[j] : abs(c[j])
-        if !cached
-            for ptr in nzrange(A, j)
-                term = A.nzval[ptr] * dy[A.rowval[ptr]]
-                residual = muladd(A.nzval[ptr], dy[A.rowval[ptr]], residual)
-                local_work += abs(term)
-                row_norm += abs(A.nzval[ptr])
-            end
-        else
-            for ptr in nzrange(A, j)
-                term = A.nzval[ptr] * dy[A.rowval[ptr]]
-                residual = muladd(A.nzval[ptr], dy[A.rowval[ptr]], residual)
-                local_work += abs(term)
-            end
+        # `cached_norm` is the setup-cached dual operator norm: the maximum
+        # over columns of `abs(c[j]) + sum(abs(A[:,j]))`, accumulated in this
+        # exact order.  When it is supplied the per-nonzero accumulation of
+        # that direction-independent term is skipped; the residual arithmetic
+        # and every reduction are unchanged.
+        row_norm = abs(c[j])
+        for ptr in nzrange(A, j)
+            term = A.nzval[ptr] * dy[A.rowval[ptr]]
+            residual = muladd(A.nzval[ptr], dy[A.rowval[ptr]], residual)
+            local_work += abs(term)
+            cached_norm === nothing && (row_norm += abs(A.nzval[ptr]))
         end
         cw &= SDPX._product_hsd_newton_close(residual, local_work)
         gr = max(gr, abs(residual))
-        on = max(on, row_norm)
+        on = max(on, cached_norm === nothing ? row_norm : cached_norm)
     end
     return (cw, gr, on)
 end
@@ -1799,7 +1792,7 @@ end
 function SDPX._dual_newton_stats_threaded!(
     A::SparseMatrixCSC{MF,Int}, c::AbstractVector{MF},
     dy::AbstractVector{MF}, dtau::MF, rD::AbstractVector{MF},
-    column_norms::Union{Nothing,AbstractVector{MF}}=nothing,
+    cached_norm::Union{Nothing,MF}=nothing,
 ) where {T,N,MF<:MultiFloat{T,N}}
     (MF === Float64x2 || MF === Float64x4) || return nothing
     n = length(c)
@@ -1812,7 +1805,7 @@ function SDPX._dual_newton_stats_threaded!(
         lo = (worker - 1) * chunk + 1
         hi = min(worker * chunk, n)
         results[worker] = _dual_stats_column_range!(
-            A, c, dy, dtau, rD, lo, hi, column_norms,
+            A, c, dy, dtau, rD, lo, hi, cached_norm,
         )
     end
     componentwise = true

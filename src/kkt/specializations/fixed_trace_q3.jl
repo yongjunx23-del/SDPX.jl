@@ -893,9 +893,9 @@ mutable struct FixedTraceQ3CoreWorkspace{T,S,C,E,P}
     negated_dual::Vector{T}
     residual::NewtonResidual{T}
     primal_operator_norm::T
-    # P1-02: direction-independent dual column absolute sums, built once from
-    # the frozen sparse pattern.  Never recomputed on the hot path.
-    dual_column_norms::Vector{T}
+    # P1-02: direction-independent dual operator norm, built once from the
+    # frozen sparse pattern.  Never recomputed on the hot path.
+    dual_operator_norm::T
     dkappa::T
     last_dtau::T
     denominator::T
@@ -984,26 +984,28 @@ function _fixed_trace_primal_operator_norm(
     return norm
 end
 
-"""Setup-cached column absolute sums `abs(c[j]) + sum(abs(A[:,j]))`.
+"""Setup-cached dual operator norm `max_j (abs(c[j]) + sum(abs(A[:,j])))`.
 
-Accumulated in exactly the order `_shared_dual_stats` uses, so a gate that
-consumes the cached value is bit-identical to one that recomputes it.
+Each column is accumulated in exactly the order and starting value that
+`_shared_dual_stats` uses, and the columns are combined with the same
+`max`, so a gate that consumes the cached scalar is bit-identical to one
+that recomputes it.
 """
-function _fixed_trace_dual_column_norms(
+function _fixed_trace_dual_operator_norm(
     system::NewtonSystem{T},
 ) where {T<:AbstractFloat}
     A = system.A
     c = system.c
     n = length(c)
-    norms = alloc_zeros(T, n)
+    norm = zero(T)
     @inbounds for j in 1:n
         row_norm = abs(c[j])
         for pointer in nzrange(A, j)
             row_norm += abs(A.nzval[pointer])
         end
-        norms[j] = row_norm
+        norm = max(norm, row_norm)
     end
-    return norms
+    return norm
 end
 
 function prepare_fixed_trace_q3_core_state(
@@ -1051,7 +1053,7 @@ function prepare_fixed_trace_q3_core_state(
         alloc_zeros(T, m), alloc_zeros(T, n),
         NewtonResidual(system),
         _fixed_trace_primal_operator_norm(system),
-        _fixed_trace_dual_column_norms(system),
+        _fixed_trace_dual_operator_norm(system),
         zero(T), zero(T), zero(T), :regular,
         core_dimension, -1, 0, 0, -1, 0, 0, 0, 0,
         nothing, 0,

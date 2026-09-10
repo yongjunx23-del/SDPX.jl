@@ -2035,7 +2035,7 @@ unchanged, so the returned tuple is identical to `_shared_dual_stats`.
 """
 @inline function _shared_dual_stats_cached(
     A::SparseMatrixCSC{T,Int}, c::AbstractVector{T}, dy::AbstractVector{T},
-    dtau::T, rD::AbstractVector{T}, column_norms::AbstractVector{T},
+    dtau::T, rD::AbstractVector{T}, operator_norm::T,
 ) where {T<:AbstractFloat}
     m = length(dy)
     n = length(c)
@@ -2046,7 +2046,6 @@ unchanged, so the returned tuple is identical to `_shared_dual_stats`.
     @inbounds for k in 1:m
         direction_norm = max(direction_norm, abs(dy[k]))
     end
-    operator_norm = zero(T)
     @inbounds for j in 1:n
         cdt = c[j] * dtau
         residual = muladd(c[j], dtau, rD[j])
@@ -2061,7 +2060,6 @@ unchanged, so the returned tuple is identical to `_shared_dual_stats`.
         componentwise &= _product_hsd_newton_close(residual, local_work)
         group_residual = max(group_residual, abs(residual))
         rhs_norm = max(rhs_norm, abs(rD[j]))
-        operator_norm = max(operator_norm, column_norms[j])
     end
     group_work = operator_norm * direction_norm + rhs_norm
     return componentwise, group_residual, group_work
@@ -2426,15 +2424,16 @@ end
     # core caches the per-column sums at setup; every other route recomputes
     # them exactly as before.
     core = state.symmetric_core
-    norms = core isa FixedTraceQ3CoreWorkspace ? core.dual_column_norms : nothing
+    cached_norm = core isa FixedTraceQ3CoreWorkspace ?
+        core.dual_operator_norm : nothing
     threaded = _dual_newton_stats_threaded!(
-        base.A, base.c, base.dy, base.dtau, base.rD, norms,
+        base.A, base.c, base.dy, base.dtau, base.rD, cached_norm,
     )
     threaded === nothing || return threaded
-    norms === nothing &&
+    cached_norm === nothing &&
         return _shared_dual_stats(base.A, base.c, base.dy, base.dtau, base.rD)
     return _shared_dual_stats_cached(
-        base.A, base.c, base.dy, base.dtau, base.rD, norms,
+        base.A, base.c, base.dy, base.dtau, base.rD, cached_norm,
     )
 end
 
