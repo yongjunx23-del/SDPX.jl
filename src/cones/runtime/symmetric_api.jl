@@ -286,6 +286,56 @@ bit at any thread count.  Block scratch buffers are exclusive per slice.
     return SymmetricCones._soc_boundary_from_coefficients(c0, c1, c2, t, dt, alpha)
 end
 
+# ---------------------------------------------------------------------------
+# Per-family block boundary steps.
+#
+# These reproduce the historical inline bodies verbatim: the copy order, the
+# `boundary_step!` call and the dim-3 copy-free fast path are unchanged, so
+# every block returns the same value as before.  They exist so the threaded
+# scan can index the three typed block lists directly instead of walking a
+# `Vector{Tuple{Any,Symbol}}`, whose abstract element type forced a dynamic
+# dispatch per block (4200 per call on the CSDR workload, once per iteration).
+# ---------------------------------------------------------------------------
+@inline function _runtime_symmetric_block_step!(block, s, ds)
+    _runtime_copy_in!(block.primal, s, block.offset, block.dim)
+    _runtime_copy_in!(block.direction, ds, block.offset, block.dim)
+    return SymmetricCones.boundary_step!(
+        block.cone, block.primal, block.alpha, block.direction,
+    )
+end
+
+@inline function _runtime_soc_block_step!(block::SOCRuntimeBlock, s, ds)
+    if block.dim == 3
+        return _soc3_boundary_step_direct!(
+            block.cone, s, ds, block.offset, block.alpha,
+        )
+    end
+    return _runtime_symmetric_block_step!(block, s, ds)
+end
+
+@inline function _runtime_psd_block_step!(block::PSDRuntimeBlock, s, ds)
+    _runtime_copy_in!(block.primal, s, block.offset, block.len)
+    _runtime_copy_in!(block.direction, ds, block.offset, block.len)
+    @inbounds for i in 1:block.len
+        block.raw_primal[i] = block.primal[i]
+        block.raw_direction[i] = block.direction[i]
+    end
+    k = 0
+    invsqrt2 = block.state.invsqrt2
+    @inbounds for j in 1:block.dim
+        for i in j:block.dim
+            k += 1
+            if i > j
+                block.raw_primal[k] *= invsqrt2
+                block.raw_direction[k] *= invsqrt2
+            end
+        end
+    end
+    return SymmetricCones.boundary_step!(
+        block.cone, block.raw_primal, block.alpha, block.raw_direction,
+    )
+end
+
 function _runtime_step_threaded!(runtime::ProductConeRuntime, s, ds)
     total = length(runtime.orthant) + length(runtime.soc) + length(runtime.psd)
     total < 512 && return _runtime_step_primal!(runtime, s, ds)
@@ -295,60 +345,57 @@ function _runtime_step_threaded!(runtime::ProductConeRuntime, s, ds)
     # extra workers when the solve asked for one.
     workers = min(Threads.nthreads(), runtime.worker_budget)
     workers <= 1 && return _runtime_step_primal!(runtime, s, ds)
-    all_blocks = vcat(
-        [(b, :orthant) for b in runtime.orthant],
-        [(b, :soc) for b in runtime.soc],
-        [(b, :psd) for b in runtime.psd],
-    )
+    n_orthant = length(runtime.orthant)
+    n_soc = length(runtime.soc)
     results = Vector{eltype(s)}(undef, workers)
     chunk = cld(total, workers)
-    SDPX._q3_foreach(1:workers, workers; min_items=1) do worker
+    # Every value the task needs is passed as an argument, so no task can
+    # capture a binding that another iteration of the loop later rewrites and
+    # no task depends on the scheduler.  The previous form published the
+    # chunk bounds through a closure invoked by the shared executor and was
+    # observed to return a larger-than-true minimum at some worker counts
+    # (non-deterministically across runs) because a chunk was not visited.
+    @sync for worker in 1:workers
         lo = (worker - 1) * chunk + 1
         hi = min(worker * chunk, total)
-        best = eltype(s)(Inf)
-        for idx in lo:hi
-            block, kind = all_blocks[idx]
-            if kind === :orthant || kind === :soc
-                if kind === :soc && block.dim == 3
-                    value = _soc3_boundary_step_direct!(
-                        block.cone, s, ds, block.offset, block.alpha)
-                else
-                    _runtime_copy_in!(block.primal, s, block.offset, block.dim)
-                    _runtime_copy_in!(block.direction, ds, block.offset, block.dim)
-                    value = SymmetricCones.boundary_step!(
-                        block.cone, block.primal, block.alpha, block.direction)
-                end
-            else
-                _runtime_copy_in!(block.primal, s, block.offset, block.len)
-                _runtime_copy_in!(block.direction, ds, block.offset, block.len)
-                @inbounds for i in 1:block.len
-                    block.raw_primal[i] = block.primal[i]
-                    block.raw_direction[i] = block.direction[i]
-                end
-                k = 0
-                invsqrt2 = block.state.invsqrt2
-                @inbounds for j in 1:block.dim
-                    for i in j:block.dim
-                        k += 1
-                        if i > j
-                            block.raw_primal[k] *= invsqrt2
-                            block.raw_direction[k] *= invsqrt2
-                        end
-                    end
-                end
-                value = SymmetricCones.boundary_step!(
-                    block.cone, block.raw_primal, block.alpha,
-                    block.raw_direction)
-            end
-            best = value < best ? value : best
-        end
-        results[worker] = best
+        Threads.@spawn _runtime_step_chunk!(
+            results, worker, runtime, s, ds, lo, hi, n_orthant, n_soc,
+        )
     end
     best = eltype(s)(Inf)
     for worker in 1:workers
         best = results[worker] < best ? results[worker] : best
     end
     return best
+end
+
+"""Minimum `boundary_step!` value over the contiguous block range `lo:hi`.
+
+The three typed lists are indexed directly, so each block dispatches on its
+concrete type instead of through an abstract `Tuple{Any,Symbol}` element.
+Every block writes only its own runtime scratch and the reduction is an exact
+`min` over independent values, so the chunk partition cannot change the
+result.
+"""
+function _runtime_step_chunk!(
+    results::AbstractVector, worker::Int, runtime::ProductConeRuntime,
+    s, ds, lo::Int, hi::Int, n_orthant::Int, n_soc::Int,
+)
+    best = eltype(s)(Inf)
+    for idx in lo:hi
+        value = if idx <= n_orthant
+            _runtime_symmetric_block_step!(runtime.orthant[idx], s, ds)
+        elseif idx <= n_orthant + n_soc
+            _runtime_soc_block_step!(runtime.soc[idx - n_orthant], s, ds)
+        else
+            _runtime_psd_block_step!(
+                runtime.psd[idx - n_orthant - n_soc], s, ds,
+            )
+        end
+        best = value < best ? value : best
+    end
+    results[worker] = best
+    return nothing
 end
 
 max_step_primal!(runtime::ProductConeRuntime, s, ds) = _runtime_step_threaded!(runtime, s, ds)
@@ -358,8 +405,16 @@ max_step_primal!(runtime::ProductConeRuntime, s, ds) = _runtime_step_threaded!(r
 All supported runtime families are self-dual in the canonical execution
 coordinates, so the same strict-interior boundary geometry is used for the
 dual vector.  The dual state is nevertheless validated independently.
+
+The dual scan is block-local and writes only the per-block runtime scratch,
+and it is invoked strictly after the primal scan has returned, so it can use
+the same fixed-partition executor without sharing scratch between the two.
+The reduction is an exact `min` over independent per-block values, so the
+partition does not change the result.
 """
-max_step_dual!(runtime::ProductConeRuntime, y, dy) = _runtime_step_primal!(runtime, y, dy)
+max_step_dual!(runtime::ProductConeRuntime, y, dy) = _runtime_step_threaded!(runtime, y, dy)
+
+
 
 # Allocation-free strict-interior predicates.  These are intentionally
 # separate from `update_scaling!`: an ordinary line-search rejection must not
