@@ -31,6 +31,11 @@ Anything not executed is `NOT_STARTED`.
 | G5    | NOT_STARTED | five-cone × precision × scale matrix not run. |
 | G6    | NOT_STARTED | no statistically-qualified performance comparison yet. |
 
+## CI
+
+The full platform matrix is green on the candidate branch (run 34442050869).
+`test.yml` gained `workflow_dispatch` so this can be checked before merging.
+
 ## CI layers cleared on the candidate branch (`development/scientific-core-20260907`)
 
 The platform `test` matrix aborts at the first errored top-level testset, so
@@ -63,8 +68,39 @@ each fix reveals the next previously-masked failure.  Cleared in order:
 `test.yml` also gained `workflow_dispatch` so the platform matrix can be
 validated on a candidate branch instead of after `main` turns red.
 
-Layers below those are still unknown; the matrix has not yet run to
-completion on all four platforms.
+8. **`blas_controller_diagnostics.jl`** — pinned the ambient
+   `LinearAlgebra.BLAS.get_num_threads() == 1`, which only holds when the
+   runner exports the documented single-threaded correctness environment; the
+   CI runner defaulted to its core count (2).  The control now captures the
+   ambient value before the solve and asserts it is unchanged, which is the
+   contract it actually checks and holds at any ambient count.  Verified at
+   ambient 1 and 2.
+
+   A separate change exporting `OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
+   MKL_NUM_THREADS=1` to the CI job was **reverted**: it perturbed a
+   tolerance-controlled Q3 objective (2.4999999863644304 vs 2.5 against
+   atol=1e-8).  Per the plan, a change that introduces a new failure is
+   reverted rather than accommodated by adjusting a tolerance; the invariant
+   fix above already removes the root cause.
+
+### Result: full matrix green
+
+`CI` run **34442050869** on `development/scientific-core-20260907`:
+
+| job | result |
+|---|---|
+| Julia 1.10 / ubuntu-latest / 1 thread | ✓ 7m36s |
+| Julia 1 / ubuntu-latest / 4 threads | ✓ 15m51s |
+| Julia 1 / macOS-latest / 4 threads | ✓ 12m19s |
+| Julia 1 / windows-latest / 4 threads | ✓ 18m17s |
+| Documentation build | ✓ |
+| Package quality | ✓ |
+| Detect provider-relevant changes | ✓ |
+
+This is the first green complete platform matrix for the candidate; the
+earlier failures were the SOCP receipt canonicalization, four
+ambient/thread-dependent controls and the two platform-divergent numeric
+controls described above.
 
 ## Notes on scope
 
