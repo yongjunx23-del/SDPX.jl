@@ -638,14 +638,19 @@ end
     @test count("product_hsd_step!(", loop_source) == 0
 
     # Production still has exactly one HSD loop, and it does not call this one:
-    # src/SDPX.jl does not include src/solver/loop.jl at all, so the extraction
-    # is inert until the integration task switches the include.
+    # Production now has exactly one HSD loop and it IS this one.  These three
+    # assertions were written against the PRE-cutover state — they asserted that
+    # src/SDPX.jl did not include this file and that the old loop body was still
+    # present in product_cone_solve.jl.  @integration/core-cutover inverted them
+    # rather than deleting them, so the transition remains asserted in both
+    # directions and a silent rollback would fail here.
     root_source = read(joinpath(REPO_ROOT, "src", "SDPX.jl"), String)
-    @test !occursin("solver/loop.jl", root_source)
+    @test occursin("solver/loop.jl", root_source)
     production = read(
         joinpath(REPO_ROOT, "src", "hsd", "product_cone_solve.jl"), String,
     )
-    @test count("for _ in 1:Int(max_iterations)", production) == 1
+    @test count("for _ in 1:Int(max_iterations)", production) == 0
+    @test occursin("solver_run_session!(", production)
     @test length(methods(solver_run_session!)) == 1
     @test length(methods(solver_run_trial!)) == 1
 end

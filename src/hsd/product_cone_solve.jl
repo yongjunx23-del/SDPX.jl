@@ -739,193 +739,29 @@ function product_hsd_solve!(
     initialization::Symbol=:auto,
     max_tau_collapse_recoveries::Integer=1,
 ) where {T}
-    initialization in (:auto, :identity, :kkt) || throw(ArgumentError(
-        "initialization must be :auto, :identity, or :kkt",
-    ))
-    max_iterations >= 0 || throw(ArgumentError(
-        "max_iterations must be nonnegative, got $max_iterations",
-    ))
-    max_tau_collapse_recoveries >= 0 || throw(ArgumentError(
-        "max_tau_collapse_recoveries must be nonnegative",
-    ))
-    time_limit = Float64(max_time)
-    (isfinite(time_limit) || isinf(time_limit)) && time_limit >= 0.0 ||
-        throw(ArgumentError("max_time must be nonnegative and finite, or Inf"))
-    started_ns = time_ns()
-    certificate_tol = tol === nothing ? T(default_certificate_tol(T)) : tol
-    (isfinite(certificate_tol) && certificate_tol > zero(T)) ||
-        throw(ArgumentError("tol must be finite and positive"))
-
-    base = state.base
-    state.tau_collapse_recoveries = 0
-    reset_phase_timings!(state.phase_timings)
-    state.symmetric_core isa FixedTraceQ3CoreWorkspace &&
-        _reset_q3_phase_timings!(state.symmetric_core)
-    empty!(state.kkt_route_attempts)
-    push!(state.kkt_route_attempts, state.kkt_route)
-    x_original = alloc_zeros(T, base.n)
-    s_original = alloc_zeros(T, base.m)
-    y_original = alloc_zeros(T, base.m)
-
-    if base.workspace.rank_ambiguous
-        return _product_hsd_make_result(
-            state, ProductHSDRankAmbiguous, ProductHSDRankAmbiguousSetup,
-            HSDStepDirectionFailed, zero(T), x_original, s_original,
-            y_original,
-        )
-    end
-    if base.workspace.rank_incompatible
-        copy_owned!(base.x, base.workspace.rank_ray)
-        _product_hsd_bump_point_epoch!(state)
-        if verify_dual_infeasibility!(
-            base.canonical, base, x_original, s_original; tol=certificate_tol,
-        )
-            return _product_hsd_make_result(
-                state, ProductHSDDualInfeasible,
-                ProductHSDVerifiedInitialPoint, HSDStepDirectionFailed,
-                zero(T), x_original, s_original, y_original,
-            )
-        end
-        return _product_hsd_make_result(
-            state, ProductHSDBreakdown,
-            ProductHSDRankRayVerificationFailed, HSDStepDirectionFailed,
-            zero(T), x_original, s_original, y_original,
-        )
-    end
-
-    selected_initialization = initialization === :auto ?
-        (state.kkt_route in (:expanded, :sparse_schur) ? :kkt : :identity) :
-        initialization
-    if selected_initialization === :kkt
-        start_report = kkt_derived_start!(state)
-        start_report.ok || return _product_hsd_termination_or_dual_ray!(
-            state, x_original, s_original, y_original, certificate_tol,
-            ProductHSDBreakdown, ProductHSDKKTInitializationFailed,
-            HSDStepDirectionFailed,
-        )
-    else
-        product_hsd_cold_start!(state)
-    end
-    initial = _product_hsd_candidate_result!(
-        state, x_original, s_original, y_original, certificate_tol,
-        ProductHSDVerifiedInitialPoint, HSDStepOK,
+    # @integration/core-cutover: this function's body WAS the HSD loop.  The
+    # loop now lives in `src/solver/loop.jl` as `solver_run_session!`, which is
+    # the ONE production loop; this wrapper keeps the existing callers, and the
+    # black-box contract they rely on, working unchanged.
+    #
+    # `solver_run_session!` validates every argument this function validated
+    # (identical messages), performs the same setup, and returns a
+    # `SessionOutcome` whose `result` field is the `ProductHSDSolveResult` this
+    # function has always returned.  `_session_outcome` documents itself as a
+    # labelling step that never changes the carried result.
+    #
+    # `stagnation_limit` keeps its session default of 0, which reproduces the
+    # production control flow.  Nothing here opts into a new behaviour or a new
+    # default strategy.
+    outcome = solver_run_session!(
+        SessionState(state);
+        max_iterations=max_iterations,
+        max_time=max_time,
+        tol=tol,
+        initialization=initialization,
+        max_tau_collapse_recoveries=max_tau_collapse_recoveries,
     )
-    initial === nothing || return initial
-
-    for _ in 1:Int(max_iterations)
-        elapsed_seconds = Float64(time_ns() - started_ns) * 1.0e-9
-        if elapsed_seconds >= time_limit
-            return _product_hsd_termination_or_dual_ray!(
-                state, x_original, s_original, y_original, certificate_tol,
-                ProductHSDTimeLimit, ProductHSDTimeLimitReached, HSDStepOK,
-            )
-        end
-        if _product_hsd_tau_collapse_ready(state, certificate_tol)
-            # The preceding accepted-point candidate gate already checked all
-            # three certificate classes. Re-run the ray-only gates explicitly
-            # before numerical recovery so a genuine infeasibility face is
-            # never redirected into an optimal-face restoration.
-            ray = _product_hsd_verified_result(
-                state, x_original, s_original, y_original, certificate_tol,
-                ProductHSDVerifiedTerminationRay, HSDStepOK;
-                check_optimal=false,
-            )
-            ray === nothing || return ray
-            if state.tau_collapse_recoveries < max_tau_collapse_recoveries &&
-               _product_hsd_tau_collapse_recenter!(state)
-                continue
-            end
-            return _product_hsd_termination_or_dual_ray!(
-                state, x_original, s_original, y_original, certificate_tol,
-                ProductHSDInsufficientPrecision,
-                ProductHSDTauCollapseRecoveryExhausted, HSDStepOK,
-            )
-        end
-        code = product_hsd_step!(state)
-        if code === HSDStepSingularKKT
-            return _product_hsd_termination_or_dual_ray!(
-                state, x_original, s_original, y_original, certificate_tol,
-                ProductHSDSingular, ProductHSDSingularKKTReason, code,
-            )
-        elseif code === HSDStepBreakdown
-            terminal = _product_hsd_terminal_verified_result!(
-                state, x_original, s_original, y_original, certificate_tol,
-                code,
-            )
-            terminal === nothing || return terminal
-            # Preserve the ordinary condition-aware trajectory and terminal
-            # certificate opportunity first. Only a still-unverified generic
-            # symmetric SOC iterate may replay the same Newton direction with
-            # actual map checks as the acceptance authority.
-            conditioned_soc_rescue =
-                !(state.symmetric_core isa FixedTraceQ3CoreWorkspace) &&
-                !isempty(state.runtime.soc) &&
-                isempty(state.runtime.exp) && isempty(state.runtime.power)
-            if conditioned_soc_rescue && _product_hsd_line_search!(
-                state; allow_conditioned_soc=true,
-            )
-                continue
-            end
-            return _product_hsd_termination_or_dual_ray!(
-                state, x_original, s_original, y_original, certificate_tol,
-                ProductHSDBreakdown, ProductHSDLineSearchBreakdown, code,
-            )
-        elseif code === HSDStepDirectionFailed
-            # A failed *next* Newton direction does not invalidate the current
-            # accepted iterate. First run the authoritative original-coordinate
-            # gates, then the existing finite terminal-trial verifier; only an
-            # unverified pair may be reported as direction breakdown.
-            current = _product_hsd_candidate_result!(
-                state, x_original, s_original, y_original, certificate_tol,
-                ProductHSDVerifiedAcceptedStep, code,
-            )
-            current === nothing || return current
-            terminal = _product_hsd_terminal_verified_result!(
-                state, x_original, s_original, y_original, certificate_tol,
-                code,
-            )
-            terminal === nothing || return terminal
-            return _product_hsd_termination_or_dual_ray!(
-                state, x_original, s_original, y_original, certificate_tol,
-                ProductHSDBreakdown, ProductHSDDirectionBreakdown, code,
-            )
-        elseif code === HSDStepAlreadyOptimal
-            verified = _product_hsd_candidate_result!(
-                state, x_original, s_original, y_original, certificate_tol,
-                ProductHSDVerifiedAcceptedStep, code,
-            )
-            verified === nothing || return verified
-            return _product_hsd_termination_or_dual_ray!(
-                state, x_original, s_original, y_original, certificate_tol,
-                ProductHSDBreakdown,
-                ProductHSDUnverifiedZeroComplementarity, code,
-            )
-        end
-
-        verified = _product_hsd_candidate_result!(
-            state, x_original, s_original, y_original, certificate_tol,
-            ProductHSDVerifiedAcceptedStep, code,
-        )
-        verified === nothing || return verified
-    end
-
-    if _product_hsd_tau_collapse_ready(state, certificate_tol)
-        ray = _product_hsd_verified_result(
-            state, x_original, s_original, y_original, certificate_tol,
-            ProductHSDVerifiedTerminationRay, HSDStepOK;
-            check_optimal=false,
-        )
-        ray === nothing || return ray
-        return _product_hsd_termination_or_dual_ray!(
-            state, x_original, s_original, y_original, certificate_tol,
-            ProductHSDInsufficientPrecision,
-            ProductHSDTauCollapseRecoveryExhausted, HSDStepOK,
-        )
-    end
-    return _product_hsd_termination_or_dual_ray!(
-        state, x_original, s_original, y_original, certificate_tol,
-        ProductHSDMaxIterations, ProductHSDIterationLimitReached, HSDStepOK,
-    )
+    return outcome.result
 end
 
 """Construct an internal product-HSD state and solve it."""
