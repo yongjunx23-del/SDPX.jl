@@ -66,8 +66,23 @@ echo
 echo "--- 2. independent driver re-run -----------------------------------------"
 mkdir -p "$ROOT/rebuild-reports/$ID"
 if [ -f "$REPO/$DRIVER" ]; then
-    LOG="$ROOT/rebuild-reports/$ID/verify_driver.log"
-    ( cd "$REPO" && julia --project="$ENV" -t1 "$DRIVER" ) > "$LOG" 2>&1
+    # Named `PARENT_` and prefixed with a provenance header on purpose. An earlier
+    # version wrote `verify_driver.log` and, while testing with a stub `julia`, left
+    # a synthetic three-assertion log sitting in a real task's evidence directory.
+    # A fake log that looks like a worker's is worse than no log: this project's
+    # entire acceptance standard is that evidence names the revision and the
+    # producer it came from.
+    LOG="$ROOT/rebuild-reports/$ID/PARENT_verify_driver.log"
+    {
+        echo "# PRODUCED BY THE PARENT, NOT BY THE WORKER."
+        echo "# script:   SDPX.jl/scripts/rebuild/verify_task.sh $ID"
+        echo "# revision: $(git -C "$REPO" rev-parse HEAD)"
+        echo "# env:      JULIA_DEPOT_PATH=$JULIA_DEPOT_PATH"
+        echo "# command:  ( cd $(basename "$REPO") && julia --project=$ENV -t1 $DRIVER )"
+        echo "# time:     $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "# ------------------------------------------------------------------"
+    } > "$LOG"
+    ( cd "$REPO" && julia --project="$ENV" -t1 "$DRIVER" ) >> "$LOG" 2>&1
     RC=$?
     FAILCOLS=$(grep -cE '\|\s+[0-9]+\s+(Fail|Error)' "$LOG" || true)
     echo "exit=$RC  failcols=$FAILCOLS  log=$LOG"
