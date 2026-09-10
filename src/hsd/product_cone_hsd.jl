@@ -2698,10 +2698,29 @@ Base.@noinline function _sdpx_triangular_certificate_report(
             worst_kind = :backward
         end
     end
+    worst_forward = zero(Float64)
+    worst_backward = zero(Float64)
+    worst_u = zero(Float64)
+    if worst_index > 0
+        i = worst_index
+        fw = Float64(abs(y[i])) + Float64(abs(rhs[workspace.permutation[i]]))
+        for j in 1:(i - 1)
+            fw += Float64(abs(F[i, j] * y[j]))
+        end
+        bw = Float64(abs(y[i]))
+        for j in i:n
+            bw += Float64(abs(F[i, j] * solution[j]))
+        end
+        worst_forward = fw
+        worst_backward = bw
+        worst_u = Float64(abs(u[i]))
+    end
     println(stderr, "SDpxTriCert n=", n, " operations=", operations,
         " gamma=", Float64(gamma), " worst_kind=", worst_kind,
         " worst_index=", worst_index, " worst_ratio=", worst_ratio,
-        " max_f=", Float64(maximum(abs, f)), " max_u=", Float64(maximum(abs, u)))
+        " max_f=", Float64(maximum(abs, f)), " max_u=", Float64(maximum(abs, u)),
+        " worst_forward=", worst_forward, " worst_backward=", worst_backward,
+        " worst_u=", worst_u)
     return nothing
 end
 
