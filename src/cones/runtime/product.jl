@@ -489,6 +489,7 @@ function ProductConeRuntime(layout::ConeProductLayout, ::Type{T}) where {T<:Abst
         zero(T),
         _runtime_nonsymmetric_default_result(T),
         false,
+        min(Threads.nthreads(), 8),
     )
 end
 

@@ -229,6 +229,15 @@ mutable struct ProductConeRuntime{T,O,S,P,E,W}
     checkpoint_mu::T
     checkpoint_nonsymmetric::NonsymmetricRuntimeResult{T}
     checkpoint_valid::Bool
+    # Solve-owned worker budget for the block-scan hot paths.
+    #
+    # P2-01: a parallel entry point must never derive its worker count from
+    # the process-global thread count alone.  The solve requests a budget
+    # (`settings.limits.threads`); this field carries the admitted value so a
+    # `threads=1` request cannot silently start several workers.  The default
+    # preserves the historical `min(nthreads, 8)` behaviour for runtimes built
+    # outside a solve (tests, standalone reference scripts).
+    worker_budget::Int
 end
 
 """Setup-owned work vectors for `assemble_schur!`.

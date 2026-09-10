@@ -289,7 +289,11 @@ end
 function _runtime_step_threaded!(runtime::ProductConeRuntime, s, ds)
     total = length(runtime.orthant) + length(runtime.soc) + length(runtime.psd)
     total < 512 && return _runtime_step_primal!(runtime, s, ds)
-    workers = min(Threads.nthreads(), 8)
+    # P2-01: the admitted budget is the solve-owned value, never the bare
+    # process thread count.  `min(..., 8)` is the historical small-problem
+    # cap and is retained; `runtime.worker_budget` is what refuses to start
+    # extra workers when the solve asked for one.
+    workers = min(Threads.nthreads(), runtime.worker_budget)
     workers <= 1 && return _runtime_step_primal!(runtime, s, ds)
     all_blocks = vcat(
         [(b, :orthant) for b in runtime.orthant],

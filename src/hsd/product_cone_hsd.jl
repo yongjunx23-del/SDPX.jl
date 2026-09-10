@@ -280,6 +280,10 @@ function _product_cone_hsd_state(
         nothing
     end
     runtime = ProductConeRuntime(base.canonical.cone_layout, T)
+    # P2-01: the admitted solve budget owns every parallel entry point.
+    # `schur_threads` is the solve-requested value, so a `threads=1` request
+    # keeps the block-scan hot paths serial even in a multi-thread process.
+    runtime.worker_budget = max(Int(schur_threads), 1)
     m = base.m
     block_count = length(runtime.exp) + length(runtime.power)
     offsets = Vector{Int}(undef, block_count)
