@@ -341,6 +341,15 @@ function provider_gate!(id::Symbol, available::Bool, reason::String)
     return available
 end
 
+"""
+    gate_available(id) -> Bool
+
+Read a gate's outcome from the report rather than from a local binding, so
+the decision cannot drift from the row that was actually recorded.
+"""
+gate_available(id::Symbol) =
+    any(gate -> gate.id === id && gate.available, PROVIDER_GATE_REPORT)
+
 const PROVIDER_STATUS = (
     mfla=MFLA_INSTALLED,
     bfla=BFLA_INSTALLED,
@@ -1461,11 +1470,18 @@ end
     # `s = M v` written as `−M v + s = 0`), bit for bit on the pattern.
     rsoc_native = only(filter(block -> block.cone === :rsoc, program.blocks))
     for row in 1:n_rsoc, column in 1:n_rsoc
-        @test bitexact(
-            canonical.A[rsoc_descriptor.offset + row - 1,
-                        rsoc_native.offset + column - 1],
-            -linear[row, column],
-        )
+        expected = -linear[row, column]
+        stored = canonical.A[rsoc_descriptor.offset + row - 1,
+                             rsoc_native.offset + column - 1]
+        if iszero(expected)
+            # The assembler drops exact zeros, so the structural entry is
+            # +0.0 and not the -0.0 the sign convention would produce.
+            # `isequal` separates the two, which is why the check is
+            # written on the value and not on `bitexact(stored, expected)`.
+            @test bitexact(stored, 0.0)
+        else
+            @test bitexact(stored, expected)
+        end
     end
     for row in 1:n_rsoc
         for column in 1:SDPX.canonical_num_variables(canonical)
@@ -1502,20 +1518,271 @@ end
         )
     end
 
-    psd_matrix = Rational{BigInt}[4 0 2; 0 -1 0; 2 0 3]
+    # `_block_primal_forward!` for a PSD block maps execution svec back to
+    # raw lower matrix coordinates through D⁻¹, and must agree BIT FOR BIT
+    # with the dedicated `reconstruct_psd_primal_matrix!` entry point.
+    psd_exact = Rational{BigInt}[4 0 2; 0 -1 0; 2 0 3]
     psd_svec = Float64[
         Float64(value) for value in A01Oracles.oracle_svec_highprec(
-            psd_matrix, 3; bits=ORACLE_PRECISION_BITS)
+            psd_exact, 3; bits=ORACLE_PRECISION_BITS)
     ]
+    full_source = zeros(Float64, SDPX.canonical_num_slack(canonical))
+    full_source[psd_descriptor.offset:(psd_descriptor.offset + 5)] .= psd_svec
+    restored = zeros(Float64, length(full_source))
+    SDPX._block_primal_forward!(canonical, restored, full_source, psd_descriptor)
     rebuilt_psd = zeros(Float64, 3, 3)
-    SDPX._block_primal_forward!(canonical, restored, psd_svec, psd_descriptor)
     SDPX.reconstruct_psd_primal_matrix!(rebuilt_psd, psd_svec, 3)
+    packed_rows, packed_cols = A01Oracles.oracle_svec_packed_index(3)
+    for position in 1:6
+        @test bitexact(
+            restored[psd_descriptor.offset + position - 1],
+            rebuilt_psd[packed_rows[position], packed_cols[position]],
+        )
+    end
+    psd_scale = max(1.0, maximum(abs, float64_view(psd_exact)))
     for i in 1:3, j in 1:3
-        @test bitexact(rebuilt_psd[i, j], restored[2 + (j - 1) * 3 + (i - j) +
-            (i > j ? 0 : 0)] == rebuilt_psd[i, j] ? rebuilt_psd[i, j] :
-            (i <= j ? restored[psd_descriptor.offset +
-                ((j - 1) * j ÷ 2 + i) - 1] :
-             restored[psd_descriptor.offset +
-                ((i - 1) * i ÷ 2 + j) - 1]))
+        @test numerically_equivalent(
+            rebuilt_psd[i, j], Float64(psd_exact[i, j]),
+            backward_bound(Float64, 3, psd_scale),
+        )
+    end
+end
+
+# ===========================================================================
+# 8. Factor lifecycle: logical lease, fail-closed, stale-factor reuse
+# ===========================================================================
+#
+# ADR-002 §4: "on any failed refactor_numeric! the adapter must revoke the
+# logical lease before returning, regardless of whether the provider kept
+# the physical factor.  A subsequent solve must fail closed rather than
+# reuse."  For the in-tree caches the logical lease IS `factor_status` plus
+# `matrix_epoch`; these tests are what a stale-factor-reuse mutation breaks.
+
+@testset "A01 factor lifecycle: fail-closed and stale reuse" begin
+    @testset "sparse symbolic numeric cache" begin
+        lower = sparse(Float64[2 0; 1 -2])
+        requirements = SDPX.SparseSymbolicRequirements(lower; dsigns=[1, -1])
+        cache = SDPX.SparseSymbolicNumericCache{Float64}()
+        SDPX.prepare!(cache, requirements)
+        SDPX.factorize!(cache, lower, 1)
+        @test SDPX.factor_status(cache) === SDPX.Fresh
+        rhs = [3.0, -1.0]
+        solution = zeros(2)
+        SDPX.solve!(cache, solution, rhs)
+        @test Symmetric(lower, :L) * solution ≈ rhs
+        epoch_after_success = cache.matrix_epoch
+        numeric_after_success = cache.numeric_count
+
+        # --- a FAILED refactor must revoke the logical lease
+        nonfinite = copy(lower)
+        nonfinite.nzval[1] = NaN
+        @test_throws ArgumentError SDPX.factorize!(cache, nonfinite, 2)
+        @test SDPX.factor_status(cache) === SDPX.Failed
+        @test cache.factor === nothing
+        @test cache.matrix_epoch == epoch_after_success
+        @test cache.numeric_count == numeric_after_success
+        destination = fill(-999.0, 2)
+        @test_throws SDPX.FactorCacheStateError SDPX.solve!(
+            cache, destination, rhs)
+        @test bitexact(destination, [-999.0, -999.0])
+
+        # --- recovery requires presenting the pattern again
+        SDPX.factorize!(cache, lower, 2)
+        @test SDPX.factor_status(cache) === SDPX.Fresh
+        SDPX.solve!(cache, solution, rhs)
+        @test Symmetric(lower, :L) * solution ≈ rhs
+
+        # --- an exactly singular refactor fails closed the same way
+        singular = copy(lower)
+        fill!(singular.nzval, 0.0)
+        @test_throws ArgumentError SDPX.factorize!(cache, singular, 3)
+        @test SDPX.factor_status(cache) === SDPX.Failed
+        @test cache.factor === nothing
+        @test_throws SDPX.FactorCacheStateError SDPX.solve!(cache, solution, rhs)
+
+        # --- documented same-epoch protocol, and the hazard it carries
+        SDPX.factorize!(cache, lower, 4)
+        @test SDPX.factor_status(cache) === SDPX.Fresh
+        count_before = cache.numeric_count
+        changed = sparse(Float64[5 0; 1 -2])
+        SDPX.factorize!(cache, changed, 4)         # SAME epoch: no-op
+        @test cache.numeric_count == count_before  # no numeric factorization
+        SDPX.solve!(cache, solution, rhs)
+        # The answer is the OLD operator's: mutating the retained matrix
+        # without bumping the epoch is invisible to the cache.  That is the
+        # documented protocol (the caller owns the epoch), and it is
+        # recorded here so a future adapter cannot claim the cache detects
+        # it.  It is NOT a tolerance decision and nothing is widened.
+        @test Symmetric(lower, :L) * solution ≈ rhs
+        SDPX.factorize!(cache, changed, 5)
+        SDPX.solve!(cache, solution, rhs)
+        @test Symmetric(changed, :L) * solution ≈ rhs
+
+        # --- explicit revocation and invalidation
+        SDPX.revoke_numeric!(cache)
+        @test SDPX.factor_status(cache) === SDPX.Prepared
+        @test_throws SDPX.FactorCacheStateError SDPX.solve!(cache, solution, rhs)
+        SDPX.invalidate!(cache)
+        @test SDPX.factor_status(cache) === SDPX.Invalid
+    end
+
+    @testset "LPLU cache epoch protocol" begin
+        cache = SDPX.LPLUCache{Float64}()
+        @test SDPX.prepare!(cache, SDPX.FactorRequirements(2)) === cache
+        @test SDPX.factor_status(cache) === SDPX.Prepared
+        first_matrix = Float64[0 2; 1 3]
+        SDPX.factorize!(cache, first_matrix, 1)
+        @test SDPX.factor_status(cache) === SDPX.Fresh
+        @test SDPX.factor_epoch(cache) == 1
+        solution = zeros(2)
+        rhs = first_matrix * [1.0, 2.0]
+        SDPX.solve!(cache, solution, rhs)
+        @test solution ≈ [1.0, 2.0]
+        SDPX.factorize!(cache, Float64[2 1; 1 3], 2)
+        @test SDPX.factor_epoch(cache) == 2
+        SDPX.solve!(cache, solution, Float64[2 1; 1 3] * [2.0, -1.0])
+        @test solution ≈ [2.0, -1.0]
+
+        # ADR-002 §2 requires `invalidate_numeric!` to revoke the numeric
+        # factor ONLY and never the symbolic lease.  `LPLUCache` does not
+        # override `revoke_numeric!`, so the generic fallback in
+        # src/factor_cache/api.jl routes to `invalidate!` and the cache
+        # lands in `Invalid`: the prepared symbolic capacity is destroyed.
+        # The OBSERVED behaviour is asserted here (not the documented one),
+        # together with its consequence, so the deviation is visible and a
+        # repair flips exactly this test.
+        SDPX.revoke_numeric!(cache)
+        @test SDPX.factor_status(cache) === SDPX.Invalid
+        @test_throws SDPX.FactorCacheStateError SDPX.solve!(cache, solution, rhs)
+        # The capacity is in fact still there (factorize! re-prepares in
+        # place and succeeds), so this is a STATUS-VOCABULARY deviation,
+        # not a capacity loss: `revoke_numeric!` reports the same state as
+        # a full `invalidate!` even though it kept the prepared buffers.
+        SDPX.factorize!(cache, first_matrix, 3)
+        @test SDPX.factor_status(cache) === SDPX.Fresh
+        SDPX.solve!(cache, solution, rhs)
+        @test solution ≈ [1.0, 2.0]
+        SDPX.invalidate!(cache)
+        @test SDPX.factor_status(cache) === SDPX.Invalid
+    end
+
+    @testset "disconnected LDL pattern drift" begin
+        block = Float64[2 1 0; 1 -3 0.5; 0 0.5 -2]
+        full = zeros(6, 6)
+        full[1:3, 1:3] .= block
+        full[4:6, 4:6] .= block
+        lower = sparse(tril(full))
+        cache = SDPX.DisconnectedLDLTCache(
+            lower, [1, -1, -1, 1, -1, -1]; max_size=4)
+        @test cache !== nothing
+        SDPX.factorize!(cache, lower, 1)
+        @test SDPX.factor_status(cache) === SDPX.Fresh
+        rhs = collect(1.0:6.0)
+        solution = zeros(6)
+        SDPX.solve!(cache, solution, rhs)
+        @test full * solution ≈ rhs
+
+        drift = copy(lower)
+        drift[4, 1] = 0.25
+        @test_throws ArgumentError SDPX.factorize!(cache, drift, 2)
+        @test SDPX.factor_status(cache) === SDPX.Failed
+        @test_throws SDPX.FactorCacheStateError SDPX.solve!(cache, solution, rhs)
+        SDPX.factorize!(cache, lower, 2)
+        @test SDPX.factor_status(cache) === SDPX.Fresh
+        SDPX.solve!(cache, solution, rhs)
+        @test full * solution ≈ rhs
+    end
+end
+
+# ===========================================================================
+# 9. Provider gates — explicit skips, never silent passes
+# ===========================================================================
+
+@testset "A01 provider-gated contract checks" begin
+    provider_gate!(
+        :multifloats_generic_arithmetic, MULTIFLOATS_INSTALLED,
+        "MultiFloats resolvable: SDPX's generic multi-limb path is exercised",
+    )
+    provider_gate!(
+        :mfla_bk_grammar_comparison, MFLA_INSTALLED,
+        "MultiFloatLinearAlgebra is NOT resolvable in the default project " *
+        "(weakdep absent from the Manifest): the packet's BK kernel cannot " *
+        "be exercised here.  ADR-003 §3 — infrastructure, not a numeric " *
+        "failure, and not a silent pass.",
+    )
+    provider_gate!(
+        :bfla_ldlt_comparison, BFLA_INSTALLED,
+        "BigFloatLinearAlgebra is NOT resolvable in the default project: " *
+        "the BFLA 2×2 row-scale normalization cannot be exercised against " *
+        "the live kernel here.  ADR-003 §3.",
+    )
+    provider_gate!(
+        :qdldl_sparse_comparison, QDLDL_INSTALLED,
+        "QDLDL is NOT resolvable in the default project: the sparse " *
+        "provider route stays unverified.  ADR-003 §3.",
+    )
+
+    @test PROVIDER_STATUS.multifloats
+    @test !PROVIDER_STATUS.mfla
+    @test !PROVIDER_STATUS.bfla
+    @test !PROVIDER_STATUS.qdldl
+
+    println("A01 provider gate table:")
+    for gate in PROVIDER_GATE_REPORT
+        println("  gate=", gate.id, " available=", gate.available,
+            " reason=", gate.reason)
+    end
+
+    # --- MultiFloats: the one provider that IS present, exercised at
+    # multi-limb precision.  This is the second independent detector for a
+    # low-precision coefficient: a `Float64` √2 promoted into a 2-limb
+    # MultiFloat leaves `x² − 2 ≈ 4.4e-16`, which fails a 2⁻¹⁰⁰ bound.
+    if gate_available(:multifloats_generic_arithmetic)
+        @eval using MultiFloats
+        MF = MultiFloats.MultiFloat{Float64,2}
+        limb_bound = MF(2)^(-100)
+        map = SDPX.PSDCoordinateMap(MF, 3)
+        scaled = A01Oracles.oracle_svec_is_scaled(3)
+        for k in eachindex(scaled)
+            if scaled[k]
+                coefficient = map.primal_scale[k]
+                @test abs(coefficient * coefficient - MF(2)) <= limb_bound
+                inverse = map.primal_inverse[k]
+                @test abs(inverse * inverse - MF(1) / MF(2)) <= limb_bound
+                @test abs(coefficient * inverse - MF(1)) <= limb_bound
+            else
+                @test map.primal_scale[k] == MF(1)
+            end
+        end
+        # The RSOC map must carry the same multi-limb precision, and its
+        # 2x2 head must still be an involution.
+        transform = SDPX.RotatedSOCToSOC{MF}(4)
+        kernel = SDPX._rsoc_transform_matrix(transform)
+        @test abs(kernel[1, 1]^2 - MF(1) / MF(2)) <= limb_bound
+        @test abs(kernel[1, 1]^2 + kernel[2, 1]^2 - MF(1)) <= limb_bound
+        @test kernel[1, 1] == kernel[1, 2] == kernel[2, 1] == -kernel[2, 2]
+        @test kernel[3, 3] == MF(1) && kernel[4, 4] == MF(1)
+    end
+
+    # --- MFLA / BFLA: the packet's actual BK kernels.  Skipped, visibly.
+    if gate_available(:mfla_bk_grammar_comparison)
+        error("A01: MFLA became available; the gated BK comparison must be " *
+              "implemented and run rather than skipped")
+    else
+        @test_skip "MFLA Bunch–Kaufman 1/2/0 grammar + 2×2 normalization vs " *
+                   "the exact defining-identity reference (provider absent)"
+    end
+    if gate_available(:bfla_ldlt_comparison)
+        error("A01: BFLA became available; the gated LDLT comparison must " *
+              "be implemented and run rather than skipped")
+    else
+        @test_skip "BFLA lower-authoritative LDLT grammar + row-scale 2×2 " *
+                   "normalization vs the exact reference (provider absent)"
+    end
+    if gate_available(:qdldl_sparse_comparison)
+        error("A01: QDLDL became available; the sparse-provider comparison " *
+              "must be implemented and run rather than skipped")
+    else
+        @test_skip "QDLDL sparse route numeric comparison (provider absent)"
     end
 end
