@@ -712,6 +712,7 @@ include(joinpath(@__DIR__, "..", "validation", "scientific_core", "exp_runtime",
     "test_compensated_exp_reference.jl"))
 include(joinpath(@__DIR__, "initialize_counting.jl"))
 include(joinpath(@__DIR__, "core_route_planner.jl"))
+include(joinpath(@__DIR__, "soc_rank2_mapping.jl"))
 include(joinpath(@__DIR__, "..", "benchmark", "optimization", "test_profile_catalog.jl"))
 include(joinpath(@__DIR__, "..", "benchmark", "optimization", "test_compare_contract.jl"))
 include(joinpath(@__DIR__, "..", "benchmark", "optimization", "test_measure_target.jl"))
