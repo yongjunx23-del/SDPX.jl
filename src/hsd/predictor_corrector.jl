@@ -602,9 +602,11 @@ Base.@noinline function _product_hsd_direction!(
     base.dkappa_a = base.dkappa
 
     alpha_aff = _product_hsd_boundary_alpha!(state)
-    (isfinite(alpha_aff) && alpha_aff > zero(T)) || return false
+    (isfinite(alpha_aff) && alpha_aff > zero(T)) ||
+        return (_sdpx_direction_failure_report(state, "boundary_alpha"); false)
     mu_aff = _product_hsd_mu_aff!(state, alpha_aff)
-    (isfinite(mu_aff) && mu_aff >= zero(T)) || return false
+    (isfinite(mu_aff) && mu_aff >= zero(T)) ||
+        return (_sdpx_direction_failure_report(state, "mu_aff"); false)
     ratio = base.mu_aff / base.mu
     sigma = _product_hsd_sigma(state, ratio)
     sigma_mu = sigma * base.mu

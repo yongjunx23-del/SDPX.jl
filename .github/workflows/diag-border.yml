@@ -1,4 +1,4 @@
-name: Diagnose bordered LP x86
+name: Diagnose bordered LP x86 gate trace
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   diag:
-    name: ${{ matrix.os }} / ${{ matrix.threads }} threads
+    name: ${{ matrix.os }} / ${{ matrix.threads }}t
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -18,8 +18,8 @@ jobs:
             threads: '1'
           - os: ubuntu-latest
             threads: '4'
-          - os: windows-latest
-            threads: '4'
+          - os: macos-latest
+            threads: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: julia-actions/setup-julia@v2
@@ -29,11 +29,16 @@ jobs:
         with:
           cache-name: julia-depot
       - uses: julia-actions/julia-buildpkg@v1
-      - name: Reproduce bordered LP fixture with diagnostics
+      - name: Export bordered LP five-equation gate trace
         shell: bash
+        env:
+          SDPX_DEBUG_DIRECTION: '1'
+          JULIA_NUM_THREADS: ${{ matrix.threads }}
         run: |
-          cat > diag_border.jl <<'JLEOF'
+          cat > diag_gate.jl <<'JLEOF'
           using SDPX
+          println("PATHOF_SDPX=", pathof(SDPX))
+          println("MACHINE=", Sys.MACHINE, " cpu=", Sys.CPU_NAME)
           model = SDPX.Model(Float64)
           y = SDPX.variable!(model, :y, 2; domain=SDPX.Reals())
           SDPX.constraint!(model, :b1, y[1], SDPX.Nonnegative())
@@ -46,18 +51,14 @@ jobs:
           end
           SDPX.objective!(model, SDPX.Minimize(), y[1] + y[2])
           result = SDPX.optimize!(model;
-              settings=SDPX.Settings(Float64; verbosity=1, kkt_route=:bordered))
+              settings=SDPX.Settings(Float64; verbosity=0, kkt_route=:bordered))
           println("FINAL_STATUS=", SDPX.status(result))
           println("CERT_VALID=", SDPX.certificate(result).valid)
-          d = SDPX.diagnostics(result)
-          sa = d.selected_algorithms
-          println("executed_route=", sa.executed_kkt_route)
-          println("structure=", sa.structure)
-          for name in propertynames(d)
-              v = getfield(d, name)
-              s = repr(v)
-              length(s) > 400 && (s = s[1:400] * "...")
-              println("DIAG ", name, " = ", s)
-            end
+          println("ITERS=", SDPX.iterations(result))
           JLEOF
-          julia --project=. --threads=${{ matrix.threads }} diag_border.jl
+          julia --startup-file=no diag_gate.jl 2>&1 | tee gate_trace.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gate-trace-${{ matrix.os }}-${{ matrix.threads }}t
+          path: gate_trace.txt

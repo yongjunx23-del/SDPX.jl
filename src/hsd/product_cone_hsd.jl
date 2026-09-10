@@ -3310,6 +3310,7 @@ Base.@noinline function _product_hsd_refine_shift!(
         end
     end
     workspace.last_reason = SYMMETRIC_BORDERED_FIVE_EQUATION_FAILED
+    _sdpx_direction_failure_report(state, "refine_shift_exhausted")
     return false
 end
 
@@ -3319,7 +3320,7 @@ Base.@noinline function _product_hsd_solve_shift!(
 ) where {T,R,RT,NS,CW,SB,EW,SW,SCW}
     _product_hsd_solve_shift_raw!(
         state, scalar_rhs,
-    ) || return false
+    ) || return (_sdpx_direction_failure_report(state, "solve_shift_raw"); false)
     _product_hsd_newton_residual_ok(state, scalar_rhs) && return true
     return _product_hsd_refine_shift!(state, scalar_rhs)
 end
@@ -3600,6 +3601,109 @@ function _product_hsd_trial_residual!(state::ProductConeHSDState{T}) where {T}
     return _hsd_trial_residual!(state.base)
 end
 
+# ---------------------------------------------------------------------------
+# P0-03 diagnostic probe: export the first failing direction epoch.
+#
+# `SDPX_DEBUG_DIRECTION=1` makes a *failure* path print the five-equation
+# residual/work ratios, the active backward-stability threshold, the factor
+# epoch and the bounded reason.  It is read-only, is only reached after the
+# production gate has already decided to fail, and never feeds a numerical
+# decision.  This exists so that a platform which reports a direction
+# breakdown can be compared against a platform which does not, at the first
+# divergence rather than at the final status.
+# ---------------------------------------------------------------------------
+function _sdpx_gate_threshold(::Type{T}) where {T}
+    return T === Float64 ? T(512) * sqrt(eps(T)) :
+        max(T(65536) * sqrt(eps(T)), T(10) * cbrt(eps(T)))
+end
+
+@inline function _sdpx_gate_ratio(residual, work)
+    isfinite(residual) && isfinite(work) && work > zero(work) || return Inf
+    return Float64(abs(residual) / work)
+end
+
+Base.@noinline function _sdpx_direction_failure_report(
+    state::ProductConeHSDState{T}, stage::AbstractString,
+) where {T}
+    get(ENV, "SDPX_DEBUG_DIRECTION", "0") == "1" || return nothing
+    return _sdpx_direction_trace(state, stage)
+end
+
+"""Read-only gate trace for a completed (or failed) direction computation.
+
+`SDPX_DEBUG_DIRECTION_ITER=<n>` restricts the trace to iteration `n` so the
+same iteration can be exported from two platforms and compared field by
+field.  The probe only reads state and is never consulted by a solve.
+"""
+Base.@noinline function _sdpx_direction_trace(
+    state::ProductConeHSDState{T}, stage::AbstractString,
+) where {T}
+    get(ENV, "SDPX_DEBUG_DIRECTION", "0") == "1" || return nothing
+    want = try
+        parse(Int, get(ENV, "SDPX_DEBUG_DIRECTION_ITER", "-1"))
+    catch
+        -1
+    end
+    iteration = state.base.record.iterations + 1
+    if want >= 0 && iteration != want && stage != "refine_shift_exhausted" &&
+       stage != "solve_shift_raw"
+        return nothing
+    end
+    base = state.base
+    threshold = Float64(_sdpx_gate_threshold(T))
+    print(stderr, "SDpxGate stage=", stage)
+    print(stderr, " epoch=", base.epoch, " iters=", base.record.iterations)
+    print(stderr, " mu=", base.mu, " tau=", base.tau, " kappa=", base.kappa)
+    print(stderr, " threshold=", threshold)
+    print(stderr, " route=", state.kkt_route)
+    primal_ok = try
+        ok, residual, work = _product_hsd_primal_newton_stats(state)
+        print(stderr, " primal_ok=", ok, " primal_ratio=",
+            _sdpx_gate_ratio(residual, work), " primal_res=", residual)
+        ok
+    catch exception
+        print(stderr, " primal_stats_error=", typeof(exception))
+        false
+    end
+    dual_ok = try
+        ok, residual, work = _product_hsd_dual_newton_stats(state)
+        print(stderr, " dual_ok=", ok, " dual_ratio=",
+            _sdpx_gate_ratio(residual, work), " dual_res=", residual)
+        ok
+    catch exception
+        print(stderr, " dual_stats_error=", typeof(exception))
+        false
+    end
+    cone_ok = try
+        ok, residual, work, _ = _product_hsd_cone_newton_stats(state)
+        print(stderr, " cone_ok=", ok, " cone_ratio=",
+            _sdpx_gate_ratio(residual, work), " cone_res=", residual)
+        ok
+    catch exception
+        print(stderr, " cone_stats_error=", typeof(exception))
+        false
+    end
+    gap_ok = try
+        residual, work = _shared_gap_terms(
+            base.rG, base.dkappa, base.c, base.dx, base.b, base.dy,
+        )
+        print(stderr, " gap_ratio=", _sdpx_gate_ratio(residual, work),
+            " gap_res=", residual)
+        _product_hsd_newton_close(residual, work)
+    catch exception
+        print(stderr, " gap_stats_error=", typeof(exception))
+        false
+    end
+    left = Int(primal_ok) + Int(dual_ok) + Int(cone_ok) + Int(gap_ok)
+    if state.symmetric_bordered !== nothing
+        print(stderr, " last_reason=", state.symmetric_bordered.last_reason,
+            " solves=", state.symmetric_bordered.solves,
+            " refinements=", state.symmetric_bordered.refinements)
+    end
+    println(stderr, " groups_passing=", left, "/4")
+    return nothing
+end
+
 Base.@noinline function product_hsd_step!(state::ProductConeHSDState{T,R,RT,NS,CW,SB,EW,SW,SCW}) where {T,R,RT,NS,CW,SB,EW,SW,SCW}
     base = state.base
     base.workspace.rank_ambiguous && return HSDStepDirectionFailed
@@ -3692,6 +3796,7 @@ Base.@noinline function product_hsd_step!(state::ProductConeHSDState{T,R,RT,NS,C
         end
     end
     timings.direction_seconds += Float64(time_ns() - t0) * 1.0e-9
+    _sdpx_direction_trace(state, "direction_ok")
     direction_code === HSDStepOK || return direction_code
     t0 = time_ns()
     accepted = try
