@@ -149,3 +149,56 @@ its previous success flag across a preflight rejection.
 Recorded here as evidence, not as a request for BFLA to change: the preflight
 behaviour is a reasonable strong-exception guarantee. The obligation is
 SDPX-side.
+
+---
+
+## 9. The §4 hazard is provider-independent, not a BFLA quirk
+
+§8 checked BFLA. This section checks MFLA — and the result strengthens §4 from a
+provider-specific observation into a structural property of both providers.
+
+**A near-miss worth recording.** The first pass grepped MFLA for `preflight` and
+`:unprepared` and found **neither**, which would have been recorded as "MFLA does
+not share BFLA's two-phase design". That was wrong: MFLA implements the same
+structure under a different name (`invalidate!(cache)`), and the grep was too
+literal. Provider parity must be established by reading the ordering of the
+operations, not by matching vocabulary.
+
+All four MFLA `factorize!` methods (`src/factor_caches.jl` :39, :138, :245, :488)
+have this shape:
+
+```
+_check_config_frozen(cache, config)          # throws
+n == size(A, 2) || throw(DimensionMismatch)  # throws  (square caches only)
+_check_supported(MF)                         # throws
+_check_prepared(cache, (n, n))               # throws
+invalidate!(cache)                           # <-- commit phase starts HERE
+copyto!(cache.factors, A)
+status = _..._factorize_core!(...)           # numerical work
+cache.status = status
+```
+
+So the comparison is:
+
+| | BFLA `f95d3e6` | MFLA `50e6e0b` |
+|---|---|---|
+| Commit-phase marker | `status = FactorStatus(:unprepared, nothing)` | `invalidate!(cache)` |
+| Throwing checks before it | yes | yes |
+| Consequence of a **preflight** throw | previous factor **and** previous `:success` retained | previous factor **and** previous status retained |
+| Consequence of a **commit-phase** failure | status non-success, never stale `:success` | `invalidate!` already ran, so no stale success |
+
+Both providers therefore offer a **strong exception guarantee on preflight
+rejection and no stale success on commit failure**. That is a defensible design,
+and it is *identical in effect* across the two libraries.
+
+**Consequence for §4.** The rule is unchanged but is now established as
+provider-independent: after ANY failed `refactor_numeric!`, regardless of
+provider and regardless of which phase rejected, SDPX must revoke the logical
+lease before reading any provider status. An adapter cannot distinguish "the
+call failed and the old factor is still valid" from "the call failed and the old
+factor is still valid *for the old request*" by inspecting the provider alone.
+
+This is exactly the packet's §3.6 point — "失败语义需要特别对齐" — and it turns
+out the alignment requirement is not that the providers differ, but that **both
+providers' guarantees are about physical retention, while SDPX's need is about
+logical validity.**
