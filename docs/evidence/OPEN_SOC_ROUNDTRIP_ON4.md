@@ -85,7 +85,7 @@ was not checked. Recorded so it is not lost; nothing is claimed.
 
 Four functions in `src/hsd/product_cone_solve.jl` accept `AbstractMatrix` and then
 reach for the sparse interface. Three are unguarded (`:208`, `:259`, `:286`) and one
-more (`:460`) passes a dense-but-owned matrix where a sparse one is expected. A
+more (`:461`) passes a dense-but-owned matrix where a sparse one is expected. [Line number corrected by the parent: an earlier draft said `:460`. Verified against 382428a with `grep -n _product_hsd_owned_dense src/hsd/product_cone_solve.jl`, which reports call sites at `:323`, `:430` and `:461`.] A
 validated fix is preserved at
 `docs/evidence/proposed/product_cone_solve_nzrange.patch`; it is verified to apply
 cleanly and to reproduce the file that was measured.
