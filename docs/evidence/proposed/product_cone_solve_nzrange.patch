@@ -1,0 +1,77 @@
+PROPOSED FIX — unguarded sparse-API sites in src/hsd/product_cone_solve.jl
+
+NOT APPLIED. Preserved here because the validated copy lived in /tmp and would have
+been lost. Rebased onto 4cb8d60 by matching each hunk exactly once; a hunk that
+failed to match would have aborted the rebase rather than yielding a partial patch.
+
+Measured before/after, Float64 and MultiFloat legs:
+  before: a MultiFloat solve on a mixed SOC+NonNeg problem THREW (nzrange on a dense A)
+  after : the same problem returns status=Optimal
+  8 of 9 regression cells unchanged
+
+Apply with:  git apply docs/evidence/proposed/product_cone_solve_nzrange.patch
+
+--- a/src/hsd/product_cone_solve.jl
++++ b/src/hsd/product_cone_solve.jl
+@@ -205,8 +205,14 @@
+     rhs = alloc_zeros(T, size(A, 2))
+     @inbounds for column in axes(A, 2)
+         value = zero(T)
+-        for pointer in nzrange(A, column)
+-            value -= A.nzval[pointer] * primal_residual[A.rowval[pointer]]
++        if A isa SparseMatrixCSC
++            for pointer in nzrange(A, column)
++                value -= A.nzval[pointer] * primal_residual[A.rowval[pointer]]
++            end
++        else
++            for row in axes(dense_A, 1)
++                value -= dense_A[row, column] * primal_residual[row]
++            end
+         end
+         _store_owned_scalar!(rhs, column, value)
+     end
+@@ -256,9 +262,15 @@
+     atb = alloc_zeros(T, n)
+     @inbounds for column in 1:n
+         value = zero(T)
+-        for pointer in nzrange(A, column)
+-            row = A.rowval[pointer]
+-            value += A.nzval[pointer] * b[row]
++        if A isa SparseMatrixCSC
++            for pointer in nzrange(A, column)
++                row = A.rowval[pointer]
++                value += A.nzval[pointer] * b[row]
++            end
++        else
++            for row in axes(dense_A, 1)
++                value += dense_A[row, column] * b[row]
++            end
+         end
+         _store_owned_scalar!(atb, column, value)
+         _store_owned_scalar!(gram, CartesianIndex(n + 1, column), value)
+@@ -283,8 +295,14 @@
+     end
+     @inbounds for column in 1:n
+         coefficient = rhs[column]
+-        for pointer in nzrange(A, column)
+-            correction[A.rowval[pointer]] += A.nzval[pointer] * coefficient
++        if A isa SparseMatrixCSC
++            for pointer in nzrange(A, column)
++                correction[A.rowval[pointer]] += A.nzval[pointer] * coefficient
++            end
++        else
++            for row in axes(dense_A, 1)
++                correction[row] += dense_A[row, column] * coefficient
++            end
+         end
+     end
+     @inbounds for row in 1:m
+@@ -458,7 +476,7 @@
+             end
+         else
+             dual_dense_A = T === Float64 ? refinement_A :
+-                           _product_hsd_owned_dense(A)
++                           (A isa SparseMatrixCSC ? _product_hsd_owned_dense(A) : A)
+             _product_hsd_apply_dual_refinement!(
+                 y, A, dual_dense_A, canonical.b, dual_residual, gap, backend,
+             ) || return nothing
