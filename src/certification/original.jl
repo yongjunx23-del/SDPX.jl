@@ -455,19 +455,25 @@ function OriginalPoint(x::AbstractVector, y::AbstractVector, s::AbstractVector,
 end
 
 """
-    OriginalOperator(problem, dual_map=Dict())
+    OriginalOperator(problem; dual_map=Dict())
 
 Per-block execution map for the dual cone.  `dual_map` overrides the adjoint
 factor of PSD block `i`; an override that disagrees with the stored adjoint
 is a *wrong dual map* and is refused with `REJECT_DUAL_MAP_INCONSISTENT`.
+
+`dual_map` is a KEYWORD argument with a default, which means Julia already
+generates the one-positional-argument method `OriginalOperator(problem)`.
+Writing that method out explicitly as well is a *method overwrite*: at
+runtime it is only a warning, but Julia promotes method overwriting to a hard
+error during module precompilation ("Method overwriting is not permitted
+during Module precompilation"), so the package would fail to precompile once
+this layer is wired into `src/SDPX.jl`.  There is deliberately no explicit
+one-argument method here.
 """
 struct OriginalOperator{T<:AbstractFloat}
     problem::OriginalProblem{T}
     dual_map::Dict{Int,Vector{T}}
 end
-
-OriginalOperator(problem::OriginalProblem{T}) where {T} =
-    OriginalOperator{T}(problem, Dict{Int,Vector{T}}())
 
 function OriginalOperator(problem::OriginalProblem{T};
                           dual_map::AbstractDict=Dict{Int,Vector{T}}()) where {T}
