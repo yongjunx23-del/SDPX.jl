@@ -130,12 +130,39 @@ function _product_hsd_terminal_dual_operator(
 ) where {T}
     n, m = size(A, 2), size(A, 1)
     operator = alloc_zeros(T, n + 1, m)
-    @inbounds for column in 1:m
-        for row in 1:n
-            _store_owned_scalar!(
-                operator, CartesianIndex(row, column), A[column, row],
-            )
+    # The block is exactly `transpose(A)` with `b` appended as its last row:
+    # a copy, never arithmetic. For a sparse `A` the elementwise form pays one
+    # stored-entry search per *matrix* entry (`A[column, row]`), i.e. O(n * m)
+    # searches, where iterating the stored entries is O(nnz) with direct dense
+    # writes. Structurally zero entries would have been written as `zero(T)`
+    # and `alloc_zeros` already left `zero(T)` there, so the result is
+    # unchanged. On the measured C4/S256 operators this did NOT materially move
+    # the recovery build, which is dominated by the dense dual QR, the cached
+    # wide-QR reduction and the adapter self-check; it is kept because the
+    # search count scales with n * m rather than nnz.
+    if A isa SparseMatrixCSC
+        # `operator[j, i] = A[i, j]`: the stored entry `A[i, j]` of column `j`
+        # lands in row `j` and column `i`, exactly where the elementwise form
+        # would have written it.
+        @inbounds for j in 1:size(A, 2)
+            for pointer in nzrange(A, j)
+                _store_owned_scalar!(
+                    operator,
+                    CartesianIndex(j, rowvals(A)[pointer]),
+                    nonzeros(A)[pointer],
+                )
+            end
         end
+    else
+        @inbounds for column in 1:m
+            for row in 1:n
+                _store_owned_scalar!(
+                    operator, CartesianIndex(row, column), A[column, row],
+                )
+            end
+        end
+    end
+    @inbounds for column in 1:m
         _store_owned_scalar!(
             operator, CartesianIndex(n + 1, column), b[column],
         )
