@@ -36,6 +36,69 @@ using LinearAlgebra
 using SparseArrays
 using SDPX
 
+# ---------------------------------------------------------------------------
+# Provider selector — parsed BEFORE anything else runs.
+#
+#   (no --provider)      core assertions only; each provider leg is either
+#                        skipped with a reason derived from ACTUAL
+#                        availability, or FAILS LOUDLY if the provider is
+#                        present but its leg was not executed.
+#   --provider=mfla      core assertions plus the MFLA live leg
+#   --provider=bfla      core assertions plus the BFLA live leg
+#   --provider=qdldl     core assertions plus the QDLDL live leg
+#   --provider=all       spawns one fresh `-t1` process per leg (two-process
+#                        rule: Julia 1.12 can exhaust its inference compiler
+#                        when MFLA fixed-width and BFLA/MPFR specializations
+#                        are instantiated in one process) and aggregates.
+#
+# Exit codes: 0 all pass, 1 numeric/test failure, 2 INFRASTRUCTURE (an
+# explicitly requested provider is not resolvable — ADR-003 §3: never a
+# numeric failure, and never a silent pass).
+# ---------------------------------------------------------------------------
+
+const PROVIDER_LEG_NAMES = (:mfla, :bfla, :qdldl)
+
+function _parse_provider_argument(arguments)
+    selection = Symbol[]
+    spawn_all = false
+    for argument in arguments
+        startswith(argument, "--provider=") || continue
+        value = split(argument, "="; limit=2)[2]
+        if value == "all"
+            spawn_all = true
+        else
+            leg = Symbol(value)
+            leg in PROVIDER_LEG_NAMES || error(
+                "A01: unknown --provider=$(value); expected one of " *
+                "$(join(PROVIDER_LEG_NAMES, ", ")) or all")
+            leg in selection || push!(selection, leg)
+        end
+    end
+    return selection, spawn_all
+end
+
+const SELECTED_PROVIDER_LEGS, SPAWN_ALL_PROVIDER_LEGS =
+    _parse_provider_argument(ARGS)
+
+if SPAWN_ALL_PROVIDER_LEGS
+    println("A01 --provider=all: spawning one fresh -t1 process per provider leg")
+    child_codes = Dict{Symbol,Int}()
+    for leg in PROVIDER_LEG_NAMES
+        command = `$(Base.julia_cmd()) --startup-file=no -t1 --project=$(Base.active_project()) $(@__FILE__) --provider=$(leg)`
+        println("  spawn ", leg, ": ", command)
+        flush(stdout)
+        process = run(ignorestatus(command))
+        child_codes[leg] = process.exitcode
+        println("  leg ", leg, " exited with ", process.exitcode)
+        flush(stdout)
+    end
+    aggregate = 2 in values(child_codes) ? 2 :
+                (any(!=(0), values(child_codes)) ? 1 : 0)
+    println("A01 --provider=all summary: ", child_codes,
+        " aggregate_exit=", aggregate)
+    exit(aggregate)
+end
+
 include(joinpath(@__DIR__, "reference_oracles.jl"))
 include(joinpath(@__DIR__, "fixtures.jl"))
 
@@ -287,6 +350,50 @@ const TOLERANCE_LEDGER = [
                   "both a strict and a tolerant decision, never averaged",
     ),
     (
+        id=:provider_ldlt_identity,
+        expression="max|A[p,p] − L·D·Lᵀ| <= 8·n³·u_provider·‖A‖_∞",
+        kind=:numerical,
+        rationale="applies to a LIVE provider factor whose entries are " *
+                  "converted to exact rationals; u_provider is 2^-105 for " *
+                  "MultiFloat{Float64,2}, 2^-(bits-1) for BigFloat and " *
+                  "eps(Float64) for QDLDL, so a wrong normalization or a " *
+                  "misplaced subdiagonal fails by ~30 orders of magnitude",
+    ),
+    (
+        id=:provider_solve,
+        expression="max|A·x − b| <= 8·(n²+n)·u_provider·(‖A‖_∞‖x‖_∞+‖b‖_∞)",
+        kind=:numerical,
+        rationale="normwise backward error of the provider's own solve; " *
+                  "the forward error is NEVER asserted because the " *
+                  "cancellation2 fixture is deliberately ill-conditioned",
+    ),
+    (
+        id=:provider_trsv,
+        expression="max|L·x − b| <= 8·n·u_provider·(‖x‖_∞+‖b‖_∞)",
+        kind=:numerical,
+        rationale="N and T triangular kernels checked against the exact " *
+                  "unit-lower factor taken from the provider's own record",
+    ),
+    (
+        id=:provider_2x2_exact,
+        expression="defining residual == 0 exactly (Rational{BigInt})",
+        kind=:bit_preserving,
+        rationale="the live pivot values are converted exactly and the " *
+                  "documented normalization must reproduce the defining " *
+                  "2×2 system with zero residual",
+    ),
+    (
+        id=:qdldl_refusal,
+        expression="rank-deficient / structurally empty input ⇒ " *
+                   "ErrorException; regularized_entries == 0 on admission",
+        kind=:decision,
+        rationale="QDLDL refuses rather than silently regularizing in the " *
+                  "configurations exercised here, and the admitted fixture " *
+                  "is asserted to carry no hidden regularization (a " *
+                  "nonzero count would mean the factor is not a " *
+                  "factorization of A)",
+    ),
+    (
         id=:provider_gate,
         expression="Base.identify_package(name) === nothing ⇒ skip",
         kind=:infrastructure,
@@ -306,6 +413,10 @@ tolerance_ledger() = TOLERANCE_LEDGER
 end # module A01Tolerance
 
 using .A01Tolerance
+
+include(joinpath(@__DIR__, "provider_checks.jl"))
+
+using .A01ProviderChecks
 
 # ===========================================================================
 # Provider gates
@@ -1698,47 +1809,53 @@ end
 # 9. Provider gates — explicit skips, never silent passes
 # ===========================================================================
 
-@testset "A01 provider-gated contract checks" begin
-    provider_gate!(
-        :multifloats_generic_arithmetic, MULTIFLOATS_INSTALLED,
-        "MultiFloats resolvable: SDPX's generic multi-limb path is exercised",
-    )
-    provider_gate!(
-        :mfla_bk_grammar_comparison, MFLA_INSTALLED,
-        "MultiFloatLinearAlgebra is NOT resolvable in the default project " *
-        "(weakdep absent from the Manifest): the packet's BK kernel cannot " *
-        "be exercised here.  ADR-003 §3 — infrastructure, not a numeric " *
-        "failure, and not a silent pass.",
-    )
-    provider_gate!(
-        :bfla_ldlt_comparison, BFLA_INSTALLED,
-        "BigFloatLinearAlgebra is NOT resolvable in the default project: " *
-        "the BFLA 2×2 row-scale normalization cannot be exercised against " *
-        "the live kernel here.  ADR-003 §3.",
-    )
-    provider_gate!(
-        :qdldl_sparse_comparison, QDLDL_INSTALLED,
-        "QDLDL is NOT resolvable in the default project: the sparse " *
-        "provider route stays unverified.  ADR-003 §3.",
-    )
+# Availability is resolved from the ACTIVE PROJECT at run time, so the gate
+# reason cannot go stale the way static text did in the first A01 revision.
+const PROVIDER_AVAILABILITY = Dict(
+    leg => A01ProviderChecks.probe_provider(leg)
+    for leg in A01ProviderChecks.PROVIDER_LEGS
+)
 
-    @test PROVIDER_STATUS.multifloats
-    @test !PROVIDER_STATUS.mfla
-    @test !PROVIDER_STATUS.bfla
-    @test !PROVIDER_STATUS.qdldl
+for leg in A01ProviderChecks.PROVIDER_LEGS
+    availability = PROVIDER_AVAILABILITY[leg]
+    push!(PROVIDER_GATE_REPORT, (
+        id=Symbol("provider_", leg), available=availability.available,
+        reason=availability.reason,
+    ))
+end
 
-    println("A01 provider gate table:")
-    for gate in PROVIDER_GATE_REPORT
-        println("  gate=", gate.id, " available=", gate.available,
-            " reason=", gate.reason)
+println("A01b provider environment fingerprint: ",
+    A01ProviderChecks.provider_environment_fingerprint())
+for leg in A01ProviderChecks.PROVIDER_LEGS
+    availability = PROVIDER_AVAILABILITY[leg]
+    println("  gate=", leg, " package=", availability.package,
+        " available=", availability.available,
+        " selected=", leg in SELECTED_PROVIDER_LEGS)
+    println("      reason=", availability.reason)
+end
+
+# INFRASTRUCTURE ABORT: an explicitly requested leg whose provider is not
+# resolvable is an environment problem (ADR-003 §3), reported with a
+# distinct exit code and never as a numeric failure.
+for leg in SELECTED_PROVIDER_LEGS
+    availability = PROVIDER_AVAILABILITY[leg]
+    if !availability.available
+        println("A01 INFRASTRUCTURE ABORT: requested --provider=", leg,
+            " but ", availability.reason)
+        flush(stdout)
+        exit(2)
     end
+end
 
-    # --- MultiFloats: the one provider that IS present, exercised at
-    # multi-limb precision.  This is the second independent detector for a
-    # low-precision coefficient: a `Float64` √2 promoted into a 2-limb
-    # MultiFloat leaves `x² − 2 ≈ 4.4e-16`, which fails a 2⁻¹⁰⁰ bound.
-    if gate_available(:multifloats_generic_arithmetic)
-        @eval using MultiFloats
+@testset "A01 provider gates and live provider legs" begin
+    # --- MultiFloats is a resolvable dependency of SDPX itself and is
+    # exercised unconditionally: it is the second detector for a
+    # low-precision coefficient (a Float64 √2 promoted into a 2-limb
+    # MultiFloat leaves x² − 2 ≈ 4.4e-16, which fails a 2⁻¹⁰⁰ bound).
+    multifloats_available = Base.identify_package("MultiFloats") !== nothing
+    @test multifloats_available
+    if multifloats_available
+        @eval import MultiFloats
         MF = MultiFloats.MultiFloat{Float64,2}
         limb_bound = MF(2)^(-100)
         map = SDPX.PSDCoordinateMap(MF, 3)
@@ -1754,8 +1871,6 @@ end
                 @test map.primal_scale[k] == MF(1)
             end
         end
-        # The RSOC map must carry the same multi-limb precision, and its
-        # 2x2 head must still be an involution.
         transform = SDPX.RotatedSOCToSOC{MF}(4)
         kernel = SDPX._rsoc_transform_matrix(transform)
         @test abs(kernel[1, 1]^2 - MF(1) / MF(2)) <= limb_bound
@@ -1764,25 +1879,39 @@ end
         @test kernel[3, 3] == MF(1) && kernel[4, 4] == MF(1)
     end
 
-    # --- MFLA / BFLA: the packet's actual BK kernels.  Skipped, visibly.
-    if gate_available(:mfla_bk_grammar_comparison)
-        error("A01: MFLA became available; the gated BK comparison must be " *
-              "implemented and run rather than skipped")
-    else
-        @test_skip "MFLA Bunch–Kaufman 1/2/0 grammar + 2×2 normalization vs " *
-                   "the exact defining-identity reference (provider absent)"
+    # --- the three live provider legs
+    #
+    # FAIL-CLOSED GUARD.  In the DEFAULT mode (no --provider selector) a
+    # provider that is resolvable but whose leg did not run is a DEFECT, not
+    # a skip: that is precisely how three unimplemented legs stayed hidden
+    # behind a stale static sentence.  With an explicit selector the
+    # unselected legs are reported as `not_run` (the selector exists to run
+    # one leg per process, and `--provider=all` covers every leg).
+    default_mode = isempty(SELECTED_PROVIDER_LEGS)
+    for leg in A01ProviderChecks.PROVIDER_LEGS
+        availability = PROVIDER_AVAILABILITY[leg]
+        requested = leg in SELECTED_PROVIDER_LEGS
+        if requested
+            @test availability.available
+            A01ProviderChecks.run_provider_leg(leg, availability)
+        elseif availability.available && default_mode
+            @error "A01 fail-closed guard: provider leg is available but " *
+                   "was not selected; run `--provider=$(leg)` or " *
+                   "--provider=all" reason=availability.reason
+            @test !availability.available
+        elseif availability.available
+            println("  leg ", leg, " NOT RUN in this process " *
+                "(selected: ", join(SELECTED_PROVIDER_LEGS, ","),
+                "); `--provider=all` runs every leg in its own process. ",
+                availability.reason)
+        else
+            @test_skip availability.reason
+        end
     end
-    if gate_available(:bfla_ldlt_comparison)
-        error("A01: BFLA became available; the gated LDLT comparison must " *
-              "be implemented and run rather than skipped")
-    else
-        @test_skip "BFLA lower-authoritative LDLT grammar + row-scale 2×2 " *
-                   "normalization vs the exact reference (provider absent)"
-    end
-    if gate_available(:qdldl_sparse_comparison)
-        error("A01: QDLDL became available; the sparse-provider comparison " *
-              "must be implemented and run rather than skipped")
-    else
-        @test_skip "QDLDL sparse route numeric comparison (provider absent)"
-    end
+end
+
+println("A01 final provider gate table:")
+for gate in PROVIDER_GATE_REPORT
+    println("  gate=", gate.id, " available=", gate.available)
+    println("      reason=", gate.reason)
 end
