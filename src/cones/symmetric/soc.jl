@@ -540,26 +540,19 @@ end
 Largest `α ≥ 0` such that `x + α p` stays in the SOC; store into `Ref` `alpha`
 and return it. Handles the tangential / repeated-root and outside-cone cases.
 """
-function boundary_step!(cone::SOCone, x::AbstractVector, alpha::Base.RefValue, p::AbstractVector)
-    length(x) == length(p) == cone.dim || throw(DimensionMismatch())
-    T = promote_type(eltype(x), eltype(p))
+# Resolve the SOC boundary step from the quadratic coefficients c0, c1
+# (already doubled), c2 and the head coordinates t/dt.  This is the
+# authoritative post-processing shared by boundary_step! and the copy-free
+# dim-3 fast path so they agree bit for bit: identical branch tree, expression
+# order and special-value semantics.  alpha is set to the resolved step.
+@inline function _soc_boundary_from_coefficients(
+    c0, c1, c2, t, dt, alpha::Base.RefValue,
+)
+    T = promote_type(typeof(c0), typeof(t))
     z = zero(T)
     o = one(T)
     two = o + o
     four = two + two
-    t = T(x[1])
-    dt = T(p[1])
-    c0 = t * t
-    c1 = t * dt
-    c2 = dt * dt
-    @inbounds for i in 2:cone.dim
-        u = T(x[i])
-        du = T(p[i])
-        c0 -= u * u
-        c1 -= u * du
-        c2 -= du * du
-    end
-    c1 *= two
     if c0 < z || t < z
         alpha[] = z
         return z
@@ -598,6 +591,26 @@ function boundary_step!(cone::SOCone, x::AbstractVector, alpha::Base.RefValue, p
     step = head_step < det_step ? head_step : det_step
     alpha[] = step
     return step
+end
+
+function boundary_step!(cone::SOCone, x::AbstractVector, alpha::Base.RefValue, p::AbstractVector)
+    length(x) == length(p) == cone.dim || throw(DimensionMismatch())
+    T = promote_type(eltype(x), eltype(p))
+    two = one(T) + one(T)
+    t = T(x[1])
+    dt = T(p[1])
+    c0 = t * t
+    c1 = t * dt
+    c2 = dt * dt
+    @inbounds for i in 2:cone.dim
+        u = T(x[i])
+        du = T(p[i])
+        c0 -= u * u
+        c1 -= u * du
+        c2 -= du * du
+    end
+    c1 *= two
+    return _soc_boundary_from_coefficients(c0, c1, c2, t, dt, alpha)
 end
 
 # ---------------------------------------------------------------------------

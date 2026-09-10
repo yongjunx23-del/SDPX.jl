@@ -275,44 +275,15 @@ bit at any thread count.  Block scratch buffers are exclusive per slice.
         du2 = ds[offset + 2]
     end
     T = eltype(s)
-    z = zero(T)
-    o = one(T)
-    two = o + o
-    four = two + two
+    two = one(T) + one(T)
+    # Coefficients in the exact reference accumulation order (head first,
+    # then the two tail coordinates), then the shared authoritative
+    # post-processing so the fast path agrees bit for bit with
+    # `SymmetricCones.boundary_step!`.
     c0 = t * t - u1 * u1 - u2 * u2
     c1 = two * (t * dt - u1 * du1 - u2 * du2)
     c2 = dt * dt - du1 * du1 - du2 * du2
-    if c0 < z || t < z
-        alpha[] = z
-        return z
-    end
-    head_step = dt < z ? -t / dt : T(Inf)
-    if c0 == z
-        if c1 < z
-            det_step = z
-        elseif c1 == z
-            det_step = c2 >= z ? T(Inf) : z
-        else
-            det_step = c2 < z ? -c1 / c2 : T(Inf)
-        end
-    else
-        if c2 == z
-            det_step = c1 < z ? -c0 / c1 : T(Inf)
-        elseif c2 > z
-            disc = c1 * c1 - four * c0 * c2
-            if disc <= z
-                det_step = T(Inf)
-            else
-                sq = sqrt(disc)
-                det_step = c1 < z ? min((-c1 + sq) / (two * c2), (-c1 - sq) / (two * c2)) :
-                    -c0 / (c1 + sq)
-            end
-        else
-            det_step = -c0 / c1
-        end
-    end
-    alpha[] = min(head_step, det_step)
-    return alpha[]
+    return SymmetricCones._soc_boundary_from_coefficients(c0, c1, c2, t, dt, alpha)
 end
 
 function _runtime_step_threaded!(runtime::ProductConeRuntime, s, ds)
