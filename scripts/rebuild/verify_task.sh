@@ -93,6 +93,30 @@ else
 fi
 echo
 
+echo "--- 2b. worker log vs parent re-run --------------------------------------"
+# The worker's own final driver log and the parent's re-run should agree testset for
+# testset. They are the same driver at the same revision, so a difference means
+# flakiness or contention — or that a testset total DROPPED between the recorded run
+# and the committed file, which is invisible in either log alone.
+WORKER_LOG=""
+while IFS= read -r cand; do
+    case "$(basename "$cand")" in PARENT_*) continue ;; esac
+    # `ls -t` lists NEWEST first, so the FIRST non-PARENT entry is the worker's most
+    # recent run. Assigning unconditionally in this loop order would keep the oldest.
+    WORKER_LOG="$cand"
+    break
+done < <(ls -t "$ROOT/rebuild-reports/$ID"/*.log 2>/dev/null || true)
+if [ -n "$WORKER_LOG" ] && [ -f "$ROOT/rebuild-reports/$ID/PARENT_verify_driver.log" ]; then
+    echo "  newest worker log: $(basename "$WORKER_LOG")"
+    python3 "$SDPX/scripts/rebuild/compare_test_logs.py" \
+        "$WORKER_LOG" "$ROOT/rebuild-reports/$ID/PARENT_verify_driver.log" || true
+elif [ -z "$WORKER_LOG" ]; then
+    echo "  no worker log to compare against yet"
+else
+    echo "  parent re-run produced no log; nothing to compare"
+fi
+echo
+
 echo "--- 3. concurrent-worker guard -------------------------------------------"
 # `git status --porcelain` reports a brand-new directory as ONE entry with a
 # trailing slash (e.g. `?? src/planning/`), not as the files inside it. Comparing
@@ -112,12 +136,25 @@ while IFS= read -r line; do
     fi
 done < <(git -C "$REPO" status --porcelain)
 STRAY=()
+PARENT_OWNED=()
 for path in "${DIRTY[@]:-}"; do
     [ -n "$path" ] || continue
+    # The guard asks "is another WORKER live in this repo?" A worker can only write
+    # its allowlist. But the parent's own scripts and docs are also dirty while it
+    # works, and reporting those as "another worker" made the guard cry wolf on the
+    # first real run. No task's allowlist contains these paths, so exempting them
+    # cannot hide a worker's file.
+    case "$path" in
+        scripts/rebuild/*|docs/rebuild/*|docs/evidence/*) PARENT_OWNED+=("$path"); continue ;;
+    esac
     keep=0
     for a in "${ALLOW[@]}"; do [ "$path" = "$a" ] && keep=1; done
     [ "$keep" = 0 ] && STRAY+=("$path")
 done
+if [ "${#PARENT_OWNED[@]}" -gt 0 ]; then
+    echo "note: $(basename "$REPO") also has parent-owned files dirty (this is you):"
+    for s in "${PARENT_OWNED[@]}"; do echo "    $s"; done
+fi
 if [ "${#STRAY[@]}" -eq 0 ]; then
     echo "clean: every dirty path in $(basename "$REPO") belongs to $ID"
 else
