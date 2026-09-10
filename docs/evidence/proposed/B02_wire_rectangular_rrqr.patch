@@ -1,0 +1,19 @@
+diff --git a/src/BigFloatLinearAlgebra.jl b/src/BigFloatLinearAlgebra.jl
+index 716c752..116e06b 100644
+--- a/src/BigFloatLinearAlgebra.jl
++++ b/src/BigFloatLinearAlgebra.jl
+@@ -78,6 +78,14 @@ include("caches.jl")
+ # near the top, before `mpfr_context.jl`.)
+ include(joinpath("contracts", "factor_summary.jl"))
+ 
++# B02 - reusable rectangular RRQR cache, its in-place panel kernels, and the
++# explicit least-squares layer. Included last: they add methods to the shared
++# factor validators and to `applyQ!`/`refine_once!` defined above, and they
++# do not change any existing definition.
++include(joinpath("kernels", "qr_panel.jl"))
++include(joinpath("caches", "rectangular_qr.jl"))
++include(joinpath("solves", "least_squares.jl"))
++
+ # These factories keep the optional LinearSolve integration discoverable from
+ # the parent package without importing either weak dependency in the core.
+ function _linearsolve_extension()
