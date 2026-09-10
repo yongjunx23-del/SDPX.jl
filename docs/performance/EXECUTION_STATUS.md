@@ -17,9 +17,9 @@ Anything not executed is `NOT_STARTED`.
 | P2-01 | VERIFIED | `_runtime_step_threaded!` used `min(Threads.nthreads(), 8)`, so a `threads=1` solve could start 8 workers. Admitted budget now travels on `ProductConeRuntime.worker_budget`, set from the solve-requested value at HSD setup; diagnostics now report the admitted budget instead of a hardcoded 1. Verified: `requested=1 executed=1` with `Limits(threads=1)` in a 4-thread process. |
 | P2-02 | NOT_STARTED | deterministic executor not implemented. |
 | P2-03 | NOT_STARTED | wider independent-work parallelism not implemented. |
-| P3-00 | NOT_STARTED | iteration telemetry/policy state not implemented. |
-| P3-01 | NOT_STARTED | β single-factor experiment not run. |
-| P3-02 | NOT_STARTED | adaptive β controller not implemented. |
+| P3-00 | VERIFIED | `SDPX_DEBUG_ITER=1` prints one read-only line per accepted iteration (beta, alpha, backtracking, mu, mu_aff/mu, sigma, tau, kappa), complementing `SDPX_DEBUG_DIRECTION` and `SDPX_DEBUG_LINE_SEARCH`. |
+| P3-01 | VERIFIED (negative) | β single factor on CSDR: default(0.9) 105 iters / 15.04s, 0.95 107 / 15.14s, 0.98 118 / 16.65s, all certified. Legacy default retained; raising β is monotonically worse. All 105 iterations have backtracking=0, so the iteration count is set by σ-centering, not by β or line-search failure. See `docs/evidence/P3_01_BETA_EXPERIMENT.md`. |
+| P3-02 | NOT_STARTED | Deferred: the β measurement above makes a β-only controller unattractive on the primary workload; the evidence points to σ instead. Not implemented. |
 | P3-03 | NOT_STARTED | σ experiment not run. |
 | P4    | NOT_STARTED | selective additional correction not implemented. |
 | P5    | NOT_STARTED | large-KKT/sparse scaling not implemented. |

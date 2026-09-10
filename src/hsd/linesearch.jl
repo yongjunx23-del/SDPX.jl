@@ -260,6 +260,25 @@ Base.@noinline function _product_hsd_line_search!(
         end
         return false
     end
+    # P3-00 read-only acceptance trace.  Enabled by `SDPX_DEBUG_ITER=1`; it
+    # reports the realised fraction-to-boundary damping, the backtracking
+    # count and the iteration state so the beta/sigma experiments can be
+    # attributed to either the damping cap or the cone geometry.  Never read
+    # back by a solve.
+    if get(ENV, "SDPX_DEBUG_ITER", "0") == "1"
+        requested = state.iteration_beta
+        println(stderr, (
+            iter=base.record.iterations + 1,
+            beta=(requested === nothing ? "default(0.9)" : string(requested)),
+            alpha=alpha,
+            backtracking=backtracking,
+            mu=base.mu,
+            mu_aff_ratio=(base.mu > zero(T) ? base.mu_aff / base.mu : T(NaN)),
+            sigma_requested=state.iteration_sigma,
+            tau=base.tau,
+            kappa=base.kappa,
+        ))
+    end
     copy_owned!(base.x, base.xt)
     copy_owned!(base.s, base.st)
     copy_owned!(base.y, base.yt)
