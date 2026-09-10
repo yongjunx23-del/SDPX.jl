@@ -180,10 +180,23 @@ mutable struct ProductHSDTerminalRecoveryCache{T<:AbstractFloat}
     dual::Any
     builds::Int
     reuses::Int
+    # Wide pivoted-QR solve: cached right-hand-side independent reduction for
+    # the dual operator, plus its owned buffers and the recorded activation
+    # decision. `wide_qr === nothing` means the ordinary `F \ rhs` path runs.
+    wide_qr::Union{Nothing,ProductHSDWideQRReduction{T}}
+    wide_qr_buffer::Matrix{T}
+    wide_qr_active::Bool
+    wide_qr_reason::Symbol
+    wide_qr_provenance::NamedTuple
+    wide_qr_fallbacks::Int
 end
 
 ProductHSDTerminalRecoveryCache(::Type{T}) where {T<:AbstractFloat} =
-    ProductHSDTerminalRecoveryCache{T}(zero(UInt), nothing, nothing, nothing, 0, 0)
+    ProductHSDTerminalRecoveryCache{T}(
+        zero(UInt), nothing, nothing, nothing, 0, 0,
+        nothing, alloc_zeros(T, 0, 0), false, :not_attempted,
+        _product_hsd_wide_qr_provenance(), 0,
+    )
 
 @inline function _product_hsd_terminal_recovery_key(
     ::Type{T}, A::AbstractMatrix, b::AbstractVector,

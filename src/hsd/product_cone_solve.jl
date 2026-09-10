@@ -322,6 +322,34 @@ function _product_hsd_refined_optimal_result!(
                 _product_hsd_terminal_dual_factor(recovery.dual_operator)
             recovery.key = key
             recovery.builds += 1
+            # Guarded wide pivoted-QR reduction, built only for Float64 and only
+            # after a bitwise self-check against the ordinary solve on this
+            # operator. Any refusal keeps the ordinary `F \ rhs` path.
+            recovery.wide_qr = nothing
+            recovery.wide_qr_active = false
+            if T === Float64 && recovery.dual !== nothing
+                reduction = _product_hsd_wide_qr_reduce(recovery.dual)
+                if reduction === nothing
+                    recovery.wide_qr_reason = :unsupported_or_version_gated
+                else
+                    operator = recovery.dual_operator
+                    rows, columns = size(operator)
+                    recovery.wide_qr_buffer = alloc_zeros(T, columns, 1)
+                    if _product_hsd_wide_qr_selfcheck(
+                        recovery.dual, reduction, rows, columns,
+                    )
+                        recovery.wide_qr = reduction
+                        recovery.wide_qr_active = true
+                        recovery.wide_qr_reason = :selfcheck_passed
+                    else
+                        recovery.wide_qr_reason = :selfcheck_mismatch
+                    end
+                end
+            elseif T !== Float64
+                recovery.wide_qr_reason = :unsupported_arithmetic
+            else
+                recovery.wide_qr_reason = :no_dual_factor
+            end
         else
             recovery.reuses += 1
         end
@@ -387,7 +415,20 @@ function _product_hsd_refined_optimal_result!(
                 _store_owned_scalar!(rhs, row, -dual_residual[row])
             end
             _store_owned_scalar!(rhs, base.n + 1, -gap)
-            y .+= dual_factor \ rhs
+            if recovery.wide_qr_active && recovery.wide_qr !== nothing
+                buffer = recovery.wide_qr_buffer
+                fill!(buffer, zero(T))
+                @inbounds for row in 1:(base.n + 1)
+                    buffer[row, 1] = rhs[row]
+                end
+                _product_hsd_wide_qr_solve!(buffer, dual_factor, recovery.wide_qr)
+                @inbounds for row in 1:base.m
+                    _store_owned_scalar!(y, row, y[row] + buffer[row, 1])
+                end
+            else
+                recovery.wide_qr_fallbacks += 1
+                y .+= dual_factor \ rhs
+            end
         else
             dual_dense_A = T === Float64 ? refinement_A :
                            _product_hsd_owned_dense(A)

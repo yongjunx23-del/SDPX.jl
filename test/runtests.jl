@@ -10,6 +10,7 @@ include(joinpath(@__DIR__, "nonsymmetric_log_ratio.jl"))
 include(joinpath(@__DIR__, "float64_inverse_publication.jl"))
 include(joinpath(@__DIR__, "psd_nt_finite_gate.jl"))
 include(joinpath(@__DIR__, "constraint_contractions.jl"))
+include(joinpath(@__DIR__, "wide_qr_pivoted_adapter.jl"))
 
 include(joinpath(
     @__DIR__, "..", "benchmark", "general", "GenericConicBenchmark.jl",

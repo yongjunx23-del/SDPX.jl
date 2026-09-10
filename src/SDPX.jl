@@ -59,6 +59,9 @@ include("public/outputs.jl")
 include("kernels/api.jl")
 include("kernels/generic.jl")
 include("kernels/bigfloat.jl")
+# Guarded cached reduction for the wide pivoted-QR solve; defines
+# `ProductHSDWideQRReduction` before the product-cone state that caches it.
+include("kernels/wide_qr_pivoted.jl")
 include("la_backends/legacy.jl")
 include("la_backend.jl")
 include("kernels/extended_precision_blas/ExtendedPrecisionBLAS.jl")
