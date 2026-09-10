@@ -62,6 +62,36 @@ Regression: `test/certificate_layout_storage.jl` 48/48.
 Artifacts: `timing/fix_check/` (fixed-run JSON, witnesses, and the applied diff),
 baselines `timing/sdpx_c4.json` + `timing/scaled/scaled256_sdpx.json`.
 
+## Why the win is 1.4-1.6x and not more: the wide-QR solve is overhead-bound
+
+An instrumented attribution lane (separate worktree, baseline `e6a2acf`) measured the
+baseline cost of the recovered items on C4 and S256 and found exactly **10 eligible
+recoveries per solve, of which only 1 is accepted** (the other 9 pay the full least-squares
+cost and then fail the post-refinement maxabs/cone gates), with the dual wide solve
+accounting for 54-55% of core (58.8 ms of 109.8 ms on C4; 255.7 ms of 465.1 ms on S256).
+
+A temporary counter probe on this build confirmed the cache is fully effective: every solve
+reports exactly **1 build and 9 reuses**, primal and dual, with no partial misses. So the
+limited win is not a cache failure - it is the cost structure of the operator itself:
+
+| operator | `qr(ColumnNorm)` | cached `F \ b` | uncached `A \ b` | cached vs uncached |
+|---|---|---|---|---|
+| 141x772 (C4 dual) | 2.772 ms | 2.710 ms | 5.433 ms | **2.0x** |
+| 772x140 (C4 primal) | 2.152 ms | 0.185 ms | 2.342 ms | 12.7x |
+| 268x1284 (S256 dual) | 15.030 ms | 9.510 ms | 24.741 ms | **2.6x** |
+| 1284x267 (S256 primal) | 9.848 ms | 0.546 ms | 10.449 ms | 19.1x |
+
+For the **wide** dual operator the solve after caching is still 2.0-2.6x slower than needed
+because `F \ rhs` must apply the full 772- (resp. 1284-) wide reflector block: the operation
+is dominated by temporary allocation and LAPACK call overhead, not by flops. Predicting the
+observed savings from these microbenchmarks reproduces the measured 32.3 ms (C4) closely.
+
+Consequence for the next change: caching the wide-QR factor is exhausted as a lever. The
+remaining recovery cost can only be removed by (a) not paying 9 of 10 recoveries, or
+(b) replacing the wide least-squares by the `(n+1)x(n+1)` Gram/minimum-norm form that the
+high-precision path already uses - which is mathematically identical but changes
+conditioning and the last bits, so it is a numerics decision, not a mechanical reuse.
+
 ## Not claimed
 
 No claim for other problem families, other arithmetic (the MultiFloat/BigFloat refinement
