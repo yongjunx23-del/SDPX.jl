@@ -246,9 +246,83 @@ end
         for phase in ("first_compile", "warm_fresh_setup", "prepared_solve")
             @test occursin(phase, measure)
         end
-        # A true prepared replay is not reachable at this baseline; the harness
-        # must say so rather than imply it measured one.
-        @test occursin("prepared_solve_note", measure)
+        # Each phase must state what it is, so a reader cannot read more into a
+        # label than it carries: `prepared_solve` reuses the cross-solve
+        # structure cache; it is NOT a prepared-update replay.
+        @test occursin("phase_semantics", measure)
+        @test occursin("structure cache", measure)
+        # A true prepared-update replay is not reachable at this baseline; the
+        # harness must say so rather than imply it measured one.
+        @test occursin("prepared_update_replay_status", measure)
         @test occursin("does not exist at this baseline", measure)
+        @test occursin("clear_structure_cache!", measure)
+        @test occursin("symbolic_analyses_delta", measure)
+    end
+
+    @testset "the arithmetic axis and the environment are part of the identity" begin
+        # ADR-003 §7 applied to the environment axis: a number measured in a
+        # capability-enabled environment (MFLA/BFLA/QDLDL resolvable) is not
+        # comparable to one measured in the provider-free default project.
+        # These are STATIC checks that the harness *records* the axis; they do
+        # not verify that any particular measurement was honest.
+        manifest = _slurp("benchmark/rebuild/manifest.jl")
+        measure = _slurp("benchmark/rebuild/measure.jl")
+        @test manifest !== nothing
+        @test measure !== nothing
+        for token in ("ARITHMETIC_ARMS", ":float64", ":multifloat_x2",
+                      ":bigfloat_256")
+            @test occursin(token, manifest)
+        end
+        # The arithmetic arm must be chosen by an arithmetic id, never by a case
+        # name: `case_settings` receives only a type, tolerances and limits.
+        body_start = findfirst("function case_settings", manifest)[1]
+        body_stop = body_start + findfirst("\nend", manifest[body_start:end])[1]
+        body = manifest[body_start:body_stop]
+        @test !occursin("case.id", body)
+        @test !occursin("case.family", body)
+        @test occursin("::Type{T}", body)
+        # Environment identity: project + manifest hashes, provider versions and
+        # provider git revisions.
+        for token in ("environment_facts", "manifest_sha256", "project_sha256",
+                      "revision", "_git_revision", "resolvable_in_load_path",
+                      "providers")
+            @test occursin(token, manifest)
+        end
+        @test occursin("environment=", measure)
+        # Two-process rule: one arithmetic per process, single-threaded.
+        @test occursin("must run with -t1", measure)
+        @test occursin("invokelatest", measure)
+        @test occursin("return 3", measure)
+    end
+
+    @testset "BigFloat allocation axes are distinguished, never substituted" begin
+        # ADR-003 §7: Julia heap, cell identity, native allocator and RSS must be
+        # kept apart. Reporting one as another is a defect, so the harness must
+        # name all four and must mark the one it cannot measure.
+        measure = _slurp("benchmark/rebuild/measure.jl")
+        @test measure !== nothing
+        for axis in ("julia_heap", "cell_identity", "native_allocator", "rss")
+            @test occursin(axis, measure)
+        end
+        # The native allocator axis is `not_run` with a reason, not RSS.
+        @test occursin("native_allocator_status", measure)
+        @test occursin("no in-process counter for MPFR", measure)
+        @test occursin("cell_identity_snapshot", measure)
+    end
+
+    @testset "dynamic observation of this session (NOT a reachability proof)" begin
+        # Optional dynamic evidence, recorded as an observation of THIS session
+        # only. It is printed, never asserted as a proof: the absence of a loaded
+        # provider module in one session does not prove no path can ever reach
+        # one, and the presence of a resolvable package does not prove it is used.
+        loaded_names = String[string(pkg.name) for pkg in keys(Base.loaded_modules)]
+        provider_names = ["MultiFloats", "MultiFloatLinearAlgebra",
+                          "BigFloatLinearAlgebra", "QDLDL"]
+        observed_loaded = [name for name in provider_names if name in loaded_names]
+        resolvable = Dict{String,Bool}(name => (Base.identify_package(name) !== nothing)
+                                       for name in provider_names)
+        @info "dynamic observation (this session only, not a reachability proof)" loaded_provider_modules=observed_loaded resolvable_in_load_path=resolvable
+        @test observed_loaded isa Vector{String}
+        @test length(resolvable) == length(provider_names)
     end
 end
