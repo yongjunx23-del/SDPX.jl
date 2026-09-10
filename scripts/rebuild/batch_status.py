@@ -59,9 +59,17 @@ def verdict(path):
 def main(argv):
     root = argv[1] if len(argv) > 1 else os.getcwd()
     reports = os.path.join(root, "rebuild-reports")
-    ids = ["M02", "M03", "B02", "B03", "B04", "P02", "P03", "S07"]
+    # All 26 packet tasks, in DAG order. Batch 5 first because that is the live work,
+    # then the earlier batches, then the remaining integration and verification stages.
+    ids = argv[2].split(",") if len(argv) > 2 else [
+        "M02", "M03", "B02", "B03", "B04", "P02", "P03", "S07",
+        "A00", "A01", "S01", "S02", "S03", "S04", "S05", "S06",
+        "M01", "B01", "P01", "Q01", "I01", "D01",
+        "I02", "Q02", "V01", "I03",
+    ]
     print(f"{'task':5s} {'report':8s} {'acceptance':16s} {'parent re-run':11s} detail")
     print("-" * 86)
+    have = 0
     for tid in ids:
         rp = os.path.join(reports, tid, "report.json")
         if os.path.isfile(rp):
@@ -74,8 +82,11 @@ def main(argv):
                 acc = "UNPARSEABLE"
         else:
             acc = "-"
+        have += acc != '-'
         v, detail, _ = verdict(os.path.join(reports, tid, "PARENT_verify_driver.log"))
         print(f"{tid:5s} {'yes' if acc != '-' else 'no':8s} {acc:16s} {v:11s} {detail}")
+    print("-" * 86)
+    print(f"reports present: {have}/{len(ids)}")
     return 0
 
 
