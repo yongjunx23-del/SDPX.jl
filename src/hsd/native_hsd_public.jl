@@ -2113,8 +2113,6 @@ function _public_result_from_native_hsd(
         outputs.objectives ? primal_objective : nothing,
         outputs.objectives ? dual_objective : nothing,
         outputs.diagnostics === :none ? nothing : core.diagnostics,
-        nothing,
-        nothing,
         program.objective_sense,
         program.objective_constant,
     )
