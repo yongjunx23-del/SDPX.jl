@@ -17,6 +17,14 @@ lcov.info
 *.trace
 flamegraph*.svg
 
+# Python bytecode from the rebuild tooling under scripts/rebuild/.
+# This matters more than it looks: test/runtests.jl refuses to run while
+# `git status --porcelain` is non-empty, so importing one of those tools from
+# inside the package dirtied the tree and broke the suite's own precondition.
+# The same class of mistake as the bare `core` pattern that once hid src/core/.
+__pycache__/
+*.pyc
+
 # Generated benchmark inputs and results can be large.
 benchmark/CSDR/
 benchmark/general/data/**
