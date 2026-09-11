@@ -24,6 +24,32 @@ set -u
 MATRIX_LEGS_RUN=0
 MATRIX_LEGS_FAILED=0
 MATRIX_FAILED_LEGS=""
+MATRIX_RAN_LEGS=""
+
+# MATRIX_MODE=development (default): a driver that does not exist yet is
+# SKIPPED so the script stays runnable mid-wave. MATRIX_MODE=release: every leg
+# named "required" in driver_inventory.json must exist and run; a missing
+# required driver, a required leg that never ran, or zero legs run all make the
+# matrix exit nonzero. Only a green release-mode summary is release evidence.
+MATRIX_MODE="${MATRIX_MODE:-development}"
+INVENTORY="$(cd "$(dirname "$0")" && pwd)/driver_inventory.json"
+
+leg_state() {  # leg_state <name> -> prints required|optional|undeclared
+    python3 - "$INVENTORY" "$1" <<'PY'
+import json, sys
+try:
+    inv = json.load(open(sys.argv[1]))
+except Exception:
+    print("undeclared"); sys.exit(0)
+name = sys.argv[2]
+if name in inv.get("required", {}):
+    print("required")
+elif name in inv.get("optional", {}):
+    print("optional")
+else:
+    print("undeclared")
+PY
+}
 
 # Overridable so the same matrix can be run against a PINNED revision set built by
 # scripts/rebuild/pin_revisions_env.sh. That matters because `rebuild-env`
@@ -75,7 +101,16 @@ run() {  # run <name> <workdir> <project> <script> [ENVS="K=V ..."] [ARGS="--fla
     # throughout a wave so the parent can verify each report the moment it lands,
     # and "not written yet" is not a red result.
     if [ ! -f "$wd/$script" ]; then
-        echo "SKIP  driver not written yet: $wd/$script"
+        state="$(leg_state "$name")"
+        if [ "$MATRIX_MODE" = "release" ] && [ "$state" != "optional" ]; then
+            echo "FAIL  required driver missing: $wd/$script (inventory: $state)"
+            MATRIX_LEGS_RUN=$((MATRIX_LEGS_RUN + 1))
+            MATRIX_LEGS_FAILED=$((MATRIX_LEGS_FAILED + 1))
+            MATRIX_FAILED_LEGS="$MATRIX_FAILED_LEGS ${name}(missing)"
+            MATRIX_RAN_LEGS="$MATRIX_RAN_LEGS $name"
+        else
+            echo "SKIP  driver not written yet: $wd/$script"
+        fi
         return 0
     fi
     ( cd "$wd" && env $envs julia --project="$proj" -t1 "$script" $args ) > "$log" 2>&1
@@ -92,6 +127,7 @@ run() {  # run <name> <workdir> <project> <script> [ENVS="K=V ..."] [ARGS="--fla
     # be anything but "ok" is not a verdict, and a caller writing
     # `... ; echo MATRIX_EXIT=$?` reads exactly that vacuous value.
     MATRIX_LEGS_RUN=$((MATRIX_LEGS_RUN + 1))
+    MATRIX_RAN_LEGS="$MATRIX_RAN_LEGS $name"
     if [ "$rc" -ne 0 ] || [ "${fails:-0}" -ne 0 ] || [ "${fail_lines:-0}" -ne 0 ]; then
         MATRIX_LEGS_FAILED=$((MATRIX_LEGS_FAILED + 1))
         MATRIX_FAILED_LEGS="$MATRIX_FAILED_LEGS $name"
@@ -156,6 +192,38 @@ run P03            "$BFLA" "$ENV"  test/rebuild/P03.jl
 run S07            "$SDPX" "$ENV"  test/rebuild/S07.jl
 
 echo
+if [ "$MATRIX_MODE" = "release" ]; then
+    # Release gate: every required inventory leg must have run (not skipped),
+    # and at least one leg must have run at all. Both checks are independent of
+    # per-leg failures, which are already aggregated above.
+    release_missing="$(python3 - "$INVENTORY" <<'PY'
+import json, sys
+try:
+    inv = json.load(open(sys.argv[1]))
+except Exception as e:
+    print("__INVENTORY_UNREADABLE__", e); sys.exit(0)
+for name in inv.get("required", {}):
+    print(name)
+PY
+)"
+    if [ "$release_missing" != "${release_missing#__INVENTORY_UNREADABLE__}" ]; then
+        echo "release mode: $release_missing"
+        MATRIX_LEGS_FAILED=$((MATRIX_LEGS_FAILED + 1))
+    else
+        while IFS= read -r leg; do
+            [ -z "$leg" ] && continue
+            case " $MATRIX_RAN_LEGS " in
+                *" $leg "*) ;;
+                *) echo "release mode: required leg never ran: $leg"
+                   MATRIX_LEGS_FAILED=$((MATRIX_LEGS_FAILED + 1)) ;;
+            esac
+        done <<< "$release_missing"
+    fi
+    if [ "$MATRIX_LEGS_RUN" -eq 0 ]; then
+        echo "release mode: zero legs ran"
+        MATRIX_LEGS_FAILED=$((MATRIX_LEGS_FAILED + 1))
+    fi
+fi
 echo "legs_run=$MATRIX_LEGS_RUN  legs_failed=$MATRIX_LEGS_FAILED  failed_legs=${MATRIX_FAILED_LEGS:- none}"
 if [ "$MATRIX_LEGS_FAILED" -ne 0 ]; then
     echo "MATRIX_EXIT=1"

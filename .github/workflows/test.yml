@@ -46,32 +46,41 @@ jobs:
           fi
 
   test:
-    name: Julia ${{ matrix.julia }} / ${{ matrix.os }} / ${{ matrix.threads }} threads
+    name: Julia ${{ matrix.julia }} / ${{ matrix.os }} / ${{ matrix.threads }} threads${{ matrix.canary && ' (canary)' || '' }}
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
+    continue-on-error: ${{ matrix.canary == true }}
     strategy:
       fail-fast: false
       matrix:
-        # Two ubuntu legs cover the black-box E2E on LTS/serial and the current
-        # release/threaded runtime. Specialist checks use validation/ and
-        # benchmark jobs rather than additional package-test profiles.
+        # Required legs cover LTS/serial plus the audited runtime on all three
+        # platforms.  The audited release is Julia 1.12: the wide-QR pivoted
+        # adapter's permission gate only accepts version (1,12), and the
+        # support policy is LTS + audited release, not floating '1'.
         include:
           - julia: '1.10'
             os: ubuntu-latest
             threads: '1'
+          - julia: '1.12'
+            os: ubuntu-latest
+            threads: '4'
+          # Spot-check the other platforms once, on the audited release. The
+          # thread count is part of the matrix rather than fixed because several
+          # kernels have threaded and serial paths that must agree exactly.
+          - julia: '1.12'
+            os: macOS-latest
+            threads: '4'
+          - julia: '1.12'
+            os: windows-latest
+            threads: '4'
+          # Floating '1' is a non-blocking canary for the next Julia release
+          # (currently 1.13, which is unsupported: see the R2-A kwargs-splat
+          # BoundsError). It keeps forward drift visible without gating merges.
           - julia: '1'
             os: ubuntu-latest
             threads: '4'
-          # Spot-check the other platforms once, on the current release. The
-          # thread count is part of the matrix rather than fixed because several
-          # kernels have threaded and serial paths that must agree exactly.
-          - julia: '1'
-            os: macOS-latest
-            threads: '4'
-          - julia: '1'
-            os: windows-latest
-            threads: '4'
+            canary: true
     steps:
       - uses: actions/checkout@v4
       - uses: julia-actions/setup-julia@v2

@@ -22,7 +22,9 @@ element type.
 
 ## Installation
 
-Requires Julia 1.10 or newer (Julia 1.12 recommended).
+Supported Julia versions: **1.10 (LTS) and 1.12 (audited)**. Julia 1.13 is
+currently unsupported — see the pinned issue for the known `factor_receipt`
+regression; CI tracks it on a non-blocking canary leg.
 
 ```julia
 using Pkg
