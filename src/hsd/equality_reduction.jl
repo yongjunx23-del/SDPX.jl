@@ -453,12 +453,20 @@ function hsd_equality_reduce(
     rhs_scale = max(one(T), _hsd_eq_maxabs(h))
     consistency_tol = max(rank_tol, T(100) * eps(T) * rhs_scale)
     if ambiguous
+        # No rank authority could settle the equality panel. Do not refuse:
+        # return the identity reduction (nothing eliminated — the equality
+        # rows stay in the reduced program as :zero product rows) and let the
+        # row-space stage plus the mandatory original-coordinate certificate
+        # decide. A genuinely dependent panel then surfaces as a singular
+        # core factorization -> NumericalFailure, never a wrong certificate.
+        all_rows = collect(1:m)
         return HSDEqualityReduction{T}(
-            HSDEqualityRankAmbiguous, canonical, nothing,
-            zero_rows, active_rows, full_to_reduced,
-            alloc_zeros(T, n), alloc_zeros(T, n, 0), range_basis, upper,
-            pivots, independent, dependent, transfer, rank,
-            rank_tol, consistency_tol, alloc_zeros(T, m),
+            HSDEqualityReady, canonical, canonical,
+            Int[], all_rows, all_rows,
+            alloc_zeros(T, n), IdentityRankBasis(T, n), alloc_zeros(T, n, 0),
+            alloc_zeros(T, 0, 0),
+            Int[], Int[], Int[], alloc_zeros(T, 0, 0),
+            0, zero(T), consistency_tol, alloc_zeros(T, m),
         )
     end
 

@@ -524,7 +524,6 @@ end
 )
     reduction.status === HSDEqualityReady || return reduction.status ===
         HSDEqualityInconsistent ? :equality_inconsistent :
-        reduction.status === HSDEqualityRankAmbiguous ? :equality_rank_ambiguous :
         :equality_reduction_not_ready
     product_rank_reason === :ready || return product_rank_reason
     product_rank_ambiguous && return :product_rank_ambiguous
@@ -1704,28 +1703,6 @@ function _public_native_hsd_core(
             0,
             nothing,
             true,
-            x_full,
-            s_full,
-            y_full,
-            setup_seconds,
-            0.0,
-            0.0,
-        )
-    elseif reduction.status === HSDEqualityRankAmbiguous
-        plan = _native_hsd_plan(
-            program, canonical, reduction, route, settings;
-            fixed_trace_applicable=fixed_trace_plan !== nothing,
-        )
-        return canonical, reduction, _native_hsd_core_result(
-            T,
-            InsufficientPrecision,
-            :equality_rank_ambiguous,
-            plan,
-            reduction,
-            0,
-            0,
-            nothing,
-            false,
             x_full,
             s_full,
             y_full,
