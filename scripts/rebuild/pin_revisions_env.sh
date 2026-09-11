@@ -173,6 +173,12 @@ MANIFEST="$TARGET/PINNED_REVISIONS.txt"
     for i in 0 1 2; do
         printf '%-5s %s\n' "${NAMES[$i]}" "$(git -C "$TARGET/${DIRS[$i]}" rev-parse HEAD)"
     done
+    # The Julia version is a REQUIRED input, not a detail: measured for this
+    # environment, 27 of the Manifest's 60 entries carry no git-tree-sha1 and
+    # every one of those 27 is a stdlib, so their content follows from the
+    # interpreter rather than from the Manifest. A record with the SHAs and the
+    # Manifest but no Julia version is under-specified. See Q02_PREP.md section 6.
+    echo "JULIA $(julia --version)"
     echo "# Manifest.toml is gitignored and therefore NOT pinned by the commit;"
     echo "# the live tree's copy was carried over. Runs are attributable to"
     echo "# (commit, manifest sha256):"
