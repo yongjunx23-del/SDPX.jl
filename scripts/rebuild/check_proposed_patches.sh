@@ -92,26 +92,46 @@ echo "$MAPPING" | while IFS='|' read -r p r; do
                 fail=$((fail + 1))
             fi
         else
-            echo "  applies  [$r] $p"
+            echo "  applies       [$r] $p"
         fi
+    elif git -C "$dir" apply --check --reverse "$path" >/dev/null 2>&1; then
+        # THE PATCH IS ALREADY IN THE TREE. This is the benign refusal, and
+        # conflating it with a corrupt or stale patch was a real defect in the
+        # first version of this script: once I02 applied the SDPX and BFLA
+        # patches, the check reported six REFUSED and "RESULT: FAIL", which reads
+        # as "six patches are broken" when in fact six patches had landed. The
+        # reverse check is the standard way to tell the two apart.
+        echo "  already-in    [$r] $p"
     else
-        echo "  REFUSED  [$r] $p: $(head -1 /tmp/cpp_err)"
+        echo "  REFUSED       [$r] $p: $(head -1 /tmp/cpp_err)"
         fail=$((fail + 1))
     fi
 done
 
-# The loop above runs in a subshell, so recompute the failure count here rather
-# than trusting a variable that was never updated in this shell.
-refused=0
+# The loop above runs in a subshell, so recompute the counts here rather than
+# trusting variables that were never updated in this shell. Three states, not two:
+# applies cleanly / already applied (benign) / genuinely refused (a failure).
+refused=0; already=0; clean=0
 while IFS='|' read -r p r; do
     [ -z "${p:-}" ] && continue
     dir="$(repo_dir "$r")"
-    git -C "$dir" apply --check "$PROPOSED/$p" >/dev/null 2>&1 || refused=$((refused + 1))
+    if git -C "$dir" apply --check "$PROPOSED/$p" >/dev/null 2>&1; then
+        clean=$((clean + 1))
+    elif git -C "$dir" apply --check --reverse "$PROPOSED/$p" >/dev/null 2>&1; then
+        already=$((already + 1))
+    else
+        refused=$((refused + 1))
+    fi
 done <<< "$MAPPING"
 
 echo
+echo "clean=$clean  already-in=$already  refused=$refused"
 if [ "$struct_rc" -ne 0 ] || [ "$refused" -ne 0 ]; then
-    echo "RESULT: FAIL ($refused patch(es) do not apply; structural rc=$struct_rc)"
+    echo "RESULT: FAIL ($refused patch(es) genuinely do not apply; structural rc=$struct_rc)"
     exit 1
+fi
+if [ "$already" -ne 0 ]; then
+    echo "RESULT: OK ($clean apply cleanly, $already already in the tree, 0 refused)"
+    exit 0
 fi
 echo "RESULT: OK (all mapped patches structurally valid and apply cleanly)"
