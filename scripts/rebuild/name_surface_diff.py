@@ -74,8 +74,10 @@ def main():
     # outlive what it excused.
     ap.add_argument("--allow-shape-changed", default="",
                     help="comma-separated binding names whose shape change is declared")
+    ap.add_argument("--allow-removed", default="",
+                    help="comma-separated binding names whose REMOVAL is declared")
     ap.add_argument("--allow-note", default="",
-                    help="why those shape changes are legitimate; printed with the finding")
+                    help="why those changes are legitimate; printed with the finding")
     args = ap.parse_args()
 
     before = load(args.before)
@@ -125,6 +127,15 @@ def main():
     stale = [n for n in allowed if n not in changed_names]
     effective = [e for e in shape_changed if e["name"] not in allowed_hit]
 
+    # A REMOVAL can be declared too, and for the same reason a shape change can:
+    # M01 IP-3 is a relocation whose whole point is that three private helpers move
+    # to their durable home, which is a removal at this surface. The allowance has
+    # to be named here, and a stale one fails, so it cannot outlive its reason.
+    allowed_rm = [s for s in (n.strip() for n in args.allow_removed.split(",")) if s]
+    allowed_rm_hit = [n for n in allowed_rm if n in removed_names]
+    stale_rm = [n for n in allowed_rm if n not in removed_names]
+    effective_rm = [n for n in removed_names if n not in allowed_rm_hit]
+
     report = {
         "before_snapshot": args.before,
         "after_snapshot": args.after,
@@ -133,6 +144,9 @@ def main():
         "n_after": len(a),
         "names_added": added_names,
         "names_removed": removed_names,
+        "names_removed_allowed": allowed_rm_hit,
+        "names_removed_allowed_note": args.allow_note,
+        "stale_removed_allowances": stale_rm,
         "signatures_added": sig_added,
         "signatures_removed": sig_removed,
         "signatures_replaced": replaced,
@@ -150,7 +164,13 @@ def main():
         print(f"    + {n}  ({a[n]['kind']}, exported={a[n]['exported']})")
     print(f"NAMES REMOVED          : {len(removed_names)}")
     for n in removed_names:
-        print(f"    - {n}  ({b[n]['kind']}, exported={b[n]['exported']})")
+        tag = "ALLOWED" if n in allowed_rm_hit else "!"
+        print(f"    {tag} - {n}  ({b[n]['kind']}, exported={b[n]['exported']})")
+    if allowed_rm_hit:
+        print(f"    removals allowed because: "
+              f"{args.allow_note or '(NO NOTE GIVEN)'}")
+    if stale_rm:
+        print(f"STALE REMOVAL ALLOWANCES: {len(stale_rm)} — {stale_rm} matched no removal")
     print(f"SIGNATURES ADDED to pre-existing generics (declare, do not fail) : "
           f"{sum(len(e['added']) for e in sig_added)} on {len(sig_added)} name(s)")
     for e in sig_added:
@@ -188,7 +208,8 @@ def main():
         with open(args.json_out, "w") as fh:
             json.dump(report, fh, indent=2, sort_keys=True)
 
-    bad = (removed_names or sig_removed or replaced or effective or uninspectable or stale)
+    bad = (effective_rm or sig_removed or replaced or effective or uninspectable
+           or stale or stale_rm)
     if bad:
         print("GATE: FAIL (removed / replaced / shape-changed / uninspectable / stale allowance)")
         return 1
