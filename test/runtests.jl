@@ -13,7 +13,9 @@ include(joinpath(@__DIR__, "constraint_contractions.jl"))
 include(joinpath(@__DIR__, "wide_qr_pivoted_adapter.jl"))
 include(joinpath(@__DIR__, "relaxed_liveness_profile.jl"))
 
-include(joinpath(@__DIR__, "GenericConicBenchmark.jl"))
+include(joinpath(
+    @__DIR__, "..", "research", "benchmark", "general", "GenericConicBenchmark.jl",
+))
 using .GenericConicBenchmark
 
 const E2E_CASE_IDS = (
