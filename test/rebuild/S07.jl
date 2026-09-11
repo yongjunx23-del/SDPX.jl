@@ -135,6 +135,13 @@ Core.eval(S07ModeB, quote
     include($(joinpath(S07_SESSION, "cancellation.jl")))
 end)
 
+# Whether the package itself already binds the S07 surface, measured from the
+# loaded package rather than assumed from the checkout: wiring is I02's move, so
+# this driver must run, and mean something, on both a wired and an unwired tree.
+# `PreparedUpdateState` is defined by the S07 sources and by nothing else in
+# SDPX, so it is a faithful one-bit probe for "I02 has landed".
+const S07_WIRED = isdefined(SDPX, :PreparedUpdateState)
+
 # =====================================================================
 # The S07 name surface, pulled out of a mode module.
 #
@@ -301,14 +308,28 @@ function s07_sec0(api, mode::Symbol, api_other)
     @test api.ProblemChange !== api_other.ProblemChange
     @test api.SessionBoundary !== api_other.SessionBoundary
 
-    # Names the sources define that SDPX already owns would shadow or extend a
-    # production binding when I02 wires them. Must be none.
+    # Names the sources define. BEFORE wiring, any of them that SDPX already owns
+    # would shadow or extend a production binding when I02 wires them: must be
+    # none. AFTER wiring the same names are EXPECTED in SDPX -- that is the point
+    # of wiring -- so the fact that must hold inverts to "the package binds every
+    # one of them", i.e. the include graph is complete. Both directions are real
+    # assertions: neither is an `isempty` that a wired tree would silently pass.
     own = s07_top_level_definitions(api)
+    wired = S07_WIRED
     collisions = sort([String(n) for n in own if isdefined(SDPX, n)])
+    missing = sort([String(n) for n in own if !isdefined(SDPX, n)])
+    rec(:sources_are_wired_into_sdpx, wired)
     rec(:source_definition_count, length(own))
-    rec(:name_collisions_with_sdpx, length(collisions))
-    isempty(collisions) || @info "S07 name collisions with SDPX" collisions
-    @test isempty(collisions)
+    if wired
+        rec(:names_unbound_in_sdpx_after_wiring, length(missing))
+        rec(:names_bound_in_sdpx_after_wiring, length(own) - length(missing))
+        isempty(missing) || @info "S07 names unbound in SDPX" missing
+        @test isempty(missing)
+    else
+        rec(:name_collisions_with_sdpx, length(collisions))
+        isempty(collisions) || @info "S07 name collisions with SDPX" collisions
+        @test isempty(collisions)
+    end
     # The only foreign generics the sources extend are Base's. Counted, not
     # assumed, so `Base.showerror` extension is a recorded fact.
     rec(:base_extension_count, s07_base_extensions())
@@ -661,6 +682,13 @@ function s07_sec4(api, mode::Symbol)
     req_wide = s07_request(p; n=n, kind=:ldlt, min_bits=wide_bits)
 
     # --- CONTROL: mutate the handle's request, then call refactor_numeric! ---
+    # I02 FIXED this path. The admission refusal now REVOKES
+    # (`docs/evidence/proposed/I02_fix_refactor_numeric_lease.patch`), so the
+    # assertions below state the FIXED facts. They were `== false`, `is_valid`,
+    # and `threw` before the fix, and the pre-fix arm is recorded at
+    # rebuild-reports/I02/logs/S07_driver_rollback_unfixed_lease.log, where
+    # exactly these five assertions fail. A silent rollback of the fix therefore
+    # turns this block red again instead of quietly restoring the old contract.
     h = factor_handle(p, req_ok)
     @test prepare_factor!(h).allowed
     r_ok = refactor_numeric!(h, A)
@@ -670,16 +698,20 @@ function s07_sec4(api, mode::Symbol)
     rec(:control_refactor_ok, r_bad.ok)
     rec(:control_refactor_revoked_flag, r_bad.revoked)
     rec(:control_lease_still_bound, is_valid(h.lease))
-    rec(:control_lease_digest_matches_request,
-        h.lease.bound_request_digest == request_digest(h.request))
+    digest_matches = h.lease.bound_request_digest == request_digest(h.request)
+    rec(:control_lease_digest_matches_request, digest_matches)
     rec(:control_lease_bound_digest_matches_request, r_ok.ok &&
         h.lease.bound_request_digest == request_digest(req_ok))
     @test !r_bad.ok
-    @test r_bad.revoked == false          # measured: the refusal does NOT revoke
-    @test is_valid(h.lease)               # ... and the lease still authorizes
-    @test h.lease.bound_request_digest != request_digest(h.request)
-    # The §4 cleanup observation refuses to run while a lease is valid, so on
-    # this path the failure evidence cannot even be collected.
+    @test r_bad.revoked == true           # an admission refusal IS a failure (ADR-002 §4)
+    @test !is_valid(h.lease)              # ... so the lease stops authorizing
+    # ADR-002 §4's acceptance is a DISJUNCTION: the lease must be invalid, or its
+    # digest must match the request the handle now carries. Asserting only the
+    # first would claim less than the contract and would pass on a lease that had
+    # been re-pointed rather than revoked.
+    @test !is_valid(h.lease) || digest_matches
+    # The §4 cleanup observation used to REFUSE to run while a lease was valid, so
+    # on the pre-fix path the failure evidence could not be collected at all.
     threw = try
         commit_failure_observation(h)
         false
@@ -687,7 +719,7 @@ function s07_sec4(api, mode::Symbol)
         true
     end
     rec(:control_commit_observation_throws, threw)
-    @test threw
+    @test !threw                          # the observation IS collectable
 
     # --- MY PATH: plan first, revoke first, then touch the provider ----------
     p2 = MockMFLA(n, n, :ldlt)
@@ -705,23 +737,27 @@ function s07_sec4(api, mode::Symbol)
     rec(:guarded_lease_valid_after_plan, is_valid(h2.lease))
     @test !is_valid(h2.lease)
     # Now the update would swap in the new request. The provider call below is
-    # the SAME call the control made, with the SAME `revoked = false` return.
+    # the SAME call the control made; after the I02 fix it reports `revoked=true`
+    # at BOTH sites -- the plan revoked first, and the refusal revokes again,
+    # idempotently. The two paths now agree, which is the point of the fix: the
+    # lease outcome no longer depends on which caller noticed the failure.
     h2.request = req_wide
     r2 = refactor_numeric!(h2, A)
     rec(:guarded_refactor_ok, r2.ok)
     rec(:guarded_refactor_revoked_flag, r2.revoked)
     rec(:guarded_lease_valid_after_refused_refactor, is_valid(h2.lease))
     @test !r2.ok
-    @test r2.revoked == false
-    @test !is_valid(h2.lease)             # ... but the plan already revoked
+    @test r2.revoked == true
+    @test !is_valid(h2.lease)             # ... revoked, whether by plan or by refusal
     obs = commit_failure_observation(h2)
     rec(:guarded_commit_observation_available, true)
     rec(:guarded_commit_lease_state, Symbol(lowercase(string(obs.lease_state))))
     rec(:guarded_commit_lease_event, Symbol(lowercase(string(obs.lease_revoked_at))))
     @test obs.lease_state === LeaseRevoked
     # CONTROL CONTRAST: identical provider call, different lease outcome because
-    # the guarded path revoked BEFORE the provider was touched.
-    @test S07_RECORD[(mode, :control_lease_still_bound)] == true
+    # the guarded path revoked BEFORE the provider was touched. Read from the
+    # control section above, which I02 inverted to the fixed expectation.
+    @test S07_RECORD[(mode, :control_lease_still_bound)] == false
     @test !is_valid(h2.lease)
 
     # A plan that needs a new request refuses to proceed with the old one.
@@ -746,7 +782,15 @@ function s07_sec5(api, mode::Symbol)
     rec(k, v) = s07_rec!(mode, k, v)
     rec(:sha_source, isempty(S07_SHA) ? :unavailable : :git)
     rec(:sha_is_complete_40_hex, occursin(r"^[0-9a-f]{40}$", S07_SHA))
-    sha = occursin(r"^[0-9a-f]{40}$", S07_SHA) ? S07_SHA : repeat("0", 40)
+    # F7 FIX (I02). The fallback used to be `repeat("0", 40)`: forty DIGITS, and
+    # a digits-only string is case-invariant, so `uppercase(sha) === sha` and the
+    # `uppercase_sha_refused` assertion below asserted `:bad_sha` for a *valid*
+    # sha -- an empty premise whenever the driver runs outside a git checkout
+    # (`s07_git_sha()` returns "" there, swallowing the failure at :63-69). The
+    # fallback now carries hex letters, which it must, but the assertion below no
+    # longer depends on it at all: it is fed a LITERAL uppercase sha, so the
+    # property "a complete sha must be lowercase" holds wherever the driver runs.
+    sha = occursin(r"^[0-9a-f]{40}$", S07_SHA) ? S07_SHA : repeat("ab", 20)
 
     A = s07_spd(5; shift=0.2, seed=7)
     b = collect(1.0:5.0)
@@ -802,7 +846,10 @@ function s07_sec5(api, mode::Symbol)
     rec(:verify_missing_field, Symbol.(v_field.failures))
     @test !v_field.ok && v_field.failures == [:missing_field]
 
-    # SHA completeness
+    # SHA completeness. The uppercase case is fed a LITERAL (F7): deriving it
+    # from the checkout made the assertion's premise depend on where the driver
+    # ran, and with the old digits-only fallback it was not merely fragile but
+    # false -- `uppercase` of forty digits is the same valid lowercase sha.
     rec(:short_sha_refused, s07_error_code(api) do
         api.replay_require_complete_sha("382428a")
     end)
@@ -810,10 +857,10 @@ function s07_sec5(api, mode::Symbol)
         api.replay_require_complete_sha("382428a")
     end == :bad_sha
     rec(:uppercase_sha_refused, s07_error_code(api) do
-        api.replay_require_complete_sha(uppercase(sha))
+        api.replay_require_complete_sha("0123456789ABCDEF0123456789ABCDEF01234567")
     end)
     @test s07_error_code(api) do
-        api.replay_require_complete_sha(uppercase(sha))
+        api.replay_require_complete_sha("0123456789ABCDEF0123456789ABCDEF01234567")
     end == :bad_sha
 
     # corruption is detected, not silently replayed: flip one hex digit of the
