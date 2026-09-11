@@ -606,3 +606,67 @@ survive a refactor (R8); and one capability P03's own contract marks required is
 `unsupported`, with the gate computing `FAIL` from the rows rather than asserting it (R9).
 Deleting the old carriers did not change that, and no deletion was allowed to: what was
 removed was one dead function, two undocumented debug knobs, and seven false comments.
+
+---
+
+# PARENT ADDENDUM (appended after I03 closed — I03's findings above are unchanged)
+
+This addendum records two things the parent measured **after** the verdict above was
+written. It does not revise any of I03's markings; it fills in the two rows that were
+pending on the parent's own numbers.
+
+## R3 — satisfied, and the numbers it was satisfied on
+
+I03 marked R3 `satisfied` on the parent's pinned run. The parent's own logs:
+
+| check | revision | result |
+| --- | --- | --- |
+| SDPX `Pkg.test()` | `69c6c09` | `tests passed`; 170 testsets; `failcols=0`; **Broken=7 / Pass=9392 / Total=9399** — the inherited baseline exactly |
+| MFLA `Pkg.test()` | `e3805c9` | `tests passed`; outer **1875/1875**; aggregate **4164/4164**; `failcols=0` |
+| BFLA `Pkg.test()` | `f087a72` | `tests passed`; **10864/10864**; `failcols=0` |
+| 28-leg driver matrix | release pin | **`legs_run=28  legs_failed=0  failed_legs= none`**; `MATRIX_EXIT=0`; a `Test Summary` on every leg |
+
+Logs: `rebuild-reports/PARENT_VERIFICATION/release_revision/`. All three pinned worktrees were
+verified `dirty_paths=0` after the runs.
+
+**Why these transfer to the shipped revision `16ef605`.** The runs were taken at a pin of
+`69c6c09`. Between that pin and `16ef605` the only differing files are
+`docs/rebuild/final_verdict.md`, `test/rebuild/release_matrix.jl` and the I03 retirement
+commits already present at the pin — `git diff --stat 69c6c09..16ef605 -- src/` is the
+justification for the suites, and `release_matrix.jl` occurs **0 times** in
+`run_driver_matrix.sh`, so no matrix leg can observe it. **The retirement changed no measured
+behaviour**: the SDPX suite reproduces the baseline to the count after deleting a dead
+carrier, four null debug blocks and seven false comments.
+
+## R4 — retired: the record now names the release revision, and the check passes
+
+I03 marked R4 `not_satisfied` because `docs/rebuild/RELEASE_REVISIONS.txt` pinned `c4b109a`,
+a pre-retirement revision. That is now fixed rather than recorded:
+
+    pin_revisions_env.sh 16ef605 e3805c9 f087a72   -> all three verified, dirty_paths=0
+    check_reconstruction.py --record <release record> --workspace <ws>
+      -> RESULT: PASS — the release environment is reconstructible from the record
+         60 recorded / 60 reconstructed entries, dependency set identical,
+         all three Manifest sha256 match, 27 sha-less entries all matched stdlibs
+         RECON EXIT=0
+
+**R4 is therefore satisfied for the release triple.** The record's own caveat is unchanged and
+still true: `Manifest.toml` is gitignored and cannot be pinned by a commit, so the check
+verifies a sha256 *against the record*; if someone edited both the Manifest and the recorded
+hash it would pass. Provenance here is not mechanical, and that is stated in the record.
+
+## One instrument defect found by I03 and fixed by the parent
+
+I03 found three assertions in `test/rebuild/release_matrix.jl` that cannot fail —
+`@test agree >= 0`, `@test checked >= 0`, and `@test true` standing in for the
+capability-table check that the same run records as `not_run`. The third counted a check that
+never executed as a passing assertion. Fixed in `2ef68fa`; measured before and after, same
+tier, same host:
+
+    before   Q02 release matrix (fast) |  44        44   0.4s
+    after    Q02 release matrix (fast) |  42    1   43   0.4s
+
+The `Broken` column did not exist before, which is why the never-run check was invisible.
+Q02's report citation was corrected from `44 44` to `42 1 43` with a limitation recording what
+it had said. This is the same class as `public_sign_patches == 0`, and it was found by asking
+what could make the value differ — not by anything failing.

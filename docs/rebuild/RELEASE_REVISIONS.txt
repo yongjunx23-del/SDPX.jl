@@ -52,9 +52,32 @@
 # is in it. The one thing a dirty live tree does contaminate is the gitignored
 # Manifest.toml, which is copied rather than pinned -- its sha256 is checked.
 
-SDPX c4b109a529482db69ab0dcbb6cfd8e707da6d39e
-MFLA e3805c9607295f0e173567b060d4035e826310ca
-BFLA f087a72f2001088ea520b67588cf18c0d3fce2e8
+# ---------------------------------------------------------------------------
+# RE-PINNED BY THE PARENT AT I03, so that the record names the RELEASE revision
+# rather than a pre-retirement one. The previous body pinned SDPX c4b109a; the
+# release revision is 16ef605, which differs from c4b109a by the batch-5/I02/Q02/
+# V01 deliverables and by I03's carrier retirement. Re-checked, not assumed:
+#
+#   check_reconstruction.py --record <this file> --workspace <ws>
+#     -> RESULT: PASS -- the release environment is reconstructible from the record
+#        60 recorded / 60 reconstructed entries, dependency set identical,
+#        all three Manifest sha256 match, 27 sha-less entries all matched stdlibs,
+#        RECON EXIT=0
+#        log: rebuild-reports/PARENT_VERIFICATION/release_revision/recon_release_record.log
+#
+# live-tree state at record time:
+#   SDPX  16ef60549561e8b0fd9b22c515a3c5b75e23bac4  dirty_paths=0
+#   MFLA  e3805c9607295f0e173567b060d4035e826310ca  dirty_paths=0
+#   BFLA  f087a72f2001088ea520b67588cf18c0d3fce2e8  dirty_paths=0
+#
+# All three trees were CLEAN here, so unlike the previous record there is no
+# dirty-live-tree caveat to disclose. The Manifest.toml caveat still applies and
+# is stated below.
+# ---------------------------------------------------------------------------
+
+SDPX  16ef60549561e8b0fd9b22c515a3c5b75e23bac4
+MFLA  e3805c9607295f0e173567b060d4035e826310ca
+BFLA  f087a72f2001088ea520b67588cf18c0d3fce2e8
 
 JULIA julia version 1.12.6
 # Manifest.toml is gitignored and therefore NOT pinned by the commit; the live
