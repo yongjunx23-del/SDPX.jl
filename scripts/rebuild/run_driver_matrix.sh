@@ -19,21 +19,35 @@
 
 set -u
 
-ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
-SDPX="$ROOT/SDPX.jl"
-MFLA="$ROOT/MultiFloatLinearAlgebra.jl"
-BFLA="$ROOT/BigFloatLinearAlgebra.jl"
-ENV="$ROOT/rebuild-env"
+# Overridable so the same matrix can be run against a PINNED revision set built by
+# scripts/rebuild/pin_revisions_env.sh. That matters because `rebuild-env`
+# resolves the three packages by dev path with no `git-tree-sha1`, so a run
+# against the live trees measures whatever a worker last saved:
+#
+#   SDPX_REBUILD_ROOT=/tmp/sdpxpin SDPX_REBUILD_ENV=/tmp/sdpxpin-env \
+#   SDPX_REPO=/tmp/sdpxpin/SDPX MFLA_REPO=/tmp/sdpxpin/MFLA \
+#   BFLA_REPO=/tmp/sdpxpin/BFLA scripts/rebuild/run_driver_matrix.sh /tmp/mx-pinned
+#
+ROOT="${SDPX_REBUILD_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
+SDPX="${SDPX_REPO:-$ROOT/SDPX.jl}"
+MFLA="${MFLA_REPO:-$ROOT/MultiFloatLinearAlgebra.jl}"
+BFLA="${BFLA_REPO:-$ROOT/BigFloatLinearAlgebra.jl}"
+ENV="${SDPX_REBUILD_ENV:-$ROOT/rebuild-env}"
 OUT="${1:-$ROOT/rebuild-reports/I01_prework/driver_matrix}"
-export JULIA_DEPOT_PATH="$ROOT/rebuild-env-depot:$HOME/.julia"
+export JULIA_DEPOT_PATH="${SDPX_REBUILD_DEPOT:-$ROOT/rebuild-env-depot}:$HOME/.julia"
 export JULIA_NUM_THREADS=1
 
 mkdir -p "$OUT"
 echo "workspace   $ROOT"
 echo "env         $ENV"
 echo "outdir      $OUT"
-for r in SDPX.jl MultiFloatLinearAlgebra.jl BigFloatLinearAlgebra.jl; do
-    printf '%-28s %s\n' "$r" "$(git -C "$ROOT/$r" rev-parse --short HEAD)"
+# Print the revisions AND the working-tree state actually used. A revision alone
+# is not enough: a dirty tree means the run is not attributable to that commit,
+# and the reader of this log has no other way to know.
+for r in "$SDPX" "$MFLA" "$BFLA"; do
+    printf '%-28s %s  dirty_paths=%s\n' "$(basename "$r")" \
+        "$(git -C "$r" rev-parse --short HEAD 2>/dev/null || echo '??')" \
+        "$(git -C "$r" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
 done
 echo "julia       $(julia --version)"
 echo
