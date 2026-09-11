@@ -46,23 +46,7 @@
 #    rather than re-routed.
 #=====================================================================#
 
-if nameof(@__MODULE__) === :SDPXKKT
-    # Already inside the standalone container: define names here.
-    const LOADED_S03_SESSION = true
-elseif isdefined(@__MODULE__, :SDPX) && !isdefined(@__MODULE__, :SDPXKKT_CONTAINER)
-    # Spliced into the SDPX module itself.
-    const LOADED_S03_SESSION = true
-else
-    isdefined(@__MODULE__, :SDPXKKT_CONTAINER) || error(
-        "kkt/session.jl must be loaded after kkt/operator.jl",
-    )
-    Core.eval(SDPXKKT_CONTAINER, :(const LOADED_S03_SESSION = true))
-    Core.eval(SDPXKKT_CONTAINER, :(include($(String(@__FILE__)))))
-end
-
-if !isdefined(@__MODULE__, :LOADED_S03_SESSION)
-    error("kkt/session.jl bootstrap failed")
-elseif !isdefined(@__MODULE__, :KKTSession)
+if !isdefined(@__MODULE__, :KKTSession)
     using LinearAlgebra
 
     # ------------------------------------------------------------------ #

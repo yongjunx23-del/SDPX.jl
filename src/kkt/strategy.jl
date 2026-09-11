@@ -32,21 +32,7 @@
 #    to reach the direction, never a licence to change what is being solved.
 #=====================================================================#
 
-if nameof(@__MODULE__) === :SDPXKKT
-    const LOADED_S03_STRATEGY = true
-elseif isdefined(@__MODULE__, :SDPX) && !isdefined(@__MODULE__, :SDPXKKT_CONTAINER)
-    const LOADED_S03_STRATEGY = true
-else
-    isdefined(@__MODULE__, :SDPXKKT_CONTAINER) || error(
-        "kkt/strategy.jl must be loaded after kkt/operator.jl",
-    )
-    Core.eval(SDPXKKT_CONTAINER, :(const LOADED_S03_STRATEGY = true))
-    Core.eval(SDPXKKT_CONTAINER, :(include($(String(@__FILE__)))))
-end
-
-if !isdefined(@__MODULE__, :LOADED_S03_STRATEGY)
-    error("kkt/strategy.jl bootstrap failed")
-elseif !isdefined(@__MODULE__, :KKTBlockLayout)
+if !isdefined(@__MODULE__, :KKTBlockLayout)
 
     # ------------------------------------------------------------------ #
     # 1. Representation layout

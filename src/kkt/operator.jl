@@ -82,37 +82,11 @@
 #    handle, the refinement ladder) is derived from this operator, never the
 #    reverse.
 #
-#    Wrapper convention
-#    ------------------
-#    Written to be `include`-able from `src/SDPX.jl` (where the parent module
-#    is `SDPX` and `include` splices into it) AND from `test/rebuild/S03.jl`
-#    (where a standalone module is created by the test).  All parent bindings
-#    are reached through the `SDPX` const so both paths resolve identically.
+#    These definitions splice into the SDPX module at include time.
 #=====================================================================#
 
-if nameof(@__MODULE__) === :SDPXKKT
-    # Already inside the standalone container: define names here.
-    const SDPXKKT_BOOTSTRAPPED = true
-elseif isdefined(@__MODULE__, :SDPX) && !isdefined(@__MODULE__, :SDPXKKT_CONTAINER)
-    # Spliced into the SDPX module itself: define names directly in it.
-    const SDPXKKT_BOOTSTRAPPED = true
-else
-    # First load from a test script: create the container module, bind the
-    # parent package as `SDPX`, and evaluate this file into the container.
-    if !isdefined(@__MODULE__, :SDPXKKT_CONTAINER)
-        const SDPXKKT_CONTAINER = Module(:SDPXKKT)
-        Core.eval(SDPXKKT_CONTAINER, :(const SDPX = $(Base.loaded_modules[
-            only(filter(p -> p.name == "SDPX", collect(keys(Base.loaded_modules)))),
-        ])))
-    end
-    Core.eval(SDPXKKT_CONTAINER, :(const SDPXKKT_BOOTSTRAPPED = true))
-    Core.eval(SDPXKKT_CONTAINER, :(include($(String(@__FILE__)))))
-end
-
-if !isdefined(@__MODULE__, :SDPXKKT_BOOTSTRAPPED)
-    error("kkt/operator.jl bootstrap failed")
-elseif !isdefined(@__MODULE__, :KKTStrategyKind)
-    # --- definitions, spliced into SDPX (or into SDPXKKT) ---------------
+if !isdefined(@__MODULE__, :KKTStrategyKind)
+    # --- definitions, spliced into SDPX ---------------------------------
     using LinearAlgebra
 
     #=================================================================#

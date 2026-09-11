@@ -23,20 +23,9 @@ using Test
 using LinearAlgebra
 
 import SDPX
-
-const SDPX_ROOT = normpath(joinpath(@__DIR__, "..", ".."))
-const SRC = joinpath(SDPX_ROOT, "src")
-
-include(joinpath(SRC, "kkt", "operator.jl"))
-include(joinpath(SRC, "kkt", "session.jl"))
-include(joinpath(SRC, "kkt", "strategy.jl"))
-include(joinpath(SRC, "kkt", "refinement_policy.jl"))
-
-# The bootstrap in `operator.jl` splices into the current module when `SDPX` is
-# already imported, and creates a container module otherwise.  This makes the
-# test work on both paths.
-const S03 = isdefined(@__MODULE__, :SDPXKKT_CONTAINER) ?
-    getfield(@__MODULE__, :SDPXKKT_CONTAINER) : @__MODULE__
+# KKT session types are exercised on the real SDPX module (the previous
+# standalone-container load tested a separate copy of these sources).
+const S03 = SDPX
 
 #=========================================================================#
 # Fixtures

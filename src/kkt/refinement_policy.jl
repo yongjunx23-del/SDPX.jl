@@ -19,21 +19,7 @@
 #    gap between them is visible evidence rather than an assumption.
 #=====================================================================#
 
-if nameof(@__MODULE__) === :SDPXKKT
-    const LOADED_S03_REFINEMENT = true
-elseif isdefined(@__MODULE__, :SDPX) && !isdefined(@__MODULE__, :SDPXKKT_CONTAINER)
-    const LOADED_S03_REFINEMENT = true
-else
-    isdefined(@__MODULE__, :SDPXKKT_CONTAINER) || error(
-        "kkt/refinement_policy.jl must be loaded after kkt/operator.jl",
-    )
-    Core.eval(SDPXKKT_CONTAINER, :(const LOADED_S03_REFINEMENT = true))
-    Core.eval(SDPXKKT_CONTAINER, :(include($(String(@__FILE__)))))
-end
-
-if !isdefined(@__MODULE__, :LOADED_S03_REFINEMENT)
-    error("kkt/refinement_policy.jl bootstrap failed")
-elseif !isdefined(@__MODULE__, :RefinementPolicy)
+if !isdefined(@__MODULE__, :RefinementPolicy)
 
     # ------------------------------------------------------------------ #
     # 1. The policy
