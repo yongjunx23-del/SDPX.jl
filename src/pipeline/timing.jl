@@ -34,8 +34,6 @@ function _with_frontend_timing(
             diagnostics.parameter_history,
             diagnostics.warnings,
             diagnostics.termination,
-            diagnostics.attempts,
-            diagnostics.precision_ladder,
         )
     end
     return SDPResult{T}(

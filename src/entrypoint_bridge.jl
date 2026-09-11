@@ -424,8 +424,6 @@ function _bridge_legacy_diagnostics(
         NamedTuple[],
         copy(native.warnings),
         native.termination,
-        (),
-        nothing,
     )
 end
 

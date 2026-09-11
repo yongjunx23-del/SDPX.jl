@@ -17,8 +17,6 @@ include(joinpath(
     @__DIR__, "..", "research", "benchmark", "general", "GenericConicBenchmark.jl",
 ))
 using .GenericConicBenchmark
-include(joinpath(@__DIR__, "..", "research", "benchmark", "robustness",
-    "test_route_guard.jl"))
 include(joinpath(
     @__DIR__, "..", "research", "benchmark", "general", "test_v2.jl",
 ))
