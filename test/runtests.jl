@@ -645,7 +645,6 @@ include(joinpath(@__DIR__, "structure_cache_synchronization.jl"))
 include(joinpath(@__DIR__, "native_structure_diagnostics.jl"))
 include(joinpath(@__DIR__, "gap_normalization.jl"))
 include(joinpath(@__DIR__, "public_certificate_owner.jl"))
-include(joinpath(@__DIR__, "public_sign_boundary.jl"))
 include(joinpath(@__DIR__, "recovered_accuracy.jl"))
 include(joinpath(@__DIR__, "predictor_rescue.jl"))
 include(joinpath(@__DIR__, "certificate_layout_storage.jl"))
@@ -677,4 +676,3 @@ include(joinpath(@__DIR__, "..", "research", "benchmark", "bootstrap", "physics"
 # the manual-only allowlist (quick-checks.yml), not the package test target.
 include(joinpath(@__DIR__, "affine_builder_ownership.jl"))
 include(joinpath(@__DIR__, "blas_controller_diagnostics.jl"))
-include(joinpath(@__DIR__, "test_mature_solver_interface.jl"))

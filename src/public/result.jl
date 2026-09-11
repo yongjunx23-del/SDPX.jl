@@ -108,8 +108,6 @@ struct Result{T<:AbstractFloat}
     primal_objective_data::Union{Nothing,T}
     dual_objective_data::Union{Nothing,T}
     diagnostics::Union{Nothing,AbstractCoreDiagnostics}
-    iteration_history::Union{Nothing,Vector{NamedTuple}}
-    performance_trace::Union{Nothing,PerformanceTrace}
     objective_sense::Union{Minimize,Maximize}
     objective_constant::T
 end
@@ -186,28 +184,6 @@ requested [`Outputs`](@ref).
 function diagnostics(result::Result)
     result.diagnostics === nothing && throw(ResultFieldNotRetained(:diagnostics))
     return result.diagnostics
-end
-
-"""
-Return a copy of the retained per-iteration history.
-
-Throws `ResultFieldNotRetained` when history retention was disabled.
-"""
-function iteration_history(result::Result)
-    result.iteration_history === nothing &&
-        throw(ResultFieldNotRetained(:history))
-    return copy(result.iteration_history)
-end
-
-"""
-Return the retained phase-level performance trace.
-
-Throws `ResultFieldNotRetained` when trace retention was disabled.
-"""
-function performance_trace(result::Result)
-    result.performance_trace === nothing &&
-        throw(ResultFieldNotRetained(:trace))
-    return result.performance_trace
 end
 
 """Return the retained primal objective in the original objective sense."""
@@ -537,31 +513,6 @@ termination_status(result::Result) = status(result)
     return Float64(value)
 end
 
-function _mature_trace_seconds(trace::PerformanceTrace)
-    final = trace.final
-    if final isa NamedTuple && haskey(final, :total_seconds)
-        value = _mature_seconds_value(final.total_seconds)
-        value !== nothing && return value
-    end
-    phases = trace.phases
-    if phases isa NamedTuple
-        for key in (:total_seconds, :reference_seconds)
-            haskey(phases, key) || continue
-            value = _mature_seconds_value(phases[key])
-            value !== nothing && return value
-        end
-    end
-    setup = trace.setup
-    if setup isa NamedTuple
-        for key in (:pipeline_seconds, :core_seconds, :total_seconds)
-            haskey(setup, key) || continue
-            value = _mature_seconds_value(setup[key])
-            value !== nothing && return value
-        end
-    end
-    return nothing
-end
-
 function _mature_diagnostics_seconds(diagnostics)
     hasproperty(diagnostics, :timings) || return nothing
     timings = getproperty(diagnostics, :timings)
@@ -581,17 +532,11 @@ end
 """
     solve_time(result) -> Union{Float64,Nothing}
 
-Total solve time in seconds when retained, else `nothing`. Prefers the
-retained `performance_trace` (`final.total_seconds`, then phase reference
-seconds), then falls back to retained `diagnostics` timings (`total`, then
-`core`). Never throws for a not-retained field.
+Total solve time in seconds when retained, else `nothing`. Reads the
+retained `diagnostics` timings (`total`, then `core`). Never throws for a
+not-retained field.
 """
 function solve_time(result::Result)
-    trace = result.performance_trace
-    if trace !== nothing
-        value = _mature_trace_seconds(trace)
-        value !== nothing && return value
-    end
     stored = result.diagnostics
     stored === nothing && return nothing
     return _mature_diagnostics_seconds(stored)

@@ -20,23 +20,6 @@ function _r1_lp_model(::Type{T}; precision_bits::Union{Nothing,Int}=nothing) whe
     return model, x
 end
 
-@testset "R1-A: AccuracyContract matches runtime at solve level" begin
-    model, _ = _r1_lp_model(Float64)
-    settings = SDPX.Settings(Float64; verbosity=0)
-    c = SDPX.accuracy_contract(model, settings)
-    @test c.storage_type === Float64
-    @test c.effective_bits == 53
-    @test c.working_precision_bits == 53
-    @test c.verification_precision_bits == 53
-    @test c.rounding === RoundNearest
-    @test c.finite_required === true
-
-    result = SDPX.optimize!(model; settings=settings)
-    @test SDPX.status(result) === :optimal
-    rc = SDPX.accuracy_contract(model, result)
-    @test rc.storage_type === Float64
-    @test rc.effective_bits == 53
-end
 
 @testset "R1-B: owned results are independent copies (Float64)" begin
     # Prepared-session repeated solves return independent result objects.
@@ -105,9 +88,6 @@ end
                 r1 = SDPX.optimize!(model; settings=settings, outputs=outputs)
                 @test SDPX.status(r1) === :optimal
                 @test SDPX.certificate(r1).valid
-                rc = SDPX.accuracy_contract(model, r1)
-                @test rc.storage_type === BigFloat
-                @test rc.effective_bits == bits
 
                 # Owned result arrays: mutation is local to the result.
                 v1 = SDPX.value(r1)

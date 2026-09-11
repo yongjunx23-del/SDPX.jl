@@ -1,6 +1,6 @@
 module SDPX
 
-using LinearAlgebra, Base.Threads, MathOptInterface, SHA, SparseArrays, Serialization
+using LinearAlgebra, Base.Threads, SHA, SparseArrays, Serialization
 using LinearAlgebra: LowerTriangular, UpperTriangular, Symmetric, issuccess, mul!
 
 include("cone_algebra.jl")
@@ -126,9 +126,7 @@ include("sparse_la.jl")
 include("preprocessing.jl")
 include("prepared.jl")
 include("validation.jl")
-include("spectrum.jl")
 include("frontend/high_level_solve.jl")
-include("performance_trace.jl")
 include("public/result.jl")
 # R0-P4 opt-in half-Power factor-pair backend: reviewed arithmetic ported into
 # an internal package namespace (design step 4).  These modules are internal
@@ -138,9 +136,7 @@ include("public/result.jl")
 include("hsd/core_route_planner.jl")
 include("hsd/native_hsd_public.jl")
 include("public/optimize.jl")
-include("accuracy_contract.jl")
 include("entrypoint_bridge.jl")
-include("moi_wrapper.jl")
 
 # --- rebuild packet: integration cutover (@integration/core-cutover) ---------
 #
@@ -193,14 +189,11 @@ export is_optimal, is_primal_infeasible, is_dual_infeasible
 export primal_status, dual_status, termination_status
 export num_variables, num_constraints
 export variable_by_name, constraint_by_name, variable_names, constraint_names
-export certificate, diagnostics, iteration_history, performance_trace
-export Optimizer
+export certificate, diagnostics
 export clear_structure_cache!, set_structure_cache_enabled!
 export symbolic_analysis_count, symbolic_analysis_counts, symbolic_analysis_delta
-export AccuracyContract, AccuracyClass, UnsupportedAccuracyContext
 export AccuracyVerified, AccuracyUnsupported, AccuracyNumericalFailure
 export AccuracyInfrastructureFailure
-export accuracy_contract, accuracy_class
 
 # Symmetric-cone algebra (Subagent I) lives in the nested module
 # `SymmetricCones` (Nonnegative / SOC / PSDTriangle kernels). It is not part of

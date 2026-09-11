@@ -43,7 +43,6 @@ const _R1B_OUTPUTS = SDPX.Outputs(:all, :all, :all;
                 r1 = SDPX.optimize!(model; settings=settings, outputs=_R1B_OUTPUTS)
                 @test SDPX.status(r1) === :optimal
                 @test SDPX.certificate(r1).valid
-                @test SDPX.accuracy_contract(model, r1).effective_bits == bits
                 v1 = SDPX.value(r1)
                 snapshot = copy(v1)
                 v1[1] += BigFloat(1)
@@ -117,7 +116,6 @@ end
             @test cert.valid
             @test cert.primal_residual <= cert.primal_limit
             @test cert.dual_residual <= cert.dual_limit
-            @test SDPX.accuracy_contract(model, result).effective_bits == bits
             # analytic optimum of min 3x1+x2 s.t. x1+2x2=4, x>=0 is x1=0, x2=2
             @test abs(SDPX.value(result)[2] - 2) <= BigFloat(10)^(-(bits ÷ 8))
         end
