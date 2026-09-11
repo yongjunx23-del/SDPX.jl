@@ -492,10 +492,6 @@ end
 _matrix_nnz(A::SparseMatrixCSC) = nnz(A)
 _matrix_nnz(A::AbstractMatrix) = count(!iszero, A)
 
-function planned_backend_name(plan::ExecutionPlan)
-    return planned_backend_name(plan.backend_config)
-end
-
 """
     _lp_sparse_final_la_config(plan, payload)
 

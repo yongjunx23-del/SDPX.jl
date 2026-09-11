@@ -1,12 +1,3 @@
-function _process_peak_rss_bytes()
-    # Sys.maxrss() is bytes on Linux and macOS in supported Julia releases.
-    try
-        return Int(Sys.maxrss())
-    catch exception
-        _recoverable(exception) || rethrow()
-        return 0
-    end
-end
 """Safety margin applied to the workspace estimate so it is an upper bound
 rather than a central guess; see `estimate_sdp_workspace_bytes`."""
 const WORKSPACE_ESTIMATE_MARGIN_NUMERATOR = 3
