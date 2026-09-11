@@ -1,0 +1,782 @@
+{
+  "_comment": [
+    "Machine-readable capability table source. Rendered by",
+    "scripts/rebuild/gen_support_matrix.py into docs/rebuild/support_matrix.md and",
+    "rebuild-reports/Q02/capability_table.tsv.",
+    "",
+    "WHAT IS CURATED HERE AND WHAT IS NOT. Only the MAPPING is curated: which",
+    "capability exists, which reports exercise it, and (optionally) which acceptance",
+    "indices within those reports speak to it. The VERDICTS are not curated -- the",
+    "generator reads them from rebuild-reports/<ID>/report.json and from the logs",
+    "those reports cite, and uses the report's own vocabulary. A capability listed",
+    "here with no passing evidence is rendered as `not_verified` with its",
+    "`blocked_by` text; it is never omitted and never rounded up.",
+    "",
+    "`reports` with no `acceptance_indices` means EVERY acceptance item of that",
+    "report speaks to the capability. Use explicit indices when only some do.",
+    "`force_state` records a reviewed judgement that a script must not improve on.",
+    "`evidence_class` records WHAT KIND of evidence it is: `certificate`",
+    "(original-coordinate certificate, ADR-003), `numeric_verified` (a measurement",
+    "against a stated tolerance), `structural` (reachability/surface/gates),",
+    "`contract` (provider or API contract, no numerics claimed), or `documentation`",
+    "(prose only, never counted as passing evidence)."
+  ],
+  "preamble": "One row per PUBLIC CAPABILITY, with the evidence that exists for it as of\nthe revisions in `RELEASE_REVISIONS.txt`. A capability is not listed because it\nis exported; it is listed because the packet asked a question about it and\nsomething measured the answer.\n\n**`documentation` is not evidence of behaviour.** A row whose `evidence_class` is\n`documentation` has prose behind it and nothing else; it is listed so that it is\nnot silently absent, and it is excluded from the passing-evidence count.\n\n**A certificate is not a measurement.** ADR-003 separates a *numeric* verification\n(a measurement that passed against a stated tolerance) from a *strict certificate*\n(an original-coordinate certificate that is constructed and checked). A row whose\n`evidence_class` is `certificate` claims the second; a row whose class is\n`numeric_verified` claims only the first, and reading it as a certificate is the\nconfusion ADR-003 exists to prevent. No row in this table is `certificate`.",
+  "capabilities": [
+    {
+      "id": "SDPX-COMPILE",
+      "title": "Compile a user problem into a canonical form with a reversible transform stack",
+      "reports": [
+        "S01",
+        "S02"
+      ],
+      "evidence_class": "numeric_verified"
+    },
+    {
+      "id": "SDPX-ADMIT",
+      "title": "Admit a problem into a session whose state is independent of later user mutation",
+      "reports": [
+        "S01",
+        "S02"
+      ],
+      "evidence_class": "numeric_verified"
+    },
+    {
+      "id": "SDPX-ROUNDTRIP",
+      "title": "Round-trip primal/dual/ray/objective-offset maps through the transform stack",
+      "reports": [
+        "S01"
+      ],
+      "acceptance_indices": [
+        0,
+        4,
+        5,
+        6
+      ],
+      "evidence_class": "numeric_verified"
+    },
+    {
+      "id": "SDPX-PRECISION-UPGRADE",
+      "title": "Precision upgrade recovers no accuracy that Float64 already destroyed",
+      "reports": [
+        "S01"
+      ],
+      "acceptance_indices": [
+        2
+      ],
+      "evidence_class": "numeric_verified"
+    },
+    {
+      "id": "SDPX-PUBLIC-NO-SIGN-PATCH",
+      "title": "The public/MOI layer applies no sign patch of its own",
+      "reports": [
+        "S01"
+      ],
+      "acceptance_indices": [
+        3
+      ],
+      "force_state": "partially_verified",
+      "blocked_by": "S01 marks this partially_verified and PARENT_FINDINGS_BATCH5.md F21 sharpens why: one leg of the cited evidence (`public_sign_patches == 0`) is a HARDCODED LITERAL at src/core/compiled_problem.jl:475, asserted against itself at test/rebuild/S01.jl:474, so that assertion cannot fail. The independent evidence is a grep proving no sign-patch code exists. I03_RELEASE_DECISION.md R2 re-scopes the required evidence to a runtime observation during a real MOI solve, which no task has run. This row is NOT rounded up.",
+      "evidence_class": "structural"
+    },
+    {
+      "id": "SDPX-HSD-LOOP",
+      "title": "A single production HSD loop, with no second loop called by production",
+      "reports": [
+        "S02",
+        "I02"
+      ],
+      "acceptance_indices": [
+        0,
+        1,
+        3,
+        4,
+        5,
+        6
+      ],
+      "evidence_class": "numeric_verified"
+    },
+    {
+      "id": "SDPX-NO-SECOND-HSD-LOOP",
+      "title": "No second HSD loop is reachable from production",
+      "reports": [
+        "S02"
+      ],
+      "acceptance_indices": [
+        2
+      ],
+      "evidence_class": "structural"
+    },
+    {
+      "id": "SDPX-STEP-STRATEGY",
+      "title": "Augmented / Schur / FixedTrace step strategies share one five-equation oracle",
+      "reports": [
+        "S03"
+      ],
+      "acceptance_indices": [
+        0,
+        1,
+        3
+      ],
+      "evidence_class": "numeric_verified"
+    },
+    {
+      "id": "SDPX-SOC-LOWRANK",
+      "title": "Inherited SOC low-rank and PSD structure does not regress",
+      "reports": [
+        "S03"
+      ],
+      "acceptance_indices": [
+        4
+      ],
+      "evidence_class": "numeric_verified"
+    },
+    {
+      "id": "SDPX-PROVIDER-ADDITION",
+      "title": "Adding a provider requires no modification to the HSD loop",
+      "reports": [
+        "S03"
+      ],
+      "acceptance_indices": [
+        2
+      ],
+      "evidence_class": "structural"
+    },
+    {
+      "id": "SDPX-CERT-REJECTION",
+      "title": "Certification rejects NaN/Inf, wrong dual maps and fake infeasibility rays with a typed outcome",
+      "reports": [
+        "S04"
+      ],
+      "acceptance_indices": [
+        0,
+        1,
+        3
+      ],
+      "evidence_class": "numeric_verified"
+    },
+    {
+      "id": "SDPX-CERT-ORIGINAL-COORDS",
+      "title": "Every public route terminates with a valid original-coordinate certificate (ADR-003 5.1)",
+      "reports": [
+        "S04"
+      ],
+      "acceptance_indices": [
+        6
+      ],
+      "force_state": "not_verified",
+      "blocked_by": "S04 acceptance[6]: `not_run`. The L3 layer is built and tested standalone, but src/SDPX.jl does not include src/certification/, so NO public route is wired to it. This is release red R1 in I03_RELEASE_DECISION.md and it is the reason no row in this table can be `certificate`.",
+      "evidence_class": "certificate"
+    },
+    {
+      "id": "SDPX-NOT-RUN-NEVER-ZERO",
+      "title": "Unmeasured values are null/not_run, never 0 (ADR-003 3)",
+      "reports": [
+        "S04"
+      ],
+      "acceptance_indices": [
+        5
+      ],
+      "evidence_class": "structural"
+    },
+    {
+      "id": "SDPX-PKGTEST-DEFAULT-ENV",
+      "title": "Pkg.test() green in the default (Float64-only) environment (ADR-003 5.2)",
+      "reports": [
+        "S04"
+      ],
+      "acceptance_indices": [
+        7
+      ],
+      "force_state": "partially_verified",
+      "blocked_by": "The report's own `not_verified` was measured while its tree was dirty, and PARENT_FINDINGS_BATCH5.md F30 records the reason no longer holds at committed revisions. Q02 does NOT round this up to `verified`: the suite is green at committed revisions (three independent runs, 170 testsets identical to baseline), but every SDPX `Pkg.test()` attempted since has aborted on the worktree-cleanliness probe because Q02's own files are uncommitted, which is the expected state for a worker. The reclassification is the parent's to make after committing, not Q02's to assert.",
+      "evidence_class": "numeric_verified"
+    },
+    {
+      "id": "SDPX-PRECOMPILE-GATE",
+      "title": "The certification layer does not block Pkg.precompile() once wired",
+      "reports": [
+        "S04"
+      ],
+      "acceptance_indices": [
+        8
+      ],
+      "evidence_class": "structural"
+    },
+    {
+      "id": "SDPX-PROVIDER-DISPATCH",
+      "title": "Provider capability/request intersection is refused explicitly, not generalised from a boolean",
+      "reports": [
+        "S05",
+        "M02"
+      ],
+      "acceptance_indices": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "evidence_class": "contract"
+    },
+    {
+      "id": "SDPX-MULTI-RHS-CAPABILITY",
+      "title": "MFLA's `multi_rhs` capability boolean is a measured capability, not an unverified generalisation (S05-F1)",
+      "reports": [
+        "M02"
+      ],
+      "acceptance_indices": [
+        3
+      ],
+      "evidence_class": "contract"
+    },
+    {
+      "id": "SDPX-SETUP-PLANNING",
+      "title": "One setup entry point: reproducible plan, execution matches the plan, thread/memory budget respected",
+      "reports": [
+        "S06"
+      ],
+      "acceptance_indices": [
+        0,
+        1,
+        2,
+        5,
+        6
+      ],
+      "evidence_class": "numeric_verified"
+    },
+    {
+      "id": "SDPX-SETUP-PLAN-SHADOW",
+      "title": "The core-route planner remains a shadow by default and the legacy default is unchanged",
+      "reports": [
+        "S06"
+      ],
+      "acceptance_indices": [
+        3
+      ],
+      "blocked_by": "S06 acceptance[3] is partially_verified: the planning rules were converged into one entry point, but the move that makes the planner authoritative is a behaviour change I02 is still landing (I02 acceptance[9], moves 2/6/7/8/9/10/13, `not_verified`).",
+      "evidence_class": "structural"
+    },
+    {
+      "id": "SDPX-SESSION-UPDATES",
+      "title": "Warm session updates agree with a fresh setup, and a same-pattern change does not retain the old rank",
+      "reports": [
+        "S07"
+      ],
+      "acceptance_indices": [
+        0,
+        1
+      ],
+      "evidence_class": "numeric_verified"
+    },
+    {
+      "id": "SDPX-REPLAY-CANCELLATION",
+      "title": "Cancellation preserves a valid result and a corrupt or version-mismatched replay is refused",
+      "reports": [
+        "S07"
+      ],
+      "acceptance_indices": [
+        2,
+        3
+      ],
+      "evidence_class": "numeric_verified"
+    },
+    {
+      "id": "SDPX-FACTOR-LEASE",
+      "title": "A lease is invalidated at every factorize commit point and after a refused refactor (ADR-002 4)",
+      "blocked_by": "The DENSE lease path is verified (M01 acceptance[0..2] all verified). The row is held at partially_verified because I02 acceptance[3] is partially_verified and I02-F1 (severity HIGH, open) records that IP-2 instruments the four dense factorize! methods in src/factor_caches.jl and does NOT instrument MFSparseLDLCache.factorize! at ext/MultiFloatQDLDLExt.jl:160. Measured on the sparse path: delta_direct_factorize = 0, so a lease taken before two same-size refactors still validates after the second. P02's adapter advances the generation at its own boundary (delta_one_attempt = 1), which is why the gap is not reachable through that adapter -- and why it is still an open correctness gap on a public provider path. PARENT_FINDINGS_BATCH5.md F40 asked I02 to reclassify its own acceptance[3]; Q02 does not round the capability up in the meantime.",
+      "evidence_class": "numeric_verified",
+      "sources": [
+        {
+          "report": "M01",
+          "acceptance_indices": [
+            0,
+            1,
+            2
+          ]
+        },
+        {
+          "report": "I02",
+          "acceptance_indices": [
+            3
+          ]
+        }
+      ],
+      "force_state": "partially_verified"
+    },
+    {
+      "id": "SDPX-LEASE-STRUCTURE",
+      "title": "Ordinary factor / borrowed cache / owned snapshot / generation semantics are distinct and documented",
+      "reports": [
+        "M01"
+      ],
+      "acceptance_indices": [
+        3,
+        4,
+        5
+      ],
+      "evidence_class": "contract"
+    },
+    {
+      "id": "SDPX-ADAPTER-LEASE-REQUIRED",
+      "title": "The sparse adapter's own record_factor_summary! calls are required, not defensive",
+      "reports": [
+        "I02"
+      ],
+      "acceptance_indices": [
+        10
+      ],
+      "evidence_class": "structural"
+    },
+    {
+      "id": "SDPX-GATE-CALIBRATION",
+      "title": "The wiring gates are calibrated in both directions and their coverage is decomposed",
+      "reports": [
+        "I02"
+      ],
+      "acceptance_indices": [
+        1,
+        2
+      ],
+      "evidence_class": "structural"
+    },
+    {
+      "id": "SDPX-BEHAVIOUR-MOVES-OPEN",
+      "title": "The remaining behaviour-change moves (2, 6, 7, 8, 9, 10, 13) are landed",
+      "reports": [
+        "I02"
+      ],
+      "acceptance_indices": [
+        9
+      ],
+      "force_state": "not_verified",
+      "blocked_by": "I02 acceptance[9] is `not_verified` in the report's own words. These are the moves that change behaviour rather than wiring, and none has been performed. This row exists so the table cannot be read as covering them.",
+      "evidence_class": "numeric_verified"
+    },
+    {
+      "id": "SDPX-DEFAULT-ROUTE-PLANNER",
+      "title": "SDPX_CORE_ROUTE_PLANNER still defaults to `legacy` and the planner runs in shadow",
+      "reports": [
+        "S06"
+      ],
+      "acceptance_indices": [
+        3,
+        6
+      ],
+      "evidence_class": "structural"
+    },
+    {
+      "id": "MFLA-DENSE-FACTOR",
+      "title": "MFLA dense Cholesky / LU / LDLT / RRQR factorize and solve",
+      "reports": [
+        "M03",
+        "M01",
+        "M02"
+      ],
+      "acceptance_indices": [
+        0,
+        1
+      ],
+      "evidence_class": "numeric_verified"
+    },
+    {
+      "id": "MFLA-PIVOT-GRAMMAR",
+      "title": "The 1x1/2x2 Bunch-Kaufman pivot grammar is exercised and N/T solves are correct",
+      "reports": [
+        "M03"
+      ],
+      "acceptance_indices": [
+        0
+      ],
+      "evidence_class": "numeric_verified"
+    },
+    {
+      "id": "MFLA-KERNEL-ORACLE",
+      "title": "beta=0, transposes, strides, tails, strong cancellation and exponent extremes have an independent oracle",
+      "reports": [
+        "M02"
+      ],
+      "acceptance_indices": [
+        0,
+        2,
+        4,
+        5
+      ],
+      "evidence_class": "numeric_verified"
+    },
+    {
+      "id": "MFLA-KERNEL-PERFORMANCE",
+      "title": "x2/x3/x4 and target-CPU kernel performance, with packing time counted in the total",
+      "reports": [
+        "M02"
+      ],
+      "acceptance_indices": [
+        1
+      ],
+      "evidence_class": "numeric_verified"
+    },
+    {
+      "id": "MFLA-E2E-REGRESSION",
+      "title": "End-to-end total time and iteration counts show no hidden regression",
+      "reports": [
+        "M03"
+      ],
+      "acceptance_indices": [
+        2
+      ],
+      "force_state": "partially_verified",
+      "blocked_by": "M03 acceptance[2] is partially_verified in its own words: an absolute E2E time plus iteration counts AT ONE REVISION is not a comparison against a baseline, and M03 declined to present it as a regression check. Q02 keeps that verdict rather than counting an absolute number as a regression result.",
+      "evidence_class": "numeric_verified"
+    },
+    {
+      "id": "MFLA-SPARSE-QDLDL",
+      "title": "MFLA sparse QDLDL factorize/solve through the provider adapter",
+      "sources": [
+        {
+          "report": "P02",
+          "acceptance_indices": [
+            0,
+            1,
+            2
+          ]
+        },
+        {
+          "report": "P01",
+          "acceptance_indices": [
+            9
+          ]
+        }
+      ],
+      "evidence_class": "numeric_verified"
+    },
+    {
+      "id": "MFLA-THREAD-TIERS",
+      "title": "MFLA thread budgets 1 / 4 / 16 / 64",
+      "reports": [
+        "B03"
+      ],
+      "acceptance_indices": [
+        0,
+        2
+      ],
+      "force_state": "not_verified",
+      "blocked_by": "The host has Sys.CPU_THREADS == 4. Tier 16 and tier 64 are `unsupported` HERE with that reason, not silently absent -- B03's acceptance[0] is partially_verified for exactly this. Tiers 1 and 4 have passing evidence; the row is listed as not_verified because the capability as stated (1/4/16/64) is not fully demonstrated on this host.",
+      "evidence_class": "numeric_verified"
+    },
+    {
+      "id": "MFLA-MPFR-ALLOCATION",
+      "title": "No per-output BigFloat object; MPFR native allocation and Julia heap reported separately",
+      "reports": [
+        "B03"
+      ],
+      "acceptance_indices": [
+        1
+      ],
+      "evidence_class": "numeric_verified"
+    },
+    {
+      "id": "BFLA-CACHE-LIFECYCLE",
+      "title": "BFLA dense cache prepare/refactor/failure/solve lifecycle",
+      "reports": [
+        "B04",
+        "B01"
+      ],
+      "acceptance_indices": [
+        0,
+        1,
+        2,
+        3,
+        5,
+        6
+      ],
+      "evidence_class": "numeric_verified"
+    },
+    {
+      "id": "BFLA-SPLIT-IS-A-MOVE",
+      "title": "The B04 cache split is a move, not a rewrite, and loses no line or reasoning",
+      "reports": [
+        "B04",
+        "I02"
+      ],
+      "acceptance_indices": [
+        4,
+        9,
+        10
+      ],
+      "evidence_class": "structural"
+    },
+    {
+      "id": "BFLA-RECTANGULAR-QR",
+      "title": "BFLA rectangular QR / least-squares with explicit shape admission",
+      "reports": [
+        "B02"
+      ],
+      "acceptance_indices": [
+        0,
+        1,
+        2
+      ],
+      "evidence_class": "numeric_verified"
+    },
+    {
+      "id": "BFLA-RRQR-STALE-SUCCESS",
+      "title": "A failed refactor on the square RRQR cache must not leave `:success` and keep solving with the old factor (A01b-F1)",
+      "sources": [
+        {
+          "report": "B02",
+          "acceptance_indices": [
+            3
+          ]
+        },
+        {
+          "report": "I02",
+          "acceptance_indices": [
+            8
+          ]
+        }
+      ],
+      "force_state": "not_verified",
+      "blocked_by": "A01b-F1 is a LIVE, reproduced pre-existing defect: a preflight rejection leaves BFLARRQRCache reporting `:success` and still solving with the OLD factor (`control_square_cache_keeps_stale_success = true`, measured by B02 and preserved by B04 in both modes). I02 acceptance[8] records it as a decision rather than a cache patch and is partially_verified. I03_RELEASE_DECISION.md 2.5 requires it fixed or accepted with its reproduction attached. No passing artifact exists, so this row is `not_verified` and is NOT omitted.",
+      "evidence_class": "numeric_verified"
+    },
+    {
+      "id": "BFLA-B02-SURFACE",
+      "title": "B02's rectangular QR mechanism does not duplicate the square BFLARRQRCache",
+      "reports": [
+        "B02"
+      ],
+      "acceptance_indices": [
+        4
+      ],
+      "evidence_class": "structural"
+    },
+    {
+      "id": "PROVIDER-CONTRACT-JOINT",
+      "title": "MFLA and BFLA run the SAME semantic contract test and do NOT share the same numeric oracle",
+      "sources": [
+        {
+          "report": "P01",
+          "acceptance_indices": [
+            0,
+            1,
+            3,
+            4,
+            5,
+            6,
+            8,
+            9
+          ]
+        },
+        {
+          "report": "P02",
+          "acceptance_indices": [
+            0,
+            1,
+            2
+          ]
+        },
+        {
+          "report": "P03",
+          "acceptance_indices": [
+            1,
+            2
+          ]
+        }
+      ],
+      "evidence_class": "contract"
+    },
+    {
+      "id": "PROVIDER-CONCURRENT-PRECISION",
+      "title": "Concurrent sessions at different precisions, in-process and in parallel",
+      "reports": [
+        "P03",
+        "B01"
+      ],
+      "acceptance_indices": [
+        0
+      ],
+      "force_state": "not_verified",
+      "blocked_by": "This is the ONE REQUIRED ROW that P03's release gate reports FAIL (`release_gate_verdict = FAIL`, `release_gate_failing_rows = [\"concurrent_sessions_different_precision_in_process_parallel\"]`, `required = true`, state `unsupported`). PARENT_FINDINGS_BATCH5.md F10 records that the parent confirmed `required = true` at the source and DECLINED to demote it so the gate would pass. No passing artifact exists.",
+      "evidence_class": "contract"
+    },
+    {
+      "id": "PROVIDER-THIRD-PARTY-GATE",
+      "title": "Third-party internal-field dependencies are centralised and carry a version gate",
+      "reports": [
+        "P01"
+      ],
+      "acceptance_indices": [
+        2
+      ],
+      "evidence_class": "structural"
+    },
+    {
+      "id": "PROVIDER-SPARSE-DENSITY-POLICY",
+      "title": "Sparse types are never downgraded or densified implicitly",
+      "reports": [
+        "P02",
+        "S06"
+      ],
+      "acceptance_indices": [
+        1
+      ],
+      "evidence_class": "numeric_verified"
+    },
+    {
+      "id": "PROVIDER-QDLDL-RAW-MATRIX-ENTRY",
+      "title": "QDLDL.solve(factor, ::Matrix) — the raw entry point outside MFLA's API — is an unsupported call with a third-party hazard",
+      "reports": [
+        "A01b"
+      ],
+      "acceptance_indices": [
+        0,
+        4
+      ],
+      "force_state": "partially_verified",
+      "blocked_by": "A01b-F2 records `ReadOnlyMemoryError`; a later real driver run SEGFAULTED inside ipermute! (QDLDL.jl:619) under concurrent load, and a 0..20M-iteration allocation-churn sweep did NOT reproduce it, so the mechanism is not understood (`I03_RELEASE_DECISION.md` 6.5). It is a third-party hazard SDPX cannot fix in its own tree. The row is `partially_verified`, not `verified`.",
+      "evidence_class": "numeric_verified"
+    },
+    {
+      "id": "QA-MUTATION-DETECTION",
+      "title": "The QA harness FAILS when a sign / svec-coefficient / stale-factor-reuse / low-precision-coefficient error is introduced",
+      "sources": [
+        {
+          "report": "A01",
+          "acceptance_indices": [
+            0,
+            1,
+            2
+          ]
+        },
+        {
+          "report": "A01b",
+          "acceptance_indices": [
+            5
+          ]
+        }
+      ],
+      "evidence_class": "numeric_verified"
+    },
+    {
+      "id": "QA-ORACLE-PROVENANCE",
+      "title": "Reference provenance, arithmetic, tolerance and input hash are traceable",
+      "reports": [
+        "A01"
+      ],
+      "acceptance_indices": [
+        1,
+        2
+      ],
+      "evidence_class": "numeric_verified"
+    },
+    {
+      "id": "QA-MULTI-PRECISION-ORACLE",
+      "title": "Independent oracles for svec, RSOC, residuals and the exact rational path",
+      "reports": [
+        "A01"
+      ],
+      "evidence_class": "numeric_verified"
+    },
+    {
+      "id": "QA-PROVIDER-LEGS",
+      "title": "All three provider legs implemented against live kernels, each with a reference independent of SDPX",
+      "reports": [
+        "A01b"
+      ],
+      "acceptance_indices": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        7
+      ],
+      "evidence_class": "numeric_verified"
+    },
+    {
+      "id": "INFRA-REPRODUCIBLE-BENCHMARK",
+      "title": "Benchmark is rerunnable for the same SHA / input / precision / tolerance, with raw commands and exit codes archived",
+      "reports": [
+        "Q01"
+      ],
+      "acceptance_indices": [
+        0,
+        1,
+        3,
+        4,
+        5
+      ],
+      "evidence_class": "numeric_verified"
+    },
+    {
+      "id": "INFRA-PERF-RUNNER-EXCLUSIVITY",
+      "title": "An exclusive performance runner with functional tests separated from performance measurement",
+      "reports": [
+        "Q01"
+      ],
+      "acceptance_indices": [
+        2
+      ],
+      "evidence_class": "structural"
+    },
+    {
+      "id": "INFRA-DEPENDENCY-BOUNDARIES",
+      "title": "MFLA and BFLA do not depend on SDPX; the SDPX solver does not depend on compatibility or public-API layers",
+      "reports": [
+        "I01"
+      ],
+      "acceptance_indices": [
+        0,
+        2
+      ],
+      "evidence_class": "structural"
+    },
+    {
+      "id": "INFRA-SINGLE-DEFAULT-PIPELINE",
+      "title": "Original case/certificate/resource semantics pass and the default pipeline is unique",
+      "reports": [
+        "I01"
+      ],
+      "acceptance_indices": [
+        1
+      ],
+      "evidence_class": "numeric_verified"
+    },
+    {
+      "id": "INFRA-INCLUDE-GRAPH",
+      "title": "The batch-5 files are wired into the include graphs with the collision gate green",
+      "reports": [
+        "I02"
+      ],
+      "acceptance_indices": [
+        0
+      ],
+      "evidence_class": "structural"
+    },
+    {
+      "id": "INFRA-TOLERANCE-LEDGER",
+      "title": "Every new tolerance has a ledger entry (id / expression / kind / rationale)",
+      "reports": [
+        "A01b"
+      ],
+      "acceptance_indices": [
+        1
+      ],
+      "evidence_class": "documentation"
+    },
+    {
+      "id": "INFRA-RESEARCH-GATES",
+      "title": "Research/implementation gates: no second algorithm added to the main loop, at least one falsifiable benchmark hypothesis with an independent oracle",
+      "reports": [
+        "D01"
+      ],
+      "acceptance_indices": [
+        0,
+        1,
+        2
+      ],
+      "evidence_class": "documentation"
+    }
+  ]
+}

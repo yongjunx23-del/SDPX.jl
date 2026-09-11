@@ -1,0 +1,66 @@
+# RELEASE REVISIONS — the release environment's revision record
+#
+# WHAT THIS IS. The canonical, revision-pinned record of the environment the Q02
+# release-compatibility matrix and capability table describe. It is a copy of the
+# `PINNED_REVISIONS.txt` written by
+#   SDPX.jl/scripts/rebuild/pin_revisions_env.sh
+# for the release triple.
+#
+# WHAT IT IS FOR. Q02_PREP.md section 1 recorded that the release environment could
+# NOT be restored from anything on disk: `rebuild-env/Manifest.toml` pins the three
+# first-party packages by PATH with no `git-tree-sha1`, the version numbers did not
+# move across any of the packet's revisions, and the SHAs that DID exist in
+# `docs/rebuild/baseline.md` were pre-packet and were compared against nothing. This
+# file is the record; `scripts/rebuild/check_reconstruction.py` is the check, and it
+# reconstructs into a depot built from EMPTY and diffs the RESOLVED dependency set
+# rather than comparing two lists of SHAs by eye.
+#
+# THE RECIPE IS NOT "THREE SHAS + MANIFEST". It is
+#     three repo SHAs + Manifest.toml + THE JULIA VERSION
+# because 27 of the Manifest's 60 entries carry no content hash anywhere in the
+# Manifest and all 27 are stdlibs -- measured by a uuid join against
+# `Pkg.Types.stdlibs()`: 27 of 27 matched, 0 outside. Their content follows from the
+# interpreter, which is why the JULIA line below is a REQUIRED input.
+#
+# A MANIFEST CANNOT BE PINNED BY A COMMIT. It is gitignored (`.gitignore:3:
+# **/Manifest.toml`), so a worktree at a commit does not contain it. A run is
+# therefore attributable to (commit, Manifest sha256), and both are recorded here.
+#
+# CROSS-CHECKS PERFORMED WHEN THIS RECORD WAS WRITTEN:
+#   * `pin_revisions_env.sh` re-read each pinned worktree's HEAD and required it to
+#     equal the requested SHA, and required dirty_paths = 0 in the pinned tree;
+#   * `check_reconstruction.py` reconstructed from THIS record into a depot built
+#     from empty and found the resolved dependency set identical (60 vs 60 entries,
+#     0 differences), with all three Manifest sha256 matching;
+#   * the seven control arms (wrong SHA, moving branch, tampered Manifest hash,
+#     one-sided added entry, differing git-tree-sha1, wrong Julia version, broken
+#     stdlib join) were each observed to FAIL.
+# Logs: rebuild-reports/Q02/logs/recon_positive.log and recon_controls.log
+#
+# NOTHING HERE IS A MOVING TARGET. Every revision is a full 40-hex commit SHA.
+# `check_reconstruction.py` REFUSES a record naming a branch or a short SHA, and
+# `test/rebuild/release_matrix.jl` asserts the same property.
+#
+# live-tree state at record time:
+#   SDPX  c4b109a529482db69ab0dcbb6cfd8e707da6d39e  dirty_paths=6
+#   MFLA  e3805c9607295f0e173567b060d4035e826310ca  dirty_paths=0
+#   BFLA  f087a72f2001088ea520b67588cf18c0d3fce2e8  dirty_paths=0
+#
+# The SDPX live tree was dirty because Q02's own four new files were untracked
+# at that moment. That is disclosed rather than hidden, and it does NOT enter the
+# pin: the pinned worktree is created at the COMMIT above, so no uncommitted file
+# is in it. The one thing a dirty live tree does contaminate is the gitignored
+# Manifest.toml, which is copied rather than pinned -- its sha256 is checked.
+
+SDPX c4b109a529482db69ab0dcbb6cfd8e707da6d39e
+MFLA e3805c9607295f0e173567b060d4035e826310ca
+BFLA f087a72f2001088ea520b67588cf18c0d3fce2e8
+
+JULIA julia version 1.12.6
+# Manifest.toml is gitignored and therefore NOT pinned by the commit; the live
+# tree's copy was carried over and hashed. Runs are attributable to
+# (commit, manifest sha256):
+#   SDPX  sha256 53d061a430475f548d2d7a384ec7d4b27f7caecb5fedbd0cab2c5287d6070a7b
+#   MFLA  sha256 ad5d5d83523d9c25b137426339f4927b837e2171a9c791ce82854f1848bce74d
+#   BFLA  sha256 dfa4e44f2062d4b52613aa68b6ae8b093f1c9836805459762a1ff1a9fcc8e687
+ENV rebuild-env
