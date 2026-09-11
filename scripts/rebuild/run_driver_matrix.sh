@@ -19,6 +19,12 @@
 
 set -u
 
+# Aggregated verdict across legs. Initialised here because `set -u` is on and these
+# are incremented inside run(); see run() for why they exist at all.
+MATRIX_LEGS_RUN=0
+MATRIX_LEGS_FAILED=0
+MATRIX_FAILED_LEGS=""
+
 # Overridable so the same matrix can be run against a PINNED revision set built by
 # scripts/rebuild/pin_revisions_env.sh. That matters because `rebuild-env`
 # resolves the three packages by dev path with no `git-tree-sha1`, so a run
@@ -76,6 +82,16 @@ run() {  # run <name> <workdir> <project> <script> [ENVS="K=V ..."] [ARGS="--fla
     fails=$(grep -cE '\|\s+[0-9]+\s+(Fail|Error)' "$log" 2>/dev/null || true)
     fail_lines=$(grep -coE '(Test Failed|^ERROR:)' "$log" 2>/dev/null || true)
     echo "exit=$rc  failcols=${fails:-0}  fail_lines=${fail_lines:-0}  log=$log"
+    # ...and then AGGREGATE them. Until this existed the script ended in `echo`, so
+    # its exit status was echo's and was 0 no matter what happened: `MATRIX_EXIT=0`
+    # was printed for a run in which B03 exited 1. A summary whose verdict cannot
+    # be anything but "ok" is not a verdict, and a caller writing
+    # `... ; echo MATRIX_EXIT=$?` reads exactly that vacuous value.
+    MATRIX_LEGS_RUN=$((MATRIX_LEGS_RUN + 1))
+    if [ "$rc" -ne 0 ] || [ "${fails:-0}" -ne 0 ] || [ "${fail_lines:-0}" -ne 0 ]; then
+        MATRIX_LEGS_FAILED=$((MATRIX_LEGS_FAILED + 1))
+        MATRIX_FAILED_LEGS="$MATRIX_FAILED_LEGS $name"
+    fi
 }
 
 # A01 is provider-GATED: its default leg asserts the providers are ABSENT, which
@@ -113,10 +129,35 @@ run M02            "$MFLA" "$ENV"  test/rebuild/M02.jl
 run M03            "$MFLA" "$ENV"  test/rebuild/M03.jl
 run P02            "$MFLA" "$ENV"  test/rebuild/P02.jl
 run B02            "$BFLA" "$ENV"  test/rebuild/B02.jl
-run B03            "$BFLA" "$ENV"  test/rebuild/B03.jl
+# B03's mode is DETECTED, not flagged: `detect_mode()` asks whether
+# `plan_gemm!`/`plan_cholesky_trail!` are bound in `BigFloatLinearAlgebra`. Since
+# I02 wired B03's four kernel files into BFLA's entry point (they are loaded at
+# `src/BigFloatLinearAlgebra.jl:89-92` at revision f087a72; `plan_gemm!` is defined
+# at `src/kernels/native_level3.jl:157`), the detected mode is now **WIRED**, and
+# WIRED mode refuses to run without `B03_WIRED_INJECT_TEST=1`.
+#
+# Without that variable this leg exited 1 with a LoadError and was the ONLY red leg
+# in the 28-leg run — recorded as `B03 exit=1`, and simultaneously reported as
+# `MATRIX_EXIT=0` because nothing aggregated the result. Both defects are fixed
+# here and above. The env var is not papering over a failure: the parent re-ran
+# this driver at the frozen revisions with the variable set and got exit=0,
+# fail_lines=0 in all four non-perf phases plus the default invocation.
+#
+# There is deliberately no UNWIRED leg. UNWIRED is not selectable by a flag — it is
+# what the driver infers when the names are ABSENT — so it is unreachable in a tree
+# where the wiring is real, and adding a leg that cannot run would be a leg that
+# always "passes" by skipping.
+run B03            "$BFLA" "$ENV"  test/rebuild/B03.jl "B03_WIRED_INJECT_TEST=1"
 run B04            "$BFLA" "$ENV"  test/rebuild/B04.jl
 run P03            "$BFLA" "$ENV"  test/rebuild/P03.jl
 run S07            "$SDPX" "$ENV"  test/rebuild/S07.jl
 
 echo
+echo "legs_run=$MATRIX_LEGS_RUN  legs_failed=$MATRIX_LEGS_FAILED  failed_legs=${MATRIX_FAILED_LEGS:- none}"
+if [ "$MATRIX_LEGS_FAILED" -ne 0 ]; then
+    echo "MATRIX_EXIT=1"
+    echo "done WITH FAILURES. logs in $OUT"
+    exit 1
+fi
+echo "MATRIX_EXIT=0"
 echo "done. logs in $OUT"
