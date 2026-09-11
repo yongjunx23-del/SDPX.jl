@@ -86,7 +86,6 @@ end
 default_extended_precision_blas(::Type{T}) where {T} =
     isbitstype(T) && sizeof(T) > sizeof(Float64) ? :auto : :off
 default_extended_precision_blas(::Type{BigFloat}) = :auto
-default_mixed_precision_condition_limit(::Type) = 1.0e8
 default_mixed_precision_kkt(::Type{T}) where {T} =
     (
         T === BigFloat ||

@@ -18,6 +18,5 @@ SDPX.dynamic_range_limited(::Type{<:MultiFloat}) = true
 
 # This is an arithmetic-kernel preference, not a solver or fallback choice.
 SDPX.default_extended_precision_blas(::Type{Float64x4}) = :auto
-SDPX.default_mixed_precision_condition_limit(::Type{Float64x4}) = 1.0e14
 
 end

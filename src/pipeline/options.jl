@@ -41,12 +41,6 @@ function _validate_solver_options(opts::SolverOptions{T}) where {T}
         throw(ArgumentError("Ωp must be finite and positive"))
     isfinite(opts.Ωd) && opts.Ωd > zero(T) ||
         throw(ArgumentError("Ωd must be finite and positive"))
-    isfinite(opts.min_step) && opts.min_step >= zero(T) ||
-        throw(ArgumentError("min_step must be finite and nonnegative"))
-    isfinite(opts.max_omega) && opts.max_omega > zero(T) ||
-        throw(ArgumentError("max_omega must be finite and positive"))
-    isfinite(opts.omega_step) && opts.omega_step > one(T) ||
-        throw(ArgumentError("omega_step must be finite and greater than one"))
     all(
         tolerance -> isfinite(tolerance) && tolerance >= zero(T),
         (opts.ϵ_gap, opts.ϵ_primal, opts.ϵ_dual),
@@ -91,14 +85,6 @@ function _validate_solver_options(opts::SolverOptions{T}) where {T}
         throw(ArgumentError(
             "refine_policy must be :fixed, :adaptive, or :auto",
         ))
-    opts.refine_steps >= 0 && opts.refine_max_steps >= 0 ||
-        throw(ArgumentError("refinement step limits must be nonnegative"))
-    isfinite(opts.refine_tol) && opts.refine_tol >= zero(T) ||
-        throw(ArgumentError("refine_tol must be finite and nonnegative"))
-    opts.omega_scaling in (:scalar, :per_block, :auto) ||
-        throw(ArgumentError(
-            "omega_scaling must be :scalar, :per_block, or :auto",
-        ))
     opts.extended_precision_blas in (:off, :auto, :on) ||
         throw(ArgumentError(
             "extended_precision_blas must be :off, :auto, or :on",
@@ -112,31 +98,13 @@ function _validate_solver_options(opts::SolverOptions{T}) where {T}
         throw(ArgumentError(
             "mixed_precision_kkt must be :off, :auto, or :on",
         ))
-    isfinite(opts.mixed_precision_condition_limit) &&
-        opts.mixed_precision_condition_limit >= one(Float64) ||
-        throw(ArgumentError(
-            "mixed_precision_condition_limit must be finite and at least one",
-        ))
-    opts.mixed_precision_refine_max_steps >= 1 ||
-        throw(ArgumentError(
-            "mixed_precision_refine_max_steps must be at least one",
-        ))
     isfinite(opts.mixed_precision_memory_fraction) &&
         0.0 <= opts.mixed_precision_memory_fraction <= 1.0 ||
         throw(ArgumentError(
             "mixed_precision_memory_fraction must be finite and between zero and one",
         ))
-    opts.max_restarts >= 0 && opts.max_centering >= 0 &&
-        opts.stall_iterations >= 0 ||
-        throw(ArgumentError(
-            "restart, centering, and stall limits must be nonnegative",
-        ))
-    isfinite(opts.stall_tolerance) && opts.stall_tolerance >= 0 ||
-        throw(ArgumentError(
-            "stall_tolerance must be finite and nonnegative",
-        ))
-    opts.checkpoint_every >= 0 ||
-        throw(ArgumentError("checkpoint_every must be nonnegative"))
+    opts.max_restarts >= 0 && opts.stall_iterations >= 0 ||
+        throw(ArgumentError("restart and stall limits must be nonnegative"))
     opts.chordal in (:off, :auto, :on) ||
         throw(ArgumentError("chordal must be :off, :auto, or :on"))
     return nothing

@@ -100,9 +100,6 @@ Base.@kwdef struct SolverOptions{T}
     γ::T                    = T(9) / 10           # backtracking factor
     Ωp::T                    = one(T)              # fixed-policy initial X = Ωp·I
     Ωd::T                    = one(T)              # fixed-policy initial Y = Ωd·I
-    # Expert fixed-policy identity scaling. Automatic KKT initialization does
-    # not read these block multipliers. `:per_block` remains an explicit mode.
-    omega_scaling::Symbol     = :auto
     ϵ_gap::T                 = T(1e-10)
     ϵ_primal::T              = T(1e-10)
     ϵ_dual::T                = T(1e-10)
@@ -113,14 +110,7 @@ Base.@kwdef struct SolverOptions{T}
     # fails. Fixed-width arithmetic always uses its native precision.
     working_precision_policy::Symbol = :auto        # :fixed | :auto
     minimum_working_precision_bits::Int = 192       # BigFloat :auto floor
-    restart::Bool             = true
-    min_step::T               = T(1e-10)
-    max_omega::T              = T(1e50)
-    omega_step::T             = T(1e5)
     max_restarts::Int         = 5
-    # Recentering attempts allowed when a step collapses while the residuals and
-    # the KKT direction are both healthy; see the recentering branch in `solve!`.
-    max_centering::Int        = 4
     # Consecutive iterations without a meaningful improvement in the scaled
     # termination merit before the solve is declared `Stalled`. An interior-point
     # method normally improves that merit almost every iteration, so a long run
@@ -128,12 +118,6 @@ Base.@kwdef struct SolverOptions{T}
     # further progress is possible — continuing only burns time and can destroy
     # a good iterate through restart escalation. Set to 0 to disable.
     stall_iterations::Int     = 15
-    # Relative improvement required to reset the stall counter.
-    # Minimum *cumulative* relative improvement in the scaled merit required
-    # across a `stall_iterations`-wide window (see `StagnationDetector`). This
-    # was previously required on every individual iteration, which is what made
-    # it fire on solves that were still converging.
-    stall_tolerance::Float64  = 1e-3
     mode::SolveMode           = OPTIMIZE
     verbosity::Int            = 1                  # 0 silent … 3 debug diagnostics
     timing::Bool              = false
@@ -148,22 +132,11 @@ Base.@kwdef struct SolverOptions{T}
     # costs ~141 Cholesky sweeps over 4100 blocks to walk `t` down to 1e-10.
     step_rule::Symbol         = :auto               # :backtrack | :fraction_to_boundary | :auto
     predictor::Symbol         = :classic            # :classic | :sdpb
-    refine_steps::Int         = 1                    # iterative-refinement passes on (dx,dy), §2.5
     # `:fixed` runs exactly `refine_steps` passes. `:adaptive`/`:auto` treat it
     # as a cap and stop on the KKT residual (see `refine_direction!`), which both
     # skips useless passes and allows more of them when a step really needs it.
     refine_policy::Symbol     = :auto
-    refine_max_steps::Int     = 8                    # cap for the adaptive policy only
-    refine_tol::T             = zero(T)              # 0 ⇒ REFINE_DEFAULT_TOL_ULPS·eps(T)
     max_time::Float64         = Inf                  # wall-clock budget, seconds
-    checkpoint_every::Int     = 0                     # 0 disables; else write every N iterations
-    checkpoint_path::String   = ""
-    convert_inputs::Bool      = false                 # normalize BigFloat storage precision; cannot recover digits
-    # Explicitly collect after each accepted iteration. On glibc Linux this
-    # also trims free allocator pages; useful for very large sparse solves whose
-    # factor/RHS workspaces otherwise leave a high retained RSS. Default off
-    # because ordinary solves are faster with Julia's automatic GC schedule.
-    force_gc::Bool            = false
     sparse::Union{Bool,Symbol} = :auto                  # false/:dense | true/:sparse | :auto
     parameter_policy::Symbol  = :auto                   # :fixed | :auto
     parameter_strategy::Symbol = :adaptive              # :fixed | :adaptive
@@ -190,9 +163,6 @@ Base.@kwdef struct SolverOptions{T}
     # factorization.
     mixed_precision_kkt::Symbol =
         default_mixed_precision_kkt(T)                  # :off | :auto | :on
-    mixed_precision_condition_limit::Float64 =
-        default_mixed_precision_condition_limit(T)
-    mixed_precision_refine_max_steps::Int = 32
     mixed_precision_memory_fraction::Float64 = 0.10
     algorithm::Symbol         = :auto                   # :auto | :lp | :socp | :sdp
     presolve::Union{Bool,Symbol} = :auto                 # false/:off | true/:on | :auto
@@ -215,7 +185,6 @@ Base.@kwdef struct SolverOptions{T}
     # payload, but any raw `Optimal` must still pass the minimal final
     # original-coordinate residual/gap/cone success gate.
     certification::Bool       = true
-    expert_mode::Bool         = false                   # documents intentional use of low-level IPM knobs
     # Chordal PSD decomposition policy. Detection/preprocessing analysis runs
     # unchanged for every value; P0 only records the policy and a reason in
     # the execution plan — the clique transformation itself is not implemented
