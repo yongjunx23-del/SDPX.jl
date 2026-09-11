@@ -126,6 +126,26 @@ if [ -d "$WS/rebuild-reports" ]; then
     echo "  linked rebuild-reports -> $WS/rebuild-reports (batteries are not in any repo)"
 fi
 
+# Carry over each repository's Manifest.toml. It is GITIGNORED
+# (`.gitignore:3: **/Manifest.toml`), so a fresh worktree does not have it, and a
+# driver that launches a child with `--project=<repo>` -- which is exactly what
+# P02's Newton-gate leg does -- then cannot resolve that package's own
+# dependencies. Measured: the gate child died with
+#   Package MathOptInterface is required but does not seem to be installed
+# while the same driver passed on the live tree.
+#
+# The honest framing, recorded in the manifest: a Manifest is NOT pinned by a
+# commit, because it is not in the repository. Copying the live one is the only
+# way such a driver can run at all, so the run is attributable to
+# (commit, Manifest sha256) rather than to the commit alone.
+for i in 0 1 2; do
+    src="$WS/${DIRS[$i]}/Manifest.toml"
+    if [ -f "$src" ]; then
+        cp "$src" "$TARGET/${DIRS[$i]}/Manifest.toml"
+        echo "  carried ${DIRS[$i]}/Manifest.toml (gitignored; not pinnable by commit)"
+    fi
+done
+
 echo
 echo "=== building environment $ENV ==="
 cp -r "$WS/rebuild-env" "$ENV" || die "could not copy rebuild-env"
@@ -152,6 +172,17 @@ MANIFEST="$TARGET/PINNED_REVISIONS.txt"
     echo "#"
     for i in 0 1 2; do
         printf '%-5s %s\n' "${NAMES[$i]}" "$(git -C "$TARGET/${DIRS[$i]}" rev-parse HEAD)"
+    done
+    echo "# Manifest.toml is gitignored and therefore NOT pinned by the commit;"
+    echo "# the live tree's copy was carried over. Runs are attributable to"
+    echo "# (commit, manifest sha256):"
+    for i in 0 1 2; do
+        if [ -f "$TARGET/${DIRS[$i]}/Manifest.toml" ]; then
+            printf '#   %-5s sha256 %s\n' "${NAMES[$i]}" \
+                "$(shasum -a 256 "$TARGET/${DIRS[$i]}/Manifest.toml" | cut -d' ' -f1)"
+        else
+            printf '#   %-5s no Manifest.toml\n' "${NAMES[$i]}"
+        fi
     done
     echo "ENV $ENV"
 } > "$MANIFEST"
