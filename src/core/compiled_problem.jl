@@ -62,7 +62,6 @@ end
 raw_objective(snapshot::RawProblemSnapshot) = snapshot.objective_vector
 raw_equality(snapshot::RawProblemSnapshot) = snapshot.equality_matrix
 raw_rhs(snapshot::RawProblemSnapshot) = snapshot.rhs
-raw_objective_constant(snapshot::RawProblemSnapshot) = snapshot.objective_constant
 raw_objective_sense(snapshot::RawProblemSnapshot) = snapshot.objective_sense
 raw_precision_bits(snapshot::RawProblemSnapshot) = snapshot.source_precision_bits
 raw_arithmetic(snapshot::RawProblemSnapshot) = snapshot.source_arithmetic

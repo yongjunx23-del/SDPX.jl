@@ -284,115 +284,14 @@ function replay_primal_forward!(stack::ReconstructionStack, dest, src)
 end
 
 """Canonical dual from original coordinates (chain order, dimension-aware)."""
-function replay_dual_forward!(stack::ReconstructionStack, dest, src)
-    transforms = stack.transforms
-    isempty(transforms) && (copyto!(dest, src); return dest)
-    current = src
-    for transform in transforms
-        expected = source_dual_dimension(transform)
-        expected == length(current) || throw(DimensionMismatch(
-            "forward dual replay: transform $(typeof(transform)) expects " *
-            "source length $expected but received $(length(current))",
-        ))
-        buffer = Vector{eltype(src)}(undef, target_dual_dimension(transform))
-        forward_dual!(transform, buffer, current)
-        current = buffer
-    end
-    length(dest) == length(current) || throw(DimensionMismatch(
-        "forward dual replay destination length $(length(dest)) != " *
-        "reconstructed length $(length(current))",
-    ))
-    copyto!(dest, current)
-    return dest
-end
 
 """Replay an original-coordinate primal ray into canonical coordinates."""
-function replay_primal_ray_forward!(stack::ReconstructionStack, dest, src)
-    transforms = stack.transforms
-    isempty(transforms) && (copyto!(dest, src); return dest)
-    current = src
-    for transform in transforms
-        expected = source_primal_dimension(transform)
-        expected == length(current) || throw(DimensionMismatch(
-            "forward primal ray replay: transform $(typeof(transform)) " *
-            "consumes length $expected but received $(length(current))",
-        ))
-        buffer = Vector{eltype(src)}(undef, target_primal_dimension(transform))
-        forward_primal_ray!(transform, buffer, current)
-        current = buffer
-    end
-    length(dest) == length(current) || throw(DimensionMismatch(
-        "forward primal ray destination length mismatch",
-    ))
-    copyto!(dest, current)
-    return dest
-end
 
 """Replay a canonical primal-infeasibility ray into original coordinates."""
-function replay_primal_ray!(stack::ReconstructionStack, dest, src)
-    transforms = stack.transforms
-    isempty(transforms) && (copyto!(dest, src); return dest)
-    current = src
-    for transform in _replay_reverse(transforms)
-        expected = target_primal_dimension(transform)
-        expected == length(current) || throw(DimensionMismatch(
-            "primal ray replay: transform $(typeof(transform)) consumes " *
-            "length $expected but received $(length(current))",
-        ))
-        buffer = Vector{eltype(src)}(undef, source_primal_dimension(transform))
-        backward_primal_ray!(transform, buffer, current)
-        current = buffer
-    end
-    length(dest) == length(current) || throw(DimensionMismatch(
-        "primal ray destination length mismatch",
-    ))
-    copyto!(dest, current)
-    return dest
-end
 
 """Replay an original-coordinate dual ray into canonical coordinates."""
-function replay_dual_ray_forward!(stack::ReconstructionStack, dest, src)
-    transforms = stack.transforms
-    isempty(transforms) && (copyto!(dest, src); return dest)
-    current = src
-    for transform in transforms
-        expected = source_dual_dimension(transform)
-        expected == length(current) || throw(DimensionMismatch(
-            "forward dual ray replay: transform $(typeof(transform)) " *
-            "consumes length $expected but received $(length(current))",
-        ))
-        buffer = Vector{eltype(src)}(undef, target_dual_dimension(transform))
-        forward_dual_ray!(transform, buffer, current)
-        current = buffer
-    end
-    length(dest) == length(current) || throw(DimensionMismatch(
-        "forward dual ray destination length mismatch",
-    ))
-    copyto!(dest, current)
-    return dest
-end
 
 """Replay a canonical dual-infeasibility ray into original coordinates."""
-function replay_dual_ray!(stack::ReconstructionStack, dest, src)
-    transforms = stack.transforms
-    isempty(transforms) && (copyto!(dest, src); return dest)
-    current = src
-    for transform in _replay_reverse(transforms)
-        expected = target_dual_dimension(transform)
-        expected == length(current) || throw(DimensionMismatch(
-            "dual ray replay: transform $(typeof(transform)) consumes " *
-            "length $expected but received $(length(current))",
-        ))
-        buffer = Vector{eltype(src)}(undef, source_dual_dimension(transform))
-        backward_dual_ray!(transform, buffer, current)
-        current = buffer
-    end
-    length(dest) == length(current) || throw(DimensionMismatch(
-        "dual ray destination length mismatch",
-    ))
-    copyto!(dest, current)
-    return dest
-end
 
 """Compose every transform's objective offset in chain order."""
 function objective_offset(stack::ReconstructionStack{T}) where {T<:AbstractFloat}

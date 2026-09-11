@@ -1166,17 +1166,11 @@ function _ldlt_inertia_class(inertia, positive::Int, negative::Int)
     return :mismatch
 end
 
-la_ldlt_permutation(factor::ProviderLALDLTFactor) =
-    la_provider_ldlt_permutation(factor.provider)
 
-la_ldlt_blocks(factor::ProviderLALDLTFactor) =
-    la_provider_ldlt_blocks(factor.provider)
 
 la_factor_diagnostics(factor::ProviderLALDLTFactor) =
     la_provider_factor_diagnostics(factor.provider)
 
-la_factor_precision(factor::ProviderLALDLTFactor) =
-    la_provider_factor_precision(factor.provider)
 
 la_factor_kind(::ProviderLALDLTFactor) = :ldlt
 la_factor_handle_matrix(factor::ProviderLALDLTFactor) = factor.factors

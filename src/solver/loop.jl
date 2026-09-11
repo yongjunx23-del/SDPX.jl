@@ -195,8 +195,6 @@ The accepted-point trajectory, in order.  This is the per-step sequence the
 trajectory-identity test compares.
 """
 solver_accepted_iterates(trace::SessionTrace) = trace.x[findall(trace.accepted)]
-solver_accepted_epochs(trace::SessionTrace) =
-    trace.point_epoch[findall(trace.accepted)]
 
 """
     _session_finish!(session, status, result, accepted, rejected, last_trial)

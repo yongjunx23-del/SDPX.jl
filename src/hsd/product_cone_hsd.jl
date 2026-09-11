@@ -545,7 +545,6 @@ function ProductConeHSDState(
     )
 end
 
-@inline product_hsd_base(state::ProductConeHSDState) = state.base
 
 # Native iteration controls.  The `nothing` fast path intentionally returns
 # the historical expression exactly; no allocation or alternate arithmetic
@@ -699,11 +698,6 @@ function product_hsd_symmetric_core_prepared(state::ProductConeHSDState)
     return core.factor_epoch == 0 && core.homogeneous_solves == 0 &&
            core.variable_solves == 0
 end
-
-# P7 minimal product-HSD hooks/metadata: diagnostic accessors for the
-# fused residual workspace, its metadata, and the deterministic thread
-# budget.  No numeric path reads these values.
-@inline product_hsd_residual_hook(state::ProductConeHSDState) = state.residual_hook
 @inline product_hsd_residual_metadata(state::ProductConeHSDState) =
     product_hsd_residual_metadata(state.residual_hook)
 @inline product_hsd_residual_workspace(state::ProductConeHSDState) =

@@ -306,19 +306,6 @@ end
 
 """Cumulative PSD panel accounting of one sparse session (prepacks, rebuilds,
 prepack/rebuild bytes, and Schur tile writes), for trace projection."""
-function sparse_schur_session_psd_panel_diagnostics(
-    session::SparseSchurSession,
-)
-    stats = psd_panel_stats(session.psd_panels)
-    return (
-        psd_panel_blocks=length(session.psd_panels),
-        psd_panel_prepacks=stats.prepacks,
-        psd_panel_rebuilds=stats.rebuilds,
-        psd_panel_prepack_bytes=stats.prepack_bytes,
-        psd_panel_rebuild_bytes=stats.rebuild_bytes,
-        psd_panel_tile_writes=stats.tiles,
-    )
-end
 
 """Assemble numeric reduced operator values into the frozen plan slots."""
 function assemble_sparse_schur_operator!(

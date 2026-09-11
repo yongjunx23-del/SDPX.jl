@@ -90,9 +90,3 @@ end
 @inline solver_workspace_x(ws::IterateWorkspace) = ws.x
 @inline solver_workspace_y(ws::IterateWorkspace) = ws.y
 @inline solver_workspace_s(ws::IterateWorkspace) = ws.s
-@inline solver_workspace_dx(ws::IterateWorkspace) = ws.dx
-@inline solver_workspace_dy(ws::IterateWorkspace) = ws.dy
-@inline solver_workspace_ds(ws::IterateWorkspace) = ws.ds
-@inline solver_workspace_xt(ws::IterateWorkspace) = ws.xt
-@inline solver_workspace_yt(ws::IterateWorkspace) = ws.yt
-@inline solver_workspace_st(ws::IterateWorkspace) = ws.st

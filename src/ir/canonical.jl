@@ -168,9 +168,6 @@ canonical_equality(canonical::CanonicalConicProgram) = canonical.A
 canonical_rhs(canonical::CanonicalConicProgram) = canonical.b
 canonical_num_variables(canonical::CanonicalConicProgram) = length(canonical.c)
 canonical_num_slack(canonical::CanonicalConicProgram) = canonical.cone_layout.dimension
-canonical_reconstruction_chain(canonical::CanonicalConicProgram) = canonical.reconstruction_chain
-canonical_reconstruction_stack(canonical::CanonicalConicProgram) =
-    canonical.reconstruction_chain.transform_stack
 
 """
     canonical_layout(canonical::CanonicalConicProgram) -> ConeProductLayout
@@ -551,32 +548,6 @@ function apply_psd_row_scaling!(A, b, block::ConeBlockDescriptor)
 end
 
 """Pull an execution dual row multiplier back to raw coordinates via `Dᵀ`."""
-function pullback_psd_row_dual!(raw_multiplier, execution_dual, block::ConeBlockDescriptor)
-    block.cone === :psd || throw(ArgumentError(
-        "PSD dual pullback requires a :psd block, got $(block.cone)",
-    ))
-    map = _canonical_psd_coordinate_map(
-        block,
-        eltype(raw_multiplier);
-        precision_bits=_psd_default_precision_bits(eltype(raw_multiplier), execution_dual),
-    )
-    local_buffers = length(raw_multiplier) == block.length &&
-                    length(execution_dual) == block.length
-    if local_buffers
-        return svec_dual_to_raw!(raw_multiplier, execution_dual, map)
-    end
-    length(raw_multiplier) >= block.offset + block.length - 1 || throw(DimensionMismatch(
-        "raw multiplier is neither local nor large enough for PSD block",
-    ))
-    length(execution_dual) >= block.offset + block.length - 1 || throw(DimensionMismatch(
-        "execution dual is neither local nor large enough for PSD block",
-    ))
-    @inbounds for position in 1:block.length
-        index = block.offset + position - 1
-        raw_multiplier[index] = execution_dual[index] * map.dual_pullback[position]
-    end
-    return raw_multiplier
-end
 
 function _reconstruct_psd_matrix!(matrix, execution_svec, map::PSDCoordinateMap)
     n = map.dimension

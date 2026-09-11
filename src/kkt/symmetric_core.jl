@@ -531,7 +531,6 @@ function symmetric_core_dsigns(pattern::SymmetricCorePattern{T}) where {T}
 end
 
 """Frozen lower-triangle CSC colptr."""
-symmetric_core_colptr(pattern::SymmetricCorePattern) = pattern.colptr
 
 """Frozen lower-triangle CSC rowval."""
 symmetric_core_rowval(pattern::SymmetricCorePattern) = pattern.rowval

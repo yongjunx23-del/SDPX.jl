@@ -157,7 +157,6 @@ block_shape(block::NativeBlock) = block.shape
 block_offset(block::NativeBlock) = block.offset
 block_length(block::NativeBlock) = block.length
 block_psd_storage(block::NativeBlock) = block.psd
-is_psd_block(block::NativeBlock) = block.cone === :psd
 
 # ---------------------------------------------------------------------------
 # Affine-cone row blocks
@@ -222,11 +221,6 @@ function RowBlock(domain::AffineConeDomain, offset::Integer, shape::Integer)
     )
 end
 
-row_block_domain(block::RowBlock) = block.domain
-row_block_shape(block::RowBlock) = block.shape
-row_block_length(block::RowBlock) = block.length
-row_block_rows(block::RowBlock) = block.rows
-row_block_psd_storage(block::RowBlock) = block.psd
 
 # ---------------------------------------------------------------------------
 # NativeConeProgram
@@ -363,15 +357,7 @@ end
 
 program_arithmetic(program::NativeConeProgram) = program.arithmetic
 program_precision_bits(program::NativeConeProgram) = program.precision_bits
-program_sense(program::NativeConeProgram) = program.objective_sense
-program_objective_vector(program::NativeConeProgram) = program.objective_vector
-program_objective_constant(program::NativeConeProgram) = program.objective_constant
-program_equality_matrix(program::NativeConeProgram) = program.equality_matrix
-program_rhs(program::NativeConeProgram) = program.rhs
-program_blocks(program::NativeConeProgram) = program.blocks
-program_source_model(program::NativeConeProgram) = program.source_model
 
-program_num_blocks(program::NativeConeProgram) = length(program.blocks)
 program_num_rows(program::NativeConeProgram) = length(program.rhs)
 program_num_variables(program::NativeConeProgram) = length(program.objective_vector)
 

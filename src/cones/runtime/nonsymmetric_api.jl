@@ -1056,14 +1056,6 @@ function try_update_scaling!(
     return true
 end
 
-function set_power_dual_hessian_mode!(
-    runtime::_NonsymmetricProductRuntime, enabled::Bool,
-)
-    for block in runtime.power
-        block.force_dual_hessian = enabled
-    end
-    return runtime
-end
 
 function force_power_dual_hessian_scaling!(
     runtime::_NonsymmetricProductRuntime{T}, s, y, mu,
@@ -1466,43 +1458,6 @@ function corrector_shift!(
     return h
 end
 
-function try_nonsymmetric_runtime_higher_correction!(
-    runtime::_NonsymmetricProductRuntime{T}, chi, ds_aff, dy_aff,
-) where {T}
-    _runtime_check_vector(runtime, chi)
-    _runtime_check_vector(runtime, ds_aff)
-    _runtime_check_vector(runtime, dy_aff)
-    zero_owned!(chi)
-    for block in runtime.exp
-        _runtime_copy_in!(block.input, ds_aff, block.offset, 3)
-        _runtime_copy_in!(block.direction, dy_aff, block.offset, 3)
-        result = try_nonsymmetric_higher_correction!(
-            block.corrector,
-            block.tag,
-            block.primal,
-            block.input,
-            block.direction,
-        )
-        runtime_result = _runtime_ns_corrector_result!(runtime, block, result)
-        runtime_result.status === NS_RUNTIME_READY || return runtime_result
-        _runtime_copy_out!(chi, block.offset, block.corrector.chi, 3)
-    end
-    for block in runtime.power
-        _runtime_copy_in!(block.input, ds_aff, block.offset, 3)
-        _runtime_copy_in!(block.direction, dy_aff, block.offset, 3)
-        result = try_nonsymmetric_higher_correction!(
-            block.corrector,
-            block.tag,
-            block.primal,
-            block.input,
-            block.direction,
-        )
-        runtime_result = _runtime_ns_corrector_result!(runtime, block, result)
-        runtime_result.status === NS_RUNTIME_READY || return runtime_result
-        _runtime_copy_out!(chi, block.offset, block.corrector.chi, 3)
-    end
-    return _runtime_ns_success!(runtime, zero(T))
-end
 
 @inline _runtime_has_nonsymmetric(runtime) =
     !isempty(runtime.exp) || !isempty(runtime.power)

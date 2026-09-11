@@ -11,9 +11,6 @@ abstract type AbstractCoreResult{T} end
 abstract type AbstractCoreDiagnostics end
 
 core_status(result::AbstractCoreResult) = result.status
-core_message(result::AbstractCoreResult) = result.message
-core_iterations(result::AbstractCoreResult) = result.iterations
-core_diagnostics(result::AbstractCoreResult) = result.diagnostics
 
 # ---------------------------------------------------------------------------
 # A0 — first-class execution-attempt records.

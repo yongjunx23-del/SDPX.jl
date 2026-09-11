@@ -470,13 +470,6 @@ end
 
 
 """Transform a replacement objective into cached reduced coordinates."""
-function transform_objective(
-    transform::PreprocessTransform{T},
-    objective,
-) where {T}
-    _, reduced, offset = _prepared_objective(transform, objective)
-    return (reduced=reduced, objective_offset=offset)
-end
 
 function _prepared_relation_matches(
     actual::AbstractVector{T},

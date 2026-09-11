@@ -224,9 +224,6 @@ end
 """Setup-time scratch plan for the stack: one entry per transform, sized from
 its declared `scratch_requirements`. The plan is computed once at setup; the
 hot path never re-derives it."""
-function scratch_plan(stack::ReconstructionStack)
-    return Tuple(scratch_requirements(transform) for transform in stack.transforms)
-end
 
 # Forward application is useful while assembling a normalized program.
 #
@@ -285,33 +282,9 @@ function backward_dual_ray!(stack::ReconstructionStack, dest, src)
     return _stack_backward!(backward_dual_ray!, stack, dest, src)
 end
 
-# Explicit reconstruction names make the result/certificate boundary
-# discoverable while retaining the exact backward_* interface required by
-# each transform.
-reconstruct_primal!(stack::ReconstructionStack, dest, src) =
-    backward_primal!(stack, dest, src)
-reconstruct_dual!(stack::ReconstructionStack, dest, src) =
-    backward_dual!(stack, dest, src)
-reconstruct_primal_ray!(stack::ReconstructionStack, dest, src) =
-    backward_primal_ray!(stack, dest, src)
-reconstruct_dual_ray!(stack::ReconstructionStack, dest, src) =
-    backward_dual_ray!(stack, dest, src)
-
 """Reconstruct a canonical primal and dual optimum through the full chain."""
-function reconstruct_optima!(stack::ReconstructionStack, primal_dest, dual_dest,
-                             primal_src, dual_src)
-    backward_primal!(stack, primal_dest, primal_src)
-    backward_dual!(stack, dual_dest, dual_src)
-    return primal_dest, dual_dest
-end
 
 """Reconstruct primal and dual certificate rays through the full chain."""
-function reconstruct_rays!(stack::ReconstructionStack, primal_ray_dest, dual_ray_dest,
-                           primal_ray_src, dual_ray_src)
-    backward_primal_ray!(stack, primal_ray_dest, primal_ray_src)
-    backward_dual_ray!(stack, dual_ray_dest, dual_ray_src)
-    return primal_ray_dest, dual_ray_dest
-end
 
 # ---------------------------------------------------------------------------
 # Nonpositive -> Nonnegative
@@ -363,11 +336,6 @@ end
 """Inverse of [`forward_affine!`](@ref), also `A=-Â`, `b=-b̂`."""
 backward_affine!(transform::NonpositiveToNonnegative, A_dest, b_dest, A, b) =
     forward_affine!(transform, A_dest, b_dest, A, b)
-
-# Scalar row-map primitives let sparse lowerers apply the exact same transform
-# without materializing a dense temporary row for every nonpositive constraint.
-@inline forward_affine_coefficient(::NonpositiveToNonnegative, value) = -value
-@inline forward_affine_rhs(::NonpositiveToNonnegative, value) = -value
 
 function verify_pairing_invariant(
     ::NonpositiveToNonnegative{T}, primal, dual,

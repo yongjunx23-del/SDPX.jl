@@ -328,22 +328,14 @@ end
 # ---------------------------------------------------------------------------
 
 layout_blocks(layout::ConeProductLayout) = layout.blocks
-layout_dimension(layout::ConeProductLayout) = layout.dimension
 layout_barrier_degree(layout::ConeProductLayout) = layout.barrier_degree
-layout_num_blocks(layout::ConeProductLayout) = length(layout.blocks)
 
 block_cone(descriptor::ConeBlockDescriptor) = descriptor.cone
 block_offset(descriptor::ConeBlockDescriptor) = descriptor.offset
 block_dimension(descriptor::ConeBlockDescriptor) = descriptor.dimension
 block_length(descriptor::ConeBlockDescriptor) = descriptor.length
-block_storage(descriptor::ConeBlockDescriptor) = descriptor.storage
 block_parameter(descriptor::ConeBlockDescriptor) = descriptor.parameter
-block_reconstruction(descriptor::ConeBlockDescriptor) = descriptor.reconstruction
 
 """Return the execution coordinate storage of a canonical block."""
-block_execution_storage(descriptor::ConeBlockDescriptor) =
-    descriptor.cone === :psd ? :svec : descriptor.storage
 
 """Return the setup-frozen PSD coordinate map, if this block has one."""
-block_coordinate_map(descriptor::ConeBlockDescriptor) =
-    descriptor.reconstruction.coordinate_map

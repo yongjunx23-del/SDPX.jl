@@ -345,31 +345,7 @@ function exp_dual_hessian(u, v, w)
     return exp_dual_hessian!(hessian, u, v, w)
 end
 
-function exp_primal_hessian_product!(destination, x, y, z, vector, hessian)
-    exp_primal_hessian!(hessian, x, y, z)
-    return nonsymmetric_hessian_product!(destination, hessian, vector)
-end
 
 
-function exp_dual_hessian_product!(destination, u, v, w, vector, hessian)
-    exp_dual_hessian!(hessian, u, v, w)
-    return nonsymmetric_hessian_product!(destination, hessian, vector)
-end
 
-function exp_primal_hessian_solve!(
-    destination, x, y, z, rhs, hessian, cholesky_storage,
-)
-    exp_primal_hessian!(hessian, x, y, z)
-    return nonsymmetric_hessian_solve!(
-        destination, hessian, rhs, cholesky_storage,
-    )
-end
 
-function exp_dual_hessian_solve!(
-    destination, u, v, w, rhs, hessian, cholesky_storage,
-)
-    exp_dual_hessian!(hessian, u, v, w)
-    return nonsymmetric_hessian_solve!(
-        destination, hessian, rhs, cholesky_storage,
-    )
-end

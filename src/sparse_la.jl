@@ -128,39 +128,6 @@ function _pattern_csc(rows::Vector{Int}, cols::Vector{Int}, n::Int)
 end
 
 """Return a lower-triangle CSC copy without touching dense storage."""
-function sparse_lower_csc(A::SparseMatrixCSC{T,Int}) where {T}
-    rows = Int[]
-    cols = Int[]
-    values = T[]
-    positions = Dict{Tuple{Int,Int},Int}()
-    for column in 1:size(A, 2)
-        for pointer in A.colptr[column]:(A.colptr[column + 1] - 1)
-            row = A.rowval[pointer]
-            lower = (max(row, column), min(row, column))
-            previous = get(positions, lower, 0)
-            if previous == 0
-                push!(rows, lower[1])
-                push!(cols, lower[2])
-                push!(values, A.nzval[pointer])
-                positions[lower] = length(values)
-            elseif row >= column
-                # Prefer an authoritative lower entry when a caller supplied
-                # both triangles with different numerical values.
-                values[previous] = A.nzval[pointer]
-            end
-        end
-    end
-    for index in 1:size(A, 1)
-        get(positions, (index, index), 0) == 0 && begin
-            push!(rows, index)
-            push!(cols, index)
-            # A nonzero placeholder keeps the structural diagonal from being
-            # dropped by `sparse`; assembly resets it before numeric use.
-            push!(values, one(T))
-        end
-    end
-    return sparse(rows, cols, values, size(A, 1), size(A, 2))
-end
 
 function _sparse_graph(A::SparseMatrixCSC)
     n = size(A, 1)
@@ -568,27 +535,6 @@ function assemble_sparse_schur!(
 end
 
 """Convenience diagnostics for a frozen Schur storage/map pair."""
-function schur_structure_diagnostics(
-    storage::SparseKKTStorage,
-    map::SchurAssemblyMap,
-)
-    storage.pattern_signature == map.pattern_signature || throw(ArgumentError(
-        "Schur diagnostics received mismatched frozen pattern/map",
-    ))
-    symbolic = storage.symbolic
-    return (
-        dimension=size(storage.matrix, 1),
-        nnz=nnz(storage.matrix),
-        input_nnz=symbolic.input_nnz,
-        density=symbolic.input_nnz /
-                max(size(storage.matrix, 1) * (size(storage.matrix, 1) + 1) ÷ 2, 1),
-        factor_nnz=symbolic.factor_nnz,
-        fill_ratio=symbolic.fill_estimate,
-        pattern_reused=true,
-        map_entries=length(map.position),
-        blocks=length(map.block_ranges),
-    )
-end
 
 """Contribution map for a weighted Gram matrix `G' * Diagonal(w) * G`."""
 struct SparseAssemblyMap{T}
@@ -600,70 +546,6 @@ struct SparseAssemblyMap{T}
     diagonal_positions::Vector{Int}
 end
 
-function sparse_gram_assembly_map(
-    G::SparseMatrixCSC{T,Int},
-    storage::SparseKKTStorage{T},
-) where {T}
-    row_ids = Int[]
-    left_ids = Int[]
-    right_ids = Int[]
-    coefficients = T[]
-    positions = Int[]
-    position_map = storage.position_map
-    # Iterate by columns once and transpose the incidence lists without
-    # constructing a dense row map.
-    incidence_columns = [Int[] for _ in 1:size(G, 1)]
-    incidence_values = [T[] for _ in 1:size(G, 1)]
-    for column in 1:size(G, 2)
-        for pointer in G.colptr[column]:(G.colptr[column + 1] - 1)
-            row = G.rowval[pointer]
-            push!(incidence_columns[row], column)
-            push!(incidence_values[row], G.nzval[pointer])
-        end
-    end
-    precision_bits = T === BigFloat ? _validate_sparse_bigfloat_precision(G) : 0
-    build = function()
-      for row in 1:size(G, 1)
-        columns = incidence_columns[row]
-        values = incidence_values[row]
-        for left in eachindex(columns)
-            for right in 1:left
-                i, j = columns[left], columns[right]
-                i < j && ((i, j) = (j, i))
-                pointer = get(position_map, (i, j), 0)
-                pointer == 0 && continue
-                push!(row_ids, row)
-                push!(left_ids, i)
-                push!(right_ids, j)
-                product = values[left] * values[right]
-                if T === BigFloat
-                    push!(coefficients, MA.mutable_copy(product))
-                else
-                    push!(coefficients, product)
-                end
-                push!(positions, pointer)
-            end
-        end
-      end
-    end
-    if T === BigFloat
-        setprecision(precision_bits) do
-            build()
-        end
-    else
-        build()
-    end
-    diagonal_positions = [get(position_map, (index, index), 0)
-                          for index in 1:size(G, 2)]
-    return SparseAssemblyMap{T}(
-        row_ids,
-        left_ids,
-        right_ids,
-        coefficients,
-        positions,
-        diagonal_positions,
-    )
-end
 
 function _sparse_store!(destination::BigFloat, value::BigFloat)
     MA.operate_to!(destination, copy, value)
@@ -685,34 +567,6 @@ function _sparse_zero_values!(values::AbstractVector)
 end
 
 """Update nzval only; CSC colptr/rowval and the map never change."""
-function assemble_sparse_gram!(
-    storage::SparseKKTStorage{T},
-    map::SparseAssemblyMap{T},
-    weights::AbstractVector{T};
-    regularization::T=zero(T),
-) where {T}
-    _sparse_zero_values!(storage.matrix.nzval)
-    @inbounds for contribution in eachindex(map.position)
-        pointer = map.position[contribution]
-        value = storage.matrix.nzval[pointer] +
-                weights[map.row[contribution]] * map.coefficient[contribution]
-        if T === BigFloat
-            _sparse_store!(storage.matrix.nzval[pointer], value)
-        else
-            storage.matrix.nzval[pointer] = value
-        end
-    end
-    @inbounds for (index, pointer) in pairs(map.diagonal_positions)
-        pointer == 0 && continue
-        if T === BigFloat
-            value = storage.matrix.nzval[pointer] + regularization
-            _sparse_store!(storage.matrix.nzval[pointer], value)
-        else
-            storage.matrix.nzval[pointer] += regularization
-        end
-    end
-    return storage.matrix
-end
 
 
 mutable struct GenericSparseCholeskyFactor{T} <: AbstractSparseFactor

@@ -510,17 +510,6 @@ function kkt_backend_from_formulation(
 end
 
 """Compatibility equality for backend aliases implementing one formulation."""
-function kkt_backend_matches_formulation(
-    backend::Symbol,
-    plan::FormulationPlan,
-    algorithm::Symbol,
-    equalities::Integer,
-)
-    planned = kkt_backend_from_formulation(plan, algorithm, equalities)
-    backend === planned && return true
-    return planned === :dense_cholesky &&
-           backend === :dense_cholesky_fallback
-end
 
 """
     kkt_formulation_from_backend(kkt_backend) -> Symbol

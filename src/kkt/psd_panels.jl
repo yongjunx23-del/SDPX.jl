@@ -474,10 +474,8 @@ end
 # ---------------------------------------------------------------------------
 
 """Cumulative structural-epoch prepack count for `panel`."""
-psd_panel_prepack_count(panel::PSDCongruencePanel) = panel.prepacks[]
 
 """Cumulative scaling-epoch congruence rebuild count for `panel`."""
-psd_panel_rebuild_count(panel::PSDCongruencePanel) = panel.rebuilds[]
 
 """Bytes written by structural-epoch prepacks of `panel`."""
 psd_panel_prepack_bytes(panel::PSDCongruencePanel) = panel.prepack_bytes[]
@@ -486,11 +484,8 @@ psd_panel_prepack_bytes(panel::PSDCongruencePanel) = panel.prepack_bytes[]
 psd_panel_rebuild_bytes(panel::PSDCongruencePanel) = panel.rebuild_bytes[]
 
 """Cumulative Schur tile writes performed by `panel`."""
-psd_panel_tile_count(panel::PSDCongruencePanel) = panel.tiles[]
 
 """Structural epoch currently represented by `panel`."""
-psd_panel_structural_epoch(panel::PSDCongruencePanel) =
-    panel.structural_epoch[]
 
 """Scaling epoch currently represented by `panel`."""
 psd_panel_scaling_epoch(panel::PSDCongruencePanel) = panel.scaling_epoch[]

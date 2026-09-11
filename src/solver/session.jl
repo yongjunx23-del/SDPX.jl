@@ -146,21 +146,13 @@ function SessionState(state::ProductConeHSDState{T}) where {T}
     )
 end
 
-solver_carrier(session::SessionState) = session.hsd
 solver_workspace(session::SessionState) = session.workspace
 solver_accepted(session::SessionState) = session.accepted
 solver_trial(session::SessionState) = session.trial
 
-@inline solver_base(session::SessionState) = session.hsd.base
 
 @inline solver_point_epoch(session::SessionState)::Int =
     session.hsd.base.point_epoch
-@inline solver_residual_epoch(session::SessionState)::Int =
-    session.hsd.base.residual_epoch
-@inline solver_matrix_epoch(session::SessionState)::Int =
-    session.hsd.base.epoch
-@inline solver_iterations(session::SessionState)::Int =
-    session.hsd.base.record.iterations
 @inline solver_mu(session::SessionState) = session.hsd.base.mu
 @inline solver_tau(session::SessionState) = session.hsd.base.tau
 @inline solver_kappa(session::SessionState) = session.hsd.base.kappa

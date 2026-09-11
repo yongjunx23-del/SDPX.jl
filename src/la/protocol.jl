@@ -168,7 +168,6 @@ function ShapeSpec(rows::Integer, cols::Integer; rank_kind::Symbol = :full,
     ShapeSpec(m, n, rect, rank_kind)
 end
 
-is_square(s::ShapeSpec) = !s.rectangular && s.rows == s.cols
 
 """
     IndexSpec
@@ -745,7 +744,6 @@ DeepDiagnosticsGuard() = DeepDiagnosticsGuard(0, 0, 0)
 
 note_deep_call!(g::DeepDiagnosticsGuard) = (g.deep_calls += 1; nothing)
 note_factor_copy!(g::DeepDiagnosticsGuard) = (g.factor_copies += 1; nothing)
-note_symbolic_bump!(g::DeepDiagnosticsGuard) = (g.symbolic_epoch_bumps += 1; nothing)
 
 deep_snapshot(g::DeepDiagnosticsGuard) =
     (deep_calls=g.deep_calls, factor_copies=g.factor_copies,

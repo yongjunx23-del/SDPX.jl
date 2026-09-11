@@ -246,13 +246,6 @@ max_granted_threads(b::SessionThreadBudget) = max(
 )
 
 """The granted width for one consumer (`0` when that consumer owns no layer)."""
-function granted_consumer_threads(b::SessionThreadBudget, consumer::Symbol)
-    consumer === b.active_consumer || return consumer === :none ? 0 : 0
-    consumer === :coarse_cone_tasks && return b.budget.julia_outer_threads
-    consumer === :la_kernel && return b.budget.julia_outer_threads
-    consumer === :blas_layer && return b.budget.blas_threads
-    return 0
-end
 
 # ---------------------------------------------------------------------------
 # The process-global BLAS scope

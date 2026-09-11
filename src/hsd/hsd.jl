@@ -578,8 +578,6 @@ end
 # ---------------------------------------------------------------------------
 
 hsd_nu(state::HSDState) = state.nu
-hsd_has_variables(state::HSDState) = state.n
-hsd_effective_variables(state::HSDState) = state.workspace.nr
 hsd_num_slack(state::HSDState) = state.m
 
 """

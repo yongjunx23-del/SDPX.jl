@@ -145,18 +145,6 @@ function update_scaling!(runtime::ProductConeRuntime{T}, s, y, mu) where {T}
     return runtime
 end
 
-function cone_inner_product(runtime::ProductConeRuntime, s, y)
-    _runtime_check_vectors(runtime, s, y)
-    _runtime_finite(s) || throw(DomainError(s, "primal product vector contains non-finite data"))
-    _runtime_finite(y) || throw(DomainError(y, "dual product vector contains non-finite data"))
-    # `_runtime_check_vectors` enforces a single runtime arithmetic type, so
-    # no promotion or narrowing is needed on this hot reduction.
-    acc = zero(eltype(s))
-    @inbounds for i in 1:runtime.dimension
-        acc += s[i] * y[i]
-    end
-    return acc
-end
 
 function apply_Theta!(runtime::ProductConeRuntime, dst, src)
     _runtime_check_vector(runtime, dst)
@@ -1305,25 +1293,3 @@ end
 
 
 """Recover the block directions `dy=G(primal_rhs)`, `ds=h-Theta(dy)`."""
-function recover_direction!(
-    runtime::ProductConeRuntime,
-    ds,
-    dy,
-    h,
-    primal_rhs,
-    theta_scratch,
-)
-    _runtime_check_vector(runtime, ds)
-    _runtime_check_vector(runtime, dy)
-    _runtime_check_vector(runtime, h)
-    _runtime_check_vector(runtime, primal_rhs)
-    _runtime_check_vector(runtime, theta_scratch)
-    _runtime_require_valid(runtime)
-    apply_G!(runtime, dy, primal_rhs)
-    apply_Theta!(runtime, theta_scratch, dy)
-    @inbounds for index in 1:runtime.dimension
-        ds[index] = h[index] - theta_scratch[index]
-    end
-    _runtime_finite(ds) || throw(DomainError(ds, "recovered primal direction is non-finite"))
-    return ds, dy
-end

@@ -187,16 +187,6 @@ end
     return NS_SCALING_CONVERGED
 end
 
-@inline function try_apply_nonsymmetric_G!(
-    destination::Vector{T},
-    workspace::NonsymmetricScalingWorkspace{T},
-    source::Vector{T},
-) where {T<:AbstractFloat}
-    return try_apply_nonsymmetric_G_reason!(
-        destination, workspace, source,
-    ) === NS_SCALING_CONVERGED
-end
-
 function _runtime_validate_block(block, expected::Int)
     block.offset == expected || throw(ArgumentError(
         "ProductConeRuntime requires contiguous offsets: block offset $(block.offset), " *

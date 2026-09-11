@@ -308,22 +308,6 @@ function ProductHSDResidualMetadata(::Type{T}) where {T<:AbstractFloat}
 end
 
 """Reset all fused-reduction metadata counters and snapshots."""
-function reset!(metadata::ProductHSDResidualMetadata{T}) where {T}
-    metadata.evaluation_count = 0
-    metadata.adx_count = 0
-    metadata.atdy_count = 0
-    metadata.cone_action_count = 0
-    metadata.scalar_term_count = 0
-    metadata.newton_residual_count = 0
-    metadata.bin_reduction_count = 0
-    metadata.certificate_input_count = 0
-    metadata.route_acceptance_count = 0
-    metadata.last_fused_max_residual = zero(T)
-    metadata.last_scalar_gap = zero(T)
-    metadata.last_tau_kappa = zero(T)
-    metadata.budget_record = nothing
-    return metadata
-end
 
 # Per-cone block ranges used for the fixed-bin norm partials.  Product
 # linearizations expose their block ranges; a single local contribution owns
@@ -610,10 +594,6 @@ function attach_residual_workspace!(
 end
 
 """Attach (or replace) the deterministic thread budget of a hook."""
-function attach_thread_budget!(hook::ProductHSDResidualHook, budget::ThreadBudget)
-    hook.budget = budget
-    return hook
-end
 
 """Snapshot the requested/effective thread counts into the hook metadata."""
 function record_thread_budget!(

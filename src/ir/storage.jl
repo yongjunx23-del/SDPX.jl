@@ -181,12 +181,6 @@ end
 psd_coordinate_map(::Type{T}, dimension::Integer; kwargs...) where {T<:AbstractFloat} =
     PSDCoordinateMap(T, dimension; kwargs...)
 
-@inline psd_coordinate_dimension(map::PSDCoordinateMap) = map.dimension
-@inline psd_coordinate_length(map::PSDCoordinateMap) = map.length
-@inline psd_primal_scale(map::PSDCoordinateMap) = map.primal_scale
-@inline psd_primal_inverse(map::PSDCoordinateMap) = map.primal_inverse
-@inline psd_dual_pullback(map::PSDCoordinateMap) = map.dual_pullback
-@inline psd_dual_to_execution(map::PSDCoordinateMap) = map.dual_to_execution
 
 @inline function _validate_psd_coordinate_buffers(dst, src, len::Int)
     length(dst) == len || throw(DimensionMismatch(
@@ -314,37 +308,8 @@ svec_to_raw_lower!(dst, src, map::PSDCoordinateMap) =
     svec_to_matrix_raw_lower!(dst, src, map)
 
 """MOI's upper-triangle column-major order -> SDPX raw lower order."""
-function moi_upper_to_raw_lower!(dst, src, n::Integer)
-    n >= 1 || throw(ArgumentError("PSD dimension must be >= 1, got $n"))
-    len = psd_packed_length(n)
-    _validate_psd_coordinate_buffers(dst, src, len)
-    @inbounds for position in 1:len
-        row = psd_packed_row(position, n)
-        column = psd_packed_column(position, n)
-        # Upper-column-major index of (min(row,column), max(row,column)).
-        upper_row = min(row, column)
-        upper_column = max(row, column)
-        upper_index = (upper_column - 1) * upper_column ÷ 2 + upper_row
-        dst[position] = src[upper_index]
-    end
-    return dst
-end
 
 """SDPX raw lower order -> MOI's upper-triangle column-major order."""
-function raw_lower_to_moi_upper!(dst, src, n::Integer)
-    n >= 1 || throw(ArgumentError("PSD dimension must be >= 1, got $n"))
-    len = psd_packed_length(n)
-    _validate_psd_coordinate_buffers(dst, src, len)
-    @inbounds for position in 1:len
-        row = psd_packed_row(position, n)
-        column = psd_packed_column(position, n)
-        upper_row = min(row, column)
-        upper_column = max(row, column)
-        upper_index = (upper_column - 1) * upper_column ÷ 2 + upper_row
-        dst[upper_index] = src[position]
-    end
-    return dst
-end
 
 """
     is_stored_psd_metadata(psd, cone) -> Bool

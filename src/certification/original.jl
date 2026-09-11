@@ -415,7 +415,6 @@ end
 variable_blocks(problem::OriginalProblem) = problem.blocks
 
 """Cone layout of the ROW space (the primal slack `b − A x`)."""
-slack_blocks(problem::OriginalProblem) = problem.row_blocks
 
 variable_dimension(problem::OriginalProblem) = size(problem.A, 2)
 row_dimension(problem::OriginalProblem) = size(problem.A, 1)

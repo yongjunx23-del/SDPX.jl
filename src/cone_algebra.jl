@@ -136,11 +136,6 @@ orthant_jordan_product(x, y) = jordan_product(OrthantCone(), x, y)
 orthant_sqrt(x) = sqrt(OrthantCone(), x)
 orthant_inverse(x) = inverse(OrthantCone(), x)
 orthant_boundary_step(x, dx) = boundary_step(OrthantCone(), x, dx)
-function orthant_boundary_step!(w, x, dx)
-    step = boundary_step(OrthantCone(), x, dx)
-    w[1] = step
-    return step
-end
 
 # ---------------------------------------------------------------------------
 # SOC  (Lorentz cone Q^n = {(t,u) : t >= ||u||})

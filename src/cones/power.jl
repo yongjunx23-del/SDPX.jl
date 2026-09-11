@@ -300,10 +300,6 @@ power_barrier_hessian!(hessian, x, y, z, alpha) =
     power_primal_hessian!(hessian, x, y, z, alpha)
 
 """The degree-3 dual barrier `F_primal(u/alpha,v/(1-alpha),w)`."""
-function power_dual_barrier(u, v, w, alpha)
-    a, b = _power_alpha(alpha, u, v, w)
-    return power_primal_barrier(u / a, v / b, w, a)
-end
 
 function power_dual_gradient(u, v, w, alpha)
     a, b = _power_alpha(alpha, u, v, w)
@@ -311,14 +307,6 @@ function power_dual_gradient(u, v, w, alpha)
     return (gx / a, gy / b, gz)
 end
 
-function power_dual_gradient!(gradient, u, v, w, alpha)
-    _require_dense3_vector(gradient, "gradient")
-    gu, gv, gw = power_dual_gradient(u, v, w, alpha)
-    gradient[1] = gu
-    gradient[2] = gv
-    gradient[3] = gw
-    return gradient
-end
 
 function power_dual_hessian!(hessian, u, v, w, alpha)
     _require_dense3_matrix(hessian, "hessian")
@@ -341,34 +329,6 @@ function power_dual_hessian(u, v, w, alpha)
     return power_dual_hessian!(hessian, u, v, w, alpha)
 end
 
-function power_primal_hessian_product!(
-    destination, x, y, z, alpha, vector, hessian,
-)
-    power_primal_hessian!(hessian, x, y, z, alpha)
-    return nonsymmetric_hessian_product!(destination, hessian, vector)
-end
 
-function power_dual_hessian_product!(
-    destination, u, v, w, alpha, vector, hessian,
-)
-    power_dual_hessian!(hessian, u, v, w, alpha)
-    return nonsymmetric_hessian_product!(destination, hessian, vector)
-end
 
-function power_primal_hessian_solve!(
-    destination, x, y, z, alpha, rhs, hessian, cholesky_storage,
-)
-    power_primal_hessian!(hessian, x, y, z, alpha)
-    return nonsymmetric_hessian_solve!(
-        destination, hessian, rhs, cholesky_storage,
-    )
-end
 
-function power_dual_hessian_solve!(
-    destination, u, v, w, alpha, rhs, hessian, cholesky_storage,
-)
-    power_dual_hessian!(hessian, u, v, w, alpha)
-    return nonsymmetric_hessian_solve!(
-        destination, hessian, rhs, cholesky_storage,
-    )
-end

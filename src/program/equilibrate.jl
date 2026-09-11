@@ -264,7 +264,3 @@ function reconstruct_slack(
         for i in eachindex(shat)
     ]
 end
-
-# Aliases kept for symmetry with the reconstruction layer naming.
-reconstruct_primal_coordinates(map::EquilibrationMap, xhat) = reconstruct_primal(map, xhat)
-reconstruct_dual_coordinates(map::EquilibrationMap, yhat) = reconstruct_dual(map, yhat)

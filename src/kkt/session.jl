@@ -69,8 +69,6 @@ if !isdefined(@__MODULE__, :KKTSession)
         KKT_STATE_NUMERIC_FAILURE = 0x06
     end
 
-    kkt_state_symbol(state::KKTSessionState) =
-        state === KKT_STATE_UNPREPARED ? :unprepared :
         state === KKT_STATE_LEASED ? :leased :
         state === KKT_STATE_SOLVED ? :solved :
         state === KKT_STATE_REVOKED ? :revoked :
@@ -442,7 +440,6 @@ if !isdefined(@__MODULE__, :KKTSession)
     end
 
     """The strategy the session is currently admitted for, or `:none`."""
-    active_strategy(session::KKTSession) = session.strategy
 
     """Is the session's logical lease currently valid?"""
     lease_valid(session::KKTSession) = session.lease.valid
