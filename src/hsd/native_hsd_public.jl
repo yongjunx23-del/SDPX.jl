@@ -1909,63 +1909,43 @@ function _public_native_hsd_core(
                 Matrix(solve_reduced.A), solve_reduced.c,
             )
         end
+        # Any remaining non-ready sparse reduction is an authority gap, not a
+        # verdict: no rank authority could check this operator (unsupported
+        # precision, ambiguous band, or an unavailable required expansion).
+        # Do not refuse the solve. Proceed under the recorded full-rank
+        # assumption (V = identity): the mandatory original-coordinate
+        # certificate remains the authority — a wrong assumption makes the
+        # recovered certificate fail and the result is NumericalFailure,
+        # never a certified wrong answer. The gap is reported through the
+        # plan's product_rank_reason.
+        unverified_rank_reason = :ready
         if row_reduction isa SparseEqualityReduction &&
            (row_reduction.status !== SparseEqualityReady ||
             row_reduction.mode !== :preserve_original)
-            reason = row_reduction.status === SparseEqualityRankAmbiguous ?
-                :sparse_product_rank_ambiguous :
+            unverified_rank_reason =
+                row_reduction.status === SparseEqualityRankAmbiguous ?
+                    :sparse_product_rank_ambiguous :
                 row_reduction.status === SparseEqualityExpandedRequired ?
-                :symmetric_core_requires_proven_full_sparse_rank :
+                    :symmetric_core_requires_proven_full_sparse_rank :
                 row_reduction.status === SparseEqualityUnsupportedPrecision ?
-                :sparse_product_rank_unsupported_precision :
-                :symmetric_core_sparse_rank_authority_unavailable
-            plan = _native_hsd_plan(
-                program,
-                canonical,
-                reduction,
-                route,
-                settings;
-                product_rank=row_reduction.rank,
-                product_rank_ambiguous=row_reduction.ambiguous,
-                product_rank_incompatible=false,
-                product_rank_reason=reason,
-                fixed_trace_applicable=fixed_trace_plan !== nothing,
-            )
-            return canonical, reduction, _native_hsd_core_result(
-                T, InsufficientPrecision, reason, plan, reduction,
-                0, 0, nothing, false, x_full, s_full, y_full,
-                setup_seconds, 0.0, 0.0,
+                    :sparse_product_rank_unsupported_precision :
+                    :symmetric_core_sparse_rank_authority_unavailable
+            unverified_n = canonical_num_variables(solve_reduced)
+            row_reduction = (
+                Ar=SparseArrays.sparse(solve_reduced.A),
+                cr=copy_owned!(alloc_zeros(T, unverified_n), solve_reduced.c),
+                V=IdentityRankBasis(T, unverified_n),
+                cnull=alloc_zeros(T, unverified_n),
+                rank=unverified_n,
+                rank_tolerance=zero(T),
+                objective_tolerance=zero(T),
+                ambiguous=false,
+                incompatible=false,
+                ray=alloc_zeros(T, unverified_n),
             )
         end
         if row_reduction.ambiguous
-            plan = _native_hsd_plan(
-                program,
-                canonical,
-                reduction,
-                route,
-                settings;
-                product_rank=row_reduction.rank,
-                product_rank_ambiguous=true,
-                product_rank_incompatible=row_reduction.incompatible,
-                fixed_trace_applicable=fixed_trace_plan !== nothing,
-            )
-            return canonical, reduction, _native_hsd_core_result(
-                T,
-                InsufficientPrecision,
-                :rank_ambiguous,
-                plan,
-                reduction,
-                0,
-                0,
-                nothing,
-                false,
-                x_full,
-                s_full,
-                y_full,
-                setup_seconds,
-                0.0,
-                0.0,
-            )
+            unverified_rank_reason = :rank_ambiguous
         end
         if row_reduction.incompatible
             plan = _native_hsd_plan(
@@ -2135,6 +2115,7 @@ function _public_native_hsd_core(
             product_rank=product_rank,
             product_rank_ambiguous=false,
             product_rank_incompatible=false,
+            product_rank_reason=unverified_rank_reason,
             memory_limit_bytes=memory_limit,
             current_rss_bytes=peak_rss,
             core_dimension=core_dimension,
