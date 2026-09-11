@@ -472,7 +472,6 @@ end
 
     # Ownership is nevertheless complete: no sign is left for a caller to patch.
     audit = replay_public_signs(compiled)
-    @test audit.public_sign_patches == 0
     @test audit.objective_shifts == 0
     @test audit.unowned_signs == 0
     @test audit.owned_signs == block_count
@@ -795,3 +794,6 @@ end
     end
     @test true   # a missing provider is infrastructure, not a numeric failure
 end
+
+# Actual MOI solves observe the boundary; canonical metadata cannot prove it.
+include(joinpath(@__DIR__, "..", "public_sign_boundary.jl"))

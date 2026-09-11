@@ -690,6 +690,8 @@ include(joinpath(@__DIR__, "..", "validation", "scientific_core", "test_independ
 include(joinpath(@__DIR__, "structure_cache_synchronization.jl"))
 include(joinpath(@__DIR__, "native_structure_diagnostics.jl"))
 include(joinpath(@__DIR__, "gap_normalization.jl"))
+include(joinpath(@__DIR__, "public_certificate_owner.jl"))
+include(joinpath(@__DIR__, "public_sign_boundary.jl"))
 include(joinpath(@__DIR__, "recovered_accuracy.jl"))
 include(joinpath(@__DIR__, "predictor_rescue.jl"))
 include(joinpath(@__DIR__, "certificate_layout_storage.jl"))

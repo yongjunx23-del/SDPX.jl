@@ -563,10 +563,11 @@ end
 
         # Measured evidence, printed so the S06 report can quote real numbers.
         @info "S06 plan reproducibility and execution match" request_fingerprint=first_plan.request_fingerprint context_fingerprint=first_plan.context_fingerprint signature=s06_signature_digest(first_plan) route=first_plan.route storage=first_plan.resolved_storage verification_ok=verification.ok checks=length(verification.checks) allocated_bytes=observation.allocated_bytes memory_estimate_bytes=first_plan.memory.total_bytes outer_threads_observed=observation.outer_threads_observed outer_threads_granted=first_plan.threads.budget.julia_outer_threads blas_threads_observed=observation.blas_threads_observed la_residual=observation.la_kernel_residual
-        # Cross-process reproducibility: a fresh Julia must agree.
+        # Cross-process reproducibility: a fresh Julia must agree. Preserve
+        # the selected depot/project environment when adding child flags.
         buffer = IOBuffer()
         process = run(pipeline(
-            ignorestatus(setenv(
+            ignorestatus(addenv(
                 s06_child_command(), "SDPX_S06_CHILD" => "plan",
             ));
             stdout=buffer, stderr=buffer,
@@ -590,7 +591,7 @@ end
     @testset "2 one-thread request inside a 4-thread process" begin
         buffer = IOBuffer()
         process = run(pipeline(
-            ignorestatus(setenv(
+            ignorestatus(addenv(
                 s06_child_command(),
                 "SDPX_S06_CHILD" => "1",
                 "JULIA_NUM_THREADS" => "4",
@@ -1225,7 +1226,7 @@ end
                 command = `$(Base.julia_cmd()) --startup-file=no -t1 --project=$rebuild_env $(@__FILE__)`
                 buffer = IOBuffer()
                 process = run(pipeline(
-                    ignorestatus(setenv(
+                    ignorestatus(addenv(
                         command,
                         "SDPX_S06_CHILD" => "provider",
                         "SDPX_S06_PROVIDER" => name,

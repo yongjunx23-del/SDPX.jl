@@ -436,7 +436,7 @@ end
 """
     replay_public_signs(compiled) -> NamedTuple
 
-Audit hook for the card's third acceptance item. The public/MOI layer must not
+Static audit of canonical sign ownership; this does not observe public result getters. The public/MOI layer must not
 apply a sign patch of its own; every sign change belongs to the compiled
 problem, which owns both its forward and inverse map.
 
@@ -472,6 +472,5 @@ function replay_public_signs(compiled::CompiledProblem)
         stacked_signs=stacked,
         unowned_signs=unowned,
         objective_shifts=objective_shifts,
-        public_sign_patches=0,
     )
 end

@@ -12,6 +12,9 @@ function _wide_factor(p, q; seed=1)
     return A, qr(A, ColumnNorm())
 end
 
+# Positive adapter checks apply only to the audited Julia release.
+# Unsupported releases exercise refusal and the end-to-end fallback below.
+if _WQR._product_hsd_wide_qr_adapter_permitted()
 @testset "wide pivoted-QR adapter: differential bit-identity" begin
     for (p, q) in ((141, 772), (268, 1284), (5, 9), (2, 40))
         A, F = _wide_factor(p, q)
@@ -97,6 +100,8 @@ end
     @test rhs == rhs_copy
 end
 
+end # audited adapter checks
+
 @testset "wide pivoted-QR adapter: unsupported operators fall back" begin
     # tall and square factors are outside the audited wide branch
     for (p, q) in ((40, 9), (12, 12))
@@ -113,6 +118,7 @@ end
     @test SDPX._product_hsd_wide_qr_reduce(qr(zeros(3, 0), ColumnNorm())) === nothing
 end
 
+if _WQR._product_hsd_wide_qr_adapter_permitted()
 @testset "wide pivoted-QR adapter: self-check refuses a diverged reduction" begin
     A, F = _wide_factor(12, 40; seed=5)
     reduction = _WQR._product_hsd_wide_qr_reduce(F)
@@ -121,6 +127,8 @@ end
     reduction.C[end, end] += 1e-12
     @test !SDPX._product_hsd_wide_qr_selfcheck(F, reduction, 12, 40)
 end
+
+end # audited self-check
 
 @testset "wide pivoted-QR adapter: provenance is recorded" begin
     provenance = SDPX._product_hsd_wide_qr_provenance()

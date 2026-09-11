@@ -44,6 +44,10 @@ MFLA="${MFLA_REPO:-$ROOT/MultiFloatLinearAlgebra.jl}"
 BFLA="${BFLA_REPO:-$ROOT/BigFloatLinearAlgebra.jl}"
 ENV="${SDPX_REBUILD_ENV:-$ROOT/rebuild-env}"
 OUT="${1:-$ROOT/rebuild-reports/I01_prework/driver_matrix}"
+# Isolated SDPX + MultiFloats environment for A01's no-provider leg.
+# Override when the host default environment contains optional providers.
+DEFAULT_ENV="${SDPX_REBUILD_DEFAULT_ENV:-$SDPX}"
+export SDPX_S06_REBUILD_ENV="${SDPX_S06_REBUILD_ENV:-$ENV}"
 export JULIA_DEPOT_PATH="${SDPX_REBUILD_DEPOT:-$ROOT/rebuild-env-depot}:$HOME/.julia"
 export JULIA_NUM_THREADS=1
 
@@ -94,11 +98,10 @@ run() {  # run <name> <workdir> <project> <script> [ENVS="K=V ..."] [ARGS="--fla
     fi
 }
 
-# A01 is provider-GATED: its default leg asserts the providers are ABSENT, which
-# is only true under SDPX's own project. Running that leg under $ENV makes three
-# assertions fail by design, and A01b recorded exactly that ("NO selector" -> 1
-# fail). So the default leg uses --project=$SDPX and the provider legs use $ENV.
-# Getting this wrong looks like a regression and is not one.
+# A01's default leg requires SDPX + MultiFloats but no optional provider.
+# Use SDPX_REBUILD_DEFAULT_ENV when that is not the SDPX project environment.
+# Its LOAD_PATH is isolated so global @v#.# providers cannot contaminate it.
+# The explicitly selected provider legs continue to use the full rebuild env.
 run S01            "$SDPX" "$ENV"  test/rebuild/S01.jl
 run S02            "$SDPX" "$ENV"  test/rebuild/S02.jl
 run S03            "$SDPX" "$ENV"  test/rebuild/S03.jl
@@ -107,7 +110,7 @@ run S05_none       "$SDPX" "$ENV"  test/rebuild/S05.jl "S05_LIVE_PROVIDER=none"
 run S05_mfla       "$SDPX" "$ENV"  test/rebuild/S05.jl "S05_LIVE_PROVIDER=mfla"
 run S05_bfla       "$SDPX" "$ENV"  test/rebuild/S05.jl "S05_LIVE_PROVIDER=bfla"
 run S06            "$SDPX" "$ENV"  test/rebuild/S06.jl
-run A01_default    "$SDPX" "$SDPX" test/rebuild/A01.jl
+run A01_default    "$SDPX" "$DEFAULT_ENV" test/rebuild/A01.jl "JULIA_LOAD_PATH=@:@stdlib"
 run A01_all        "$SDPX" "$ENV"  test/rebuild/A01.jl "" "--provider=all"
 run A01_mfla       "$SDPX" "$ENV"  test/rebuild/A01.jl "" "--provider=mfla"
 run A01_bfla       "$SDPX" "$ENV"  test/rebuild/A01.jl "" "--provider=bfla"
