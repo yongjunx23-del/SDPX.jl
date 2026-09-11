@@ -31,6 +31,12 @@ set -uo pipefail
 WS="/Users/xuyongjun/Desktop/project/SDPX"
 declare -a NAMES=(SDPX MFLA BFLA)
 declare -a REPOS=("$WS/SDPX.jl" "$WS/MultiFloatLinearAlgebra.jl" "$WS/BigFloatLinearAlgebra.jl")
+# The pinned directories must carry the CANONICAL repository names. Drivers and
+# run_driver_matrix.sh locate their siblings by that name, so a pin with tidier
+# short names is not drop-in: B03's driver, run against a pin whose SDPX
+# directory was called `SDPX`, died on `git -C /tmp/pinb03/SDPX.jl`. Keeping the
+# real names costs nothing and makes the pin a faithful stand-in for a workspace.
+declare -a DIRS=(SDPX.jl MultiFloatLinearAlgebra.jl BigFloatLinearAlgebra.jl)
 DEPOT="$WS/rebuild-env-depot:$HOME/.julia"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -57,13 +63,14 @@ clean_check() {
 remove_pin() {
     local target="${1:-/tmp/sdpxpin}"
     for i in 0 1 2; do
-        local n="${NAMES[$i]}" d="${REPOS[$i]}"
-        if [ -e "$target/$n" ]; then
-            git -C "$d" worktree remove --force "$target/$n" 2>/dev/null \
-                || rm -rf "$target/$n"
-            echo "  removed pin $n"
+        local d="${REPOS[$i]}" dir="${DIRS[$i]}"
+        if [ -e "$target/$dir" ]; then
+            git -C "$d" worktree remove --force "$target/$dir" 2>/dev/null \
+                || rm -rf "$target/$dir"
+            echo "  removed pin $dir"
         fi
     done
+    [ -L "$target/rebuild-reports" ] && rm -f "$target/rebuild-reports"
     rm -rf "$target-env"
     echo "pin removed (target=$target)"
 }
@@ -90,32 +97,43 @@ mkdir -p "$TARGET"
 
 fail=0
 for i in 0 1 2; do
-    n="${NAMES[$i]}"; d="${REPOS[$i]}"; sha="${SHAS[$i]}"
+    n="${NAMES[$i]}"; d="${REPOS[$i]}"; sha="${SHAS[$i]}"; dir="${DIRS[$i]}"
     if ! git -C "$d" cat-file -e "${sha}^{commit}" 2>/dev/null; then
         echo "  $n: revision $sha does not exist in $d"; fail=1; continue
     fi
-    git -C "$d" worktree add --detach --force "$TARGET/$n" "$sha" >/dev/null 2>&1 \
+    git -C "$d" worktree add --detach --force "$TARGET/$dir" "$sha" >/dev/null 2>&1 \
         || { echo "  $n: worktree add failed"; fail=1; continue; }
-    got="$(git -C "$TARGET/$n" rev-parse HEAD)"
+    got="$(git -C "$TARGET/$dir" rev-parse HEAD)"
     want="$(git -C "$d" rev-parse "${sha}^{commit}")"
     if [ "$got" != "$want" ]; then
         echo "  $n: MISMATCH got=$got want=$want"; fail=1; continue
     fi
     # A pinned tree exists to be clean. If it is not, the pin is not evidence.
-    dirty="$(git -C "$TARGET/$n" status --porcelain | wc -l | tr -d ' ')"
+    dirty="$(git -C "$TARGET/$dir" status --porcelain | wc -l | tr -d ' ')"
     printf '  %-5s %s  verified, dirty_paths=%s\n' "$n" "$got" "$dirty"
     [ "$dirty" = "0" ] || fail=1
 done
 [ "$fail" = "0" ] || die "at least one pin failed; refusing to build an environment on it"
+
+# Several drivers keep their own battery under `rebuild-reports/<ID>/` and locate
+# it relative to the workspace root -- B03's driver reads
+# `rebuild-reports/B03/B03_core.jl` that way, and failed on a pin without it.
+# Symlinking the live reports directory makes the pin a faithful stand-in. It is
+# a symlink, deliberately: task batteries are not part of any repository, so
+# they cannot be pinned, and copying them would silently freeze a stale copy.
+if [ -d "$WS/rebuild-reports" ]; then
+    ln -s "$WS/rebuild-reports" "$TARGET/rebuild-reports"
+    echo "  linked rebuild-reports -> $WS/rebuild-reports (batteries are not in any repo)"
+fi
 
 echo
 echo "=== building environment $ENV ==="
 cp -r "$WS/rebuild-env" "$ENV" || die "could not copy rebuild-env"
 JULIA_DEPOT_PATH="$DEPOT" julia --project="$ENV" -e "
 using Pkg
-for (name, path) in ((\"SDPX\", \"$TARGET/SDPX\"),
-                     (\"MultiFloatLinearAlgebra\", \"$TARGET/MFLA\"),
-                     (\"BigFloatLinearAlgebra\", \"$TARGET/BFLA\"))
+for (name, path) in ((\"SDPX\", \"$TARGET/${DIRS[0]}\"),
+                     (\"MultiFloatLinearAlgebra\", \"$TARGET/${DIRS[1]}\"),
+                     (\"BigFloatLinearAlgebra\", \"$TARGET/${DIRS[2]}\"))
     Pkg.develop(path = path)
 end
 Pkg.instantiate()
@@ -133,7 +151,7 @@ MANIFEST="$TARGET/PINNED_REVISIONS.txt"
     done
     echo "#"
     for i in 0 1 2; do
-        printf '%-5s %s\n' "${NAMES[$i]}" "$(git -C "$TARGET/${NAMES[$i]}" rev-parse HEAD)"
+        printf '%-5s %s\n' "${NAMES[$i]}" "$(git -C "$TARGET/${DIRS[$i]}" rev-parse HEAD)"
     done
     echo "ENV $ENV"
 } > "$MANIFEST"

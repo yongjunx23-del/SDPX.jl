@@ -25,8 +25,12 @@ set -u
 # against the live trees measures whatever a worker last saved:
 #
 #   SDPX_REBUILD_ROOT=/tmp/sdpxpin SDPX_REBUILD_ENV=/tmp/sdpxpin-env \
-#   SDPX_REPO=/tmp/sdpxpin/SDPX MFLA_REPO=/tmp/sdpxpin/MFLA \
-#   BFLA_REPO=/tmp/sdpxpin/BFLA scripts/rebuild/run_driver_matrix.sh /tmp/mx-pinned
+#   SDPX_REPO=/tmp/sdpxpin/SDPX.jl MFLA_REPO=/tmp/sdpxpin/MultiFloatLinearAlgebra.jl \
+#   BFLA_REPO=/tmp/sdpxpin/BigFloatLinearAlgebra.jl \
+#   scripts/rebuild/run_driver_matrix.sh /tmp/mx-pinned
+#
+# (pin_revisions_env.sh names the pinned directories with the canonical
+# repository names, so a pin is a drop-in workspace root.)
 #
 ROOT="${SDPX_REBUILD_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 SDPX="${SDPX_REPO:-$ROOT/SDPX.jl}"
