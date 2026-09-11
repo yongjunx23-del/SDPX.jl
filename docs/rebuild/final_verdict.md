@@ -29,7 +29,7 @@ those numbers (**R3**) is marked `not_measured`, not `satisfied`.
 | object | revision | state |
 | --- | --- | --- |
 | SDPX, the revision this verdict's *measurements* were taken against | `c8fb65a0d5e15b6d03d34c4368cba7ad5f697094` (clean) | the deletion tree is `c8fb65a` + the 8 paths in §4 |
-| SDPX, the release revision I03 proposes | the commit the parent makes from §4 (B1+B2+B3); **not yet existing** | named as a placeholder, never as a number |
+| SDPX, **the release revision** | **`69c6c0929d8027f29604ece68292b3c78f7d301e`** (short `69c6c09`), tree clean: B1 `2aef2ef` (retirement), B2 `08ad430` (stale comments), B3 `69c6c09` (this document) | all three suites and the 28-leg matrix are being re-run by the parent at a pin of `69c6c09` / `e3805c9` / `f087a72`; **R3 stays `not_measured` until those numbers arrive** |
 | MFLA | `e3805c9607295f0e173567b060d4035e826310ca` | clean; **untouched by I03** |
 | BFLA | `f087a72f2001088ea520b67588cf18c0d3fce2e8` | clean; **untouched by I03** |
 | MFLA/BFLA as measured by the parent | `e3805c9` / `f087a72` | `Pkg.test()` logs in `rebuild-reports/PARENT_VERIFICATION/` |
@@ -52,12 +52,12 @@ established here"; it is never used to mean "0".
 
 | # | status | command(s) that established it | what the command shows |
 | --- | --- | --- | --- |
-| **R1** | **not_satisfied** | `JULIA_DEPOT_PATH=$REBUILD_DEPOT:$HOME/.julia julia --project=$REBUILD_ENV -t1 /tmp/v01_t7_certificate.jl` → `rebuild-reports/I03/logs/final_tree/R1_certificate_routes.log` (exit 0); `grep -rn 'ResultCertificate{' SDPX.jl/src/`; `grep -rn 'SDPXCertification\.' SDPX.jl/src SDPX.jl/test \| grep -v certification/original.jl`; `sed -n '2576,2586p' SDPX.jl/src/hsd/native_hsd_public.jl` | Four routes (LP, SOC, SDP, infeasibility ray) terminate `cert_valid=true method=original_coordinates` — that is V01's F12/T7 positive half, independently re-run here. But the criterion is *every* route: the downgrade branch `native_hsd_public.jl:2580-2583` (status → `NumericalFailure`, reason `:original_coordinate_certificate_failed`) **has never been driven**, and four `ResultCertificate{T}` construction sites survive (`src/hsd/native_hsd_public.jl:2403`, `:2462`, `:2487`, `src/public/optimize.jl:341`). `grep` for `SDPXCertification.` outside its own file returns **0**, so the module is inert on the public path. The blocker is a **missing instrument**, not missing effort: I02 declined move 6 deliberately because a behaviour change to existing code needs its own before/after, and the plan marks it "deliberately not drafted". My tight-gap control (`gap_limit=1e-14`) did *not* exercise the invalid direction — the certificate was still valid — so the negative direction remains `not_run` |
+| **R1** | **not_satisfied** | `JULIA_DEPOT_PATH=$REBUILD_DEPOT:$HOME/.julia julia --project=$REBUILD_ENV -t1 /tmp/v01_t7_certificate.jl` → `rebuild-reports/I03/logs/final_tree/R1_certificate_routes.log` (exit 0); `grep -rn 'ResultCertificate{' SDPX.jl/src/`; `grep -rn 'SDPXCertification\.' SDPX.jl/src SDPX.jl/test \| grep -v certification/original.jl`; `sed -n '2576,2586p' SDPX.jl/src/hsd/native_hsd_public.jl` | Four routes (LP, SOC, SDP, infeasibility ray) terminate `cert_valid=true method=original_coordinates` — that is V01's F12/T7 positive half, independently re-run here. But the criterion is *every* route: the downgrade branch `native_hsd_public.jl:2581-2586` (status → `NumericalFailure` at `:2583`, reason `:original_coordinate_certificate_failed`) **has never been driven**, and four `ResultCertificate{T}` construction sites survive (`src/hsd/native_hsd_public.jl:2403`, `:2462`, `:2487`, `src/public/optimize.jl:341`). `grep` for `SDPXCertification.` outside its own file returns **0**, so the module is inert on the public path. The blocker is a **missing instrument**, not missing effort: I02 declined move 6 deliberately because a behaviour change to existing code needs its own before/after, and the plan marks it "deliberately not drafted". My tight-gap control (`gap_limit=1e-14`) did *not* exercise the invalid direction — the certificate was still valid — so the negative direction remains `not_run` |
 | **R2** | **not_satisfied** | `rebuild-reports/I03/logs/i03_R2_sign_patch_sweep.log` (commands reproduced verbatim in the log): 8 patterns `'\.= *-' '= *-x' '= *-1 *\.\*' '\*= *-1' sign_flip flip_sign negate public_sign_patch` over `src/public/` (4 files) + `src/moi_wrapper.jl` + `src/frontend/` (2 files); `sed -n '470,476p' SDPX.jl/src/core/compiled_problem.jl`; `sed -n '472,475p' SDPX.jl/test/rebuild/S01.jl`; `grep -rn 'replay_public_signs' SDPX.jl/src SDPX.jl/test` | **8 patterns → 8 zeros.** There is no sign patch to delete, so the prescribed before/after MOI solve would compare a state to itself and can never unblock this row (V01 T8a, independently re-run here). `public_sign_patches=0` is still a **hardcoded literal** at `src/core/compiled_problem.jl:475` asserted against itself at `test/rebuild/S01.jl:474` — an assertion that cannot fail, and it is **not** cited as evidence here. `replay_public_signs` is defined at `compiled_problem.jl:449` and used at exactly one site, `S01.jl:473`, from a constructed `CompiledProblem`; it never inspects the public boundary. The closest thing to a sign correction in the boundary — the MOI interval dual at `src/moi_wrapper.jl:1845` — is a *sum* of two bridge duals, i.e. MOI conforming, not a patch. What is missing is the runtime observation: a count of sign applications at the public boundary during a real MOI solve |
-| **R3** | **not_measured** | not run by I03 — the tree is dirty by construction and `_require_clean_source` is asserted inside the suite (`benchmark/optimization/test_v2_fresh_process_profile.jl:210-215`). Command for the parent, at the post-commit SHA: `cd SDPX.jl && JULIA_DEPOT_PATH=/Users/xuyongjun/Desktop/project/SDPX/rebuild-env-depot:$HOME/.julia julia --project=. -e 'using Pkg; Pkg.test()'`; and for MFLA/BFLA the same from their directories; then `bash SDPX.jl/scripts/rebuild/run_driver_matrix.sh rebuild-reports/PARENT_VERIFICATION/driver_matrix_post_i03` | Pre-deletion, at `c4b109a`: SDPX `tests passed`, 170 testsets, `failcols=0`, **Broken=7 / Pass=9392 / Total=9399**; MFLA `e3805c9` **Pass=4164 / Total=4164**; BFLA `f087a72` **10864/10864**; matrix `legs_run=28 legs_failed=0 failed_legs=none`, every leg with a `Test Summary` (`rebuild-reports/PARENT_VERIFICATION/`). My **post-deletion targeted** legs are all exit 0: load, R1 probe, S01 189, S03 193, S04 313, S06 214, S07 289, S05_none 1466, S05_mfla/S05_bfla 1522, A01_default 1673 (`rebuild-reports/I03/logs/final_tree/`). That is targeted evidence, not the row: **R3 stays `not_measured` until the suites run on a clean tree at the new revision** |
+| **R3** | **not_measured** | not run by I03 — the tree is dirty by construction and `_require_clean_source` is asserted inside the suite (`benchmark/optimization/test_v2_fresh_process_profile.jl:210-215`). Command for the parent, at the post-commit SHA: `cd SDPX.jl && JULIA_DEPOT_PATH=/Users/xuyongjun/Desktop/project/SDPX/rebuild-env-depot:$HOME/.julia julia --project=. -e 'using Pkg; Pkg.test()'`; and for MFLA/BFLA the same from their directories; then `bash SDPX.jl/scripts/rebuild/run_driver_matrix.sh rebuild-reports/PARENT_VERIFICATION/driver_matrix_post_i03` | Pre-deletion, at `c4b109a`: SDPX `tests passed`, 170 testsets, `failcols=0`, **Broken=7 / Pass=9392 / Total=9399**; MFLA `e3805c9` **Pass=4164 / Total=4164**; BFLA `f087a72` **10864/10864**; matrix `legs_run=28 legs_failed=0 failed_legs=none` with a `Test Summary` on every leg (`rebuild-reports/PARENT_VERIFICATION/driver_matrix_frozen.summary`, whose header records the script it used as the live, uncommitted copy with `sha256 4b1f872e…` — the per-leg lines are the evidence; the aggregate alone is not, per F42). My **post-deletion targeted** legs are all exit 0: load, R1 probe, S01 189, S03 193, S04 313, S06 214, S07 289, S05_none 1466, S05_mfla/S05_bfla 1522, A01_default 1673 (`rebuild-reports/I03/logs/final_tree/`). That is targeted evidence, not the row: **R3 stays `not_measured` until the suites run on a clean tree at the new revision**; the parent's pinned run at `69c6c09` / `e3805c9` / `f087a72` is in flight, and MFLA/BFLA suite numbers transfer only because those revisions are byte-unchanged (their matrix legs are being re-run) |
 | **R4** | **not_satisfied** | `python3 SDPX.jl/scripts/rebuild/check_reconstruction.py --record SDPX.jl/docs/rebuild/RELEASE_REVISIONS.txt --target /tmp/q02recon --depot /tmp/q02recon-depot` → `rebuild-reports/Q02/logs/recon_positive.log`, controls `recon_controls.log` (`arms correct: 10 arms wrong: 0`) | The record+check pair exists and works: three SHAs + `Manifest.toml` sha256 ×3 + the Julia version, reconstructed into a depot built from empty, 60 vs 60 entries, dependency set identical, with 10 two-sided control arms. But the record **pins SDPX `c4b109a`**, and the release triple I03 proposes moves SDPX. A record that names a revision the release does not ship does not satisfy the row. Retirement is one command pair: re-pin, then re-check (`pin_revisions_env.sh <new SHA> e3805c9 f087a72 --clean-check`, then `check_reconstruction.py`). Not a limitation — a two-command step |
-| **R5** | **satisfied** | `python3 SDPX.jl/scripts/rebuild/validate_reports.py .` → before I03's report: **`reports=26 errors=0 warnings=147`**; after: `reports=27 errors=0` (re-run recorded in `rebuild-reports/I03/report.json`). Acceptance re-count over the 25 packet reports, reproduced by me: **122 verified / 29 partially_verified / 4 not_verified = 155** (A01b contributes 9 verified as an ad-hoc report). Capability table: `rebuild-reports/Q02/capability_table.tsv` — 56 capabilities, 53 with passing evidence, 26 `verified` / 25 `partially_verified` / 5 `not_verified`, **`certified 0`** | The two entries §4 held open were resolved in the honest direction and are re-verified here: the A01 composite is split into `pass` (20) + `unsupported` (3, explicitly not counted as passes), and S02's interrupted run is `pass` with its non-zero exit stated plus a limitation recording that the clean run supersedes it. `not_run` remains distinguishable from `pass` throughout |
-| **R6** | **satisfied (dense path; R8 carries the residual)** | `cd MultiFloatLinearAlgebra.jl && JULIA_DEPOT_PATH=… julia --project=$REBUILD_ENV -t1 test/rebuild/M01.jl` → `rebuild-reports/I03/logs/pre_delete/M01_lease_token.log` (204/204 pass); `sed -n '350,372p' SDPX.jl/src/la/factor_lease.jl`; V01 `independent_audit.md` §M01 IP-2 and `V01/report.json` F6 | Re-measured by me at this revision: `cache_leases = (first = 0x…01, second = 0x…02)` — the token **differs** across two same-size dense refactors, with the generation advancing `0→1→2`. The `refactor_numeric!` admission refusal now revokes before returning (`factor_lease.jl:364` `_revoke!(h.lease, EvRefactorPreflightRejected, …)`), so all four exits revoke rather than three of four. **Scope, stated so the row is not read wider than it is:** this holds on the four dense `factorize!` methods; the sparse path does not advance the generation at all, which is **R8** |
+| **R5** | **satisfied** | `python3 SDPX.jl/scripts/rebuild/validate_reports.py .` → before I03's report: **`reports=26 errors=0 warnings=147`**; after this report was added: **`reports=27 errors=0 warnings=147`**, with `--only I03` reading `I03 ok errors=0 warnings=0` (`rebuild-reports/I03/logs/i03_validator.log`). Acceptance re-count over the 25 packet reports, reproduced by me: **122 verified / 29 partially_verified / 4 not_verified = 155** (A01b contributes 9 verified as an ad-hoc report). Capability table: `rebuild-reports/Q02/capability_table.tsv` — 56 capabilities, 53 with passing evidence, 26 `verified` / 25 `partially_verified` / 5 `not_verified`, **`certified 0`** | The two entries §4 held open were resolved in the honest direction and are re-verified here: the A01 composite is split into `pass` (20) + `unsupported` (3, explicitly not counted as passes), and S02's interrupted run is `pass` with its non-zero exit stated plus a limitation recording that the clean run supersedes it. `not_run` remains distinguishable from `pass` throughout |
+| **R6** | **satisfied (dense path; R8 carries the residual)** | `cd MultiFloatLinearAlgebra.jl && JULIA_DEPOT_PATH=… julia --project=$REBUILD_ENV -t1 test/rebuild/M01.jl` → `rebuild-reports/I03/logs/pre_delete/M01_lease_token.log` (204/204 pass); `sed -n '350,372p' SDPX.jl/src/la/factor_lease.jl`; V01 `independent_audit.md` §M01 IP-2 and `V01/report.json` F6 | Re-measured by me at this revision: `cache_leases = (first = 0x…01, second = 0x…02)` — the token **differs** across two same-size dense refactors, with the generation advancing `0→1→2`. The `refactor_numeric!` admission refusal now revokes before returning (`factor_lease.jl:371` `_revoke!(h.lease, EvRefactorPreflightRejected, …)`; branch at `:360-372`), so all four exits revoke rather than three of four. **Scope, stated so the row is not read wider than it is:** this holds on the four dense `factorize!` methods; the sparse path does not advance the generation at all, which is **R8** |
 | **R7** | **satisfied (bounded, as its own status cell states)** | `rebuild-reports/PARENT_VERIFICATION/driver_matrix_frozen/M02.log` (leg exit 0, `failcols=0`) + `rebuild-reports/M02/report.json` numeric tests `S05-F1 multi-RHS, dense caches (ldlt, cholesky, lu)` = pass, `S05-F1 multi-RHS, sparse QDLDL cache` = pass, `multi-RHS capability claim` = pass | `capabilities(MF)` no longer rests on a timing claim: it rests on method identity, bitwise agreement with the per-column loop, and the residual — explicitly *not* on timing, because M02's timing instrument **failed its own control** (a known per-column loop measured a sub-1 ratio). MFLA's `S05-F1` "is the dense matrix path genuinely batched" sub-question is **bounded, not settled**, and that bound is the honest form. I did not re-run M02 post-deletion: its subject is MFLA's own crate, and MFLA is untouched at `e3805c9` |
 | **R8** | **not_satisfied — reproduced, and NOT accepted** | `JULIA_DEPOT_PATH=… julia --project=$REBUILD_ENV -t1 /tmp/v01_ip2_sparse.jl` → `rebuild-reports/I03/logs/pre_delete/R8_ip2_sparse_generation.log` (exit 0) | Re-measured by me at this revision, in one process with a positive control: `DIRECT_SPARSE generations=(0,0,0) delta_first=0 delta_second=0` while `DENSE_LDLT generations=(0,1,2) delta_first=1 delta_second=1`, and **SDPX's own seam** (`SDPX.SparseQDLDLProviderCache` + `SDPX._qdldl_provider_factorize!`) also `delta=0` with `issuccess=true`. So on the sparse path a lease taken before a refactor still validates after it — the `M01-F4`/`P02-F1` defect, unchanged, reachable through the real package extension (`ext/MultiFloatQDLDLExt.jl:160`) that loads for any user, not only under a test harness (V01 F6). **Decision: I03 declines to accept this as a release risk.** It is a default-reachable correctness gap, the fix is prepared and behaviourally verified (proposal `I02-P2`: instrument `MFSparseLDLCache.factorize!` so the generation advances, plus the evidence that its commit points exist), and accepting a correctness gap that has a one-line prepared fix would be exactly the "hazard with a false sense of coverage" ADR-002 §4 names. Retirement: apply `I02-P2` and re-run this same command until the sparse deltas read `1,1` with the dense control still `1,1` |
 | **R9** | **not_satisfied — demotion declined** | `cd BigFloatLinearAlgebra.jl && P03_OUT=<dir> JULIA_DEPOT_PATH=… julia --project=$REBUILD_ENV -t1 test/rebuild/P03.jl` → `rebuild-reports/I03/logs/pre_delete/P03_release_gate.log` + `…/p03_out/P03_run_main.txt:112-117` (exit 0); primary log preserved unmodified as `rebuild-reports/I03/logs/P03_run_main.PRE_I03.txt` | Re-run by me at `f087a72`: the driver is **`365/365 Pass`** at the same revision whose own computed gate reads `release_gate_verdict = FAIL`, `required_rows = 10`, `verified_required_rows = 9`, `failing_rows = ["concurrent_sessions_different_precision_in_process_parallel"]`, with four unsupported rows of which exactly one is `required=true`. **`unsupported` means the capability is not offered — it does not mean broken**, and "the gate is red" must never be reported as "the tests fail". **Decision: I03 does not demote the row.** Editing `required=true` to green at the freeze point is the same failure as counting a SKIP as a PASS (the card's hard prohibition), and the correct fixed form is an ADR-level statement that in-process, concurrent, different-precision sessions are architecturally unavailable because BigFloat precision is process-global and `_ambient_guard` throws `PrecisionMismatch` — a contract change with its own evidence burden, which belongs to the ADR owner, not to the last task. Retirement: implement process-isolated precision sessions, or have the ADR owner change P03's contract row *with the measured reason* and re-run the gate |
@@ -115,11 +115,31 @@ From `I03_RELEASE_DECISION.md` §2, §2.5, §2.6 and §3. "Action" is what I03 *
 ## 4. What I03 changed — deletions, with test and reachability evidence, and rollback
 
 Base for every entry: `c8fb65a` (the blob SHAs are the pre-change objects, so any single
-file is restorable with `git -C SDPX.jl checkout c8fb65a -- <path>`).
+file is restorable with `git -C SDPX.jl checkout c8fb65a -- <path>`). The parent committed
+the three boundaries as **B1 `2aef2ef`, B2 `08ad430`, B3 `69c6c09`** (release revision
+`69c6c0929d8027f29604ece68292b3c78f7d301e`), after re-verifying the deletion set itself:
+
+* **B2 is comment-only mechanically**: `git diff -U0` filtered to non-comment changed lines
+  gives **0** for each of the six files — the claim is checked, not asserted.
+* **B1 removed no correctness check by inspection**: in `equality_reduction.jl` only the
+  `println` inside the `SDPX_DEBUG_EQUALITY_RECOVERY` guard was removed and
+  `valid || return false` is retained; in `product_cone_hsd.jl` each removed block held only
+  `showerror`/`println`, with `state.diagnostic`, the `false`, the
+  `return direction_ok ? HSDStepOK : HSDStepDirectionFailed` and the fail-closed comment
+  outside and retained. That is the card's named risk discharged by inspection, by a party
+  other than the author.
+* **The deleted symbols have no code references**: `grep -rn '_product_hsd_soc_condition_budget'`
+  post-deletion returns 3 hits, **all prose** (the pre-existing evidence note and two lines
+  of this document), and both deleted switches have 0 `.jl` references.
+* **The kept-set rationale is a positive control**: `SDPX_DEBUG_DIRECTION` 6 refs,
+  `SDPX_DEBUG_LINE_SEARCH` 3, `SDPX_DEBUG_ITER` 2, `SDPX_CORE_ROUTE_PLANNER` 6 — a decision,
+  not a half-finished sweep.
+
+These four checks are the **parent's**, recorded here as parent verification, not as mine.
 
 | # | path | change | reachability evidence | test evidence | pre-change blob |
 | --- | --- | --- | --- | --- | --- |
-| B1a | `SDPX.jl/src/hsd/product_cone_hsd.jl` | delete `_product_hsd_soc_condition_budget` (23 lines) + 4 `SDPX_DEBUG_SYMMETRIC_CORE` print blocks; correct the false docstring at `:577` | repo-wide grep = 1 hit (own definition) before, **0** after; the debug knobs have **0** setters repo-wide and **0** doc references | `final_tree/`: load exit 0; S01 189 pass, S03 193, S04 313, S06 214, S07 289, A01_default 1673, all exit 0 | `a08ada68e809ca19b1304448f1630ad2dcc2657b` |
+| B1a | `SDPX.jl/src/hsd/product_cone_hsd.jl` | delete `_product_hsd_soc_condition_budget` (23 lines) + 4 `SDPX_DEBUG_SYMMETRIC_CORE` print blocks; correct the false docstring at `:577` | **code** references (`grep -rn --include='*.jl'`): 1 before (its own definition), **0** after. Prose references remain and are expected: the pre-existing `docs/evidence/OPEN_SOC_ROUNDTRIP_ON4.md:12` "DEAD" line and this document — which is why the claim is stated over code, not over a repo-wide grep (the parent caught the repo-wide form reading 3 post-deletion). The two deleted debug knobs have **0** references in any `.jl` and **0** in `docs/`/`rebuild-reports/` | `final_tree/`: load exit 0; S01 189 pass, S03 193, S04 313, S06 214, S07 289, A01_default 1673, all exit 0 | `a08ada68e809ca19b1304448f1630ad2dcc2657b` |
 | B1b | `SDPX.jl/src/hsd/equality_reduction.jl` | delete the `SDPX_DEBUG_EQUALITY_RECOVERY` print block | as above: 0 setters, 0 docs; the guarded body is a single `println` and the decision sits outside it | same legs; the infeasibility route (case C of the R1 probe) exercises this function and still returns a valid ray certificate | `19f1d987968e560abfd1a7cb304a0e2bfd125144` |
 | B2a | `SDPX.jl/src/hsd/product_cone_solve.jl` | correct the false header claim ("deliberately not wired to the public/MOI route") | `native_hsd_public.jl:2204` calls `product_hsd_solve!`; that file's own header names the chain | comment-only; load + all legs | `533547075c813e7f4369dfa1ed4d5bb3e065c078` |
 | B2b | `SDPX.jl/src/hsd/hsd.jl` | correct "retained for callers" (zero callers measured) | `grep -rn '_hsd_column_reduction'` = 2 definitions + 1 docstring cross-reference | comment-only | `388dd47b818a78c904321b47df7bdd8a61ed73a9` |
@@ -128,6 +148,13 @@ file is restorable with `git -C SDPX.jl checkout c8fb65a -- <path>`).
 | B2e | `SDPX.jl/test/rebuild/S06.jl` | correct the false "I01 will add to `src/SDPX.jl`; until then" note while preserving the standalone fallback | `src/SDPX.jl:196-198`; `plan_setup` at `src/planning/setup.jl:598` | S06 driver re-run: 1 testset, 214 pass, exit 0 | `73afb021112547b78b702e6461de9d716706d4ba` |
 | B2f | `SDPX.jl/test/rebuild/S07.jl` | correct the false "NOT in the package include graph (wiring is I02's job)" note | `src/SDPX.jl:203-207` includes `session/{update,replay,cancellation}.jl` | S07 driver re-run: 3 testsets, 289 pass, exit 0 | `1248fbbfd9cb22abb9f0f20a5cc1b1c91d3dfbc7` |
 | B3 | `SDPX.jl/docs/rebuild/final_verdict.md` | this document (new file) | — | — | — |
+
+**Third-party licences and provenance are untouched.** Every changed path is first-party
+SDPX source, test or documentation; `git diff --name-only` matches no `licen|third|vendor`
+path, and no vendored dependency, patch record or evidence document was modified. The
+third-party surface this task *touched* is only what it cites: QDLDL's unsound raw matrix
+entry point and the `MultiFloatLinearAlgebra`/`BigFloatLinearAlgebra` package extensions,
+both left byte-unchanged.
 
 **Diffstat of B1+B2: 8 files, +7 / −53** (`rebuild-reports/I03/logs/deletions_paths.txt`,
 full diff `rebuild-reports/I03/logs/deletions.diff`). **No behaviour-bearing code was
@@ -219,7 +246,10 @@ Source of truth: `rebuild-reports/Q02/capability_table.tsv` (56 rows) and
 grouping is mine and each group names its membership rule.
 
 **PRODUCTION — offered, default-reachable, with passing numeric or structural evidence
-(26 rows `verified`).** `SDPX-PRECISION-UPGRADE`, `SDPX-STEP-STRATEGY`,
+(26 rows `verified`).** "Production" here means *the default pipeline offers it and its
+evidence row is `verified`*; it is **not** a release approval. The release is blocked (§0),
+`certified 0` means nothing in this table is certified, and the four default-reachable
+capabilities named at the end of this group carry open defects that the block records. `SDPX-PRECISION-UPGRADE`, `SDPX-STEP-STRATEGY`,
 `SDPX-CERT-REJECTION`, `SDPX-NOT-RUN-NEVER-ZERO`, `SDPX-PRECOMPILE-GATE`,
 `SDPX-MULTI-RHS-CAPABILITY`, `SDPX-SETUP-PLANNING`, `SDPX-REPLAY-CANCELLATION`,
 `SDPX-LEASE-STRUCTURE`, `SDPX-ADAPTER-LEASE-REQUIRED`, `SDPX-GATE-CALIBRATION`,
@@ -256,6 +286,14 @@ in either project; infrastructure, not numeric); the O(n⁴) SOC-roundtrip bench
 harness (not in any repository); `QDLDL.solve(Q, ::Matrix)` (third-party, unsupported and
 process-threatening).
 
+**Accepted tasks (the card asks for these explicitly).** Of the 26 packet tasks, **2 are
+`accepted`: A00 and I01**; the other **24 are `needs_review`** — including Q02, V01 and I03
+itself, because a worker does not accept its own work and I03 does not accept another
+task's. "A report exists" is therefore not "the task is accepted", and the 19 tasks that
+were already at `needs_review` before batch 5 are not silently promoted by this verdict.
+The per-task acceptance counts are in `rebuild-reports/I03_DOSSIER.md`; the release-relevant
+ones are restated in §2 and §6.
+
 **Interpretation rule this document follows:** `unsupported` means *not offered*. It does
 not mean broken, and it is not a `0`. P03's driver is `365/365 Pass` at the very revision
 whose gate reads `FAIL`.
@@ -278,121 +316,195 @@ below are `Sys.CPU_THREADS == 4` unless stated.
 | Factor-summary cost | `summary_read_bytes` = 0 for `kind/status/state/inertia/grammar/pivots/block_counts`; `summary_record_bytes` = 32; `same_size_factorize_bytes` = 144; `factor_matrix_bytes` = 4096 | `rebuild-reports/I03/logs/pre_delete/M01_lease_token.log` (my re-run) + `rebuild-reports/M01/` | every sample is in the log, printed field by field |
 | RSS / allocator | `child_rss0 = 211238912`, `child_rss1 = 505085952`, `delta = 293847040`, `bytes_per_unit = 1.09466552734375`; native-limb accounting `not_run` | `rebuild-reports/I03/logs/pre_delete/p03_out/P03_run_main.txt` (my re-run) | RSS is the only native-level signal available |
 | MFLA kernel performance | per-limb timings for x2/x3/x4 on 128³, variant grid, register-pressure proxy | `rebuild-reports/M02/report.json` numeric tests | measured on a shared host; no cross-machine claim |
-| Compilation | precompile gate passes; `LOAD_OK public_export_count=69`; `using SDPX` precompiled in ~8 s | `rebuild-reports/I03/logs/final_tree/LOAD.log` | measured here |
+| Compilation | Q01 phases `first_compile` = 22.1 s (float64_default), 22.0 (float64_env), 50.9 (mf_x2), 48.9 (bf_256); S07 `7441.9 ms ✓ SDPX`; `using SDPX` here ~8 s | `SDPX.jl/benchmark/rebuild/measure_result.toml`, `rebuild-reports/S07/S07_pkgtest.log:90`, `rebuild-reports/I03/logs/final_tree/LOAD.log` | measured — except B03's `1116.4 ms`, which is **not** corroborated (below) |
 | The scorecard is **incomplete** for a production release | setup/iteration/recovery/certification phases are instrumented, **failures and RSS partly, compilation partly, no end-to-end wall clock, no native allocator accounting** | §11 Q7 below | **partial** |
+
+### Performance numbers that are NOT backed by a raw record — do not cite them
+
+The card's second acceptance criterion is "performance claims supported by raw records".
+These are the claims that fail it, found by re-reading the records they name:
+
+| number | where it is claimed | what the record actually says |
+| --- | --- | --- |
+| B03 compilation `1116.4 ms` | `rebuild-reports/B03/report.json` (`performance.compilation_mode`, and acceptance `verified_by`) | the log says `1401.8 ms  ✓ BigFloatLinearAlgebra` (`rebuild-reports/B03/B03_driver_WIRED_static.log:24`); **no log contains 1116.4** |
+| B03 `threads_requested = 4`, `threads_executed = 4` | `rebuild-reports/B03/report.json` `performance` | all **106** `julia_threads=` values in `B03_perf_samples.txt` are **1**; the 1/2/4 arms are three separate `-t1` processes (`B03_driver_perf.log:34-36`), and the budget phase records `observed_peak_workers=1` |
+| B03 RSS samples | `B03/report.json`; `support_matrix.md` cites `rebuild-reports/B03/B03_rss_child_stderr.log` | **that file does not exist**; `B03_driver_rss.log` is **12 × `MEASURE rss_failed` with 0 successes**, and the driver discards failing children's stderr, so the cause is undetermined. The only successful line is a header |
+| `lp_afiro_style`: 27.3 s first / 0.00085 s warm | `SDPX.jl/docs/rebuild/benchmark_protocol.md:23` — a *binding protocol document* | neither number appears in any artifact; the named baseline records `first_compile = 22.106584875000003` and `warm_fresh_setup = 0.000295917…`; the `0.000854` trace is another benchmark's `kkt_seconds` |
+| M02 SoA penalty 1.30–1.37× | `rebuild-reports/I02_WORK_PLAN.md:896` | the declared artifact records `layout_soa_over_aos_ratio = 1.4486586044978993`, **outside the quoted range**; M02's own report records the correction |
+| 92.5× SOC roundtrip | V01-F11 / `docs/evidence/OPEN_SOC_ROUNDTRIP_ON4.md` | no archived instrument; a kernel redundancy, not an end-to-end effect |
+
+**Consequence:** the load-bearing performance statements in this verdict are the measured
+ones in the table above; the six numbers in this subsection must not be cited as
+measurements. Two of them (B03's compilation figure and its thread counts) contradict the
+records they name, which is finding **F-I03-8**.
 
 ## 8. Answers to §11 of `ENGINEERING_REBUILD.md`
 
-Each answer is 是 / 否 / 部分 with the evidence path. Unmet items are answered as unmet.
+Verdicts at a glance: **1 partial · 2 partial · 3 yes · 4 partial · 5 partial · 6 partial ·
+7 no · 8 no · 9 no · 10 partial.** Unmet items are answered as unmet.
 
-**1. 一个问题、一个主循环、一个当前KKT策略，是否已成为可验证事实？—— 部分（是，在默认路径上）。**
-One loop body exists: `src/solver/loop.jl`, reached from `native_hsd_public.jl:2204`
-through `product_hsd_solve!`, whose old body was deleted at the S02 cutover
-(`src/hsd/product_cone_solve.jl:752+`; `S02/report.json`, I02's re-measurement).
-Evidence: capability rows `INFRA-SINGLE-DEFAULT-PIPELINE` = `verified`,
-`SDPX-HSD-LOOP` = `partially_verified` (11/12), `SDPX-NO-SECOND-HSD-LOOP` =
-`partially_verified` (0/1, S02's own log row is `not_run`); I02 acceptance is
-`partially_verified`. **What keeps it from a clean 是:** the second row's passing
-acceptance count is 0 of 1 and S02's log is `not_run` in the table — the "no second loop"
-claim rests on structure plus I02's re-check (`grep -rn plan_setup src/hsd/ src/public/`
-was still empty), not on a green log row.
+**1. 一个问题、一个主循环、一个当前KKT策略，是否已成为可验证事实？—— 部分.**
+One problem: `src/public/optimize.jl:375-402` compiles once, classifies once, dispatches
+once; MOI is the sole adapter and `optimize!` invokes the public seam exactly once
+(`src/moi_wrapper.jl:491-494`); `settings.algorithm` admits only `:auto`
+(`src/public/optimize.jl:56-68`). One loop: `src/SDPX.jl:194` includes `solver/loop.jl`;
+`test/rebuild/S02.jl:648` asserts the include, `:652` asserts
+`count("for _ in 1:Int(max_iterations)", production) == 0`, `:653-655` asserts exactly one
+`solver_run_session!` method — and those pre-cutover assertions were **inverted** rather
+than deleted, so a silent rollback fails. **Not a clean 是:** three KKT strategies are
+admitted (`src/kkt/strategy.jl:285-290`: `:augmented`, `:schur`, `:fixed_trace`),
+`kkt_route` is a four-valued axis (`src/hsd/product_cone_hsd.jl:335-336`), and the loop
+still carries two same-iterate internal re-route retries
+(`:3893`, `:3912`, call site `:4144`) that no test exercises. The one-loop evidence is a
+source scan and is self-labelled as one (`S02.jl:604`). So: one problem and one loop body;
+**not** one strategy and not one route.
 
-**2. public/MOI/compatibility是否不再实现数值证书、factor策略和算术kernel？—— 否。**
-No numeric *certificate* is produced by the public layer — but that is because the public
-layer does not use the certification module at all: `grep -rn 'SDPXCertification\.'
-SDPX.jl/src SDPX.jl/test` outside its own file = **0**, while four `ResultCertificate{T}`
-construction sites remain (`native_hsd_public.jl:2403`, `:2462`, `:2487`,
-`public/optimize.jl:341`). That is **R1**, unmet. The sign-patch half is the same shape:
-no patch exists (8 patterns × 0), but the evidence chain for "no sign patch" is a
-hardcoded literal — **R2**, unmet. Factor strategy: the public layer consults the
-planner's descriptor (`src/pipeline/plan.jl`), not a factor implementation; the
-`:generic_sparse_cholesky` descriptor is recorded while explicitly not instantiated
-(`plan.jl:508-520`) — **F-I03-1**. Kernel selection is likewise descriptor-based.
+**2. public/MOI/compatibility是否不再实现数值证书、factor策略和算术kernel？—— 否.**
+Kernels: yes — grepping `cholesky|CHOLMOD|qr(|lu(|ldlt|factorize` over `moi_wrapper.jl`,
+`frontend/` and `public/` returns one hit, a string literal in an error message
+(`src/public/settings.jl:274`). Compatibility: the old layer was **deleted, not shimmed**
+(`git log --diff-filter=D -- src/compat*` → `10a8954`, 295 lines). Factor strategy:
+partial — `settings.kkt_route` is still a public/expert field (`public/settings.jl:410`,
+`moi_wrapper.jl:1272-1274`). Certificates: **no, and the responsibility was duplicated
+rather than moved.** Three certificate implementations coexist: `certificates/certificates.jl`
+(`src/SDPX.jl:106`), `certification/original.jl` inside `module SDPXCertification`
+(`:195`, loaded and **never called** — `grep -rn 'SDPXCertification\.'` outside its own
+file = 0), and the public one at `src/public/optimize.jl:223-357` whose construction site
+`:341` is one of the four remaining. That is **R1**, and its correct statement is
+"inert module, live duplicate", not "module absent".
 
-**3. provider是否只拥有数值事实和内存，不决定HSD/原始可行域/终止？—— 是（有测试），边界由ADR-002固定。**
-ADR-002 §1/§3 fix the provider's ownership; `PROVIDER-CONTRACT-JOINT` and
-`PROVIDER-SPARSE-DENSITY-POLICY` are `verified`; P01's sparse contract legs
-(`test/provider_contracts/sparse_contract.jl`, three provider legs) and P02's adapter
-tests pass. Two qualifications: `PROVIDER-QDLDL-RAW-MATRIX-ENTRY` is
-`partially_verified` because the *third-party* raw matrix entry point is unsound
-(§3 above), and `PROVIDER-THIRD-PARTY-GATE` is `partially_verified` because the private
-field gate is `table_only` (P01-PATCH-1 not wired to enforce).
+**3. provider是否只拥有数值事实和内存，不决定HSD/原始可行域/终止？—— 是.**
+The provider op set is a ten-value enum with **no** HSD/termination/convergence member
+(`src/la/protocol.jl:30-41`); the minimum contract takes and returns no HSD state,
+feasible region, tolerance or termination decision (`src/kkt/session.jl:143-160`);
+`FactorSpec` "contains no policy" (`:163-171`); and the two libraries contain no
+solver-policy vocabulary at all (`grep -rni 'hsd|kappa'` over both `src/` trees → none;
+the single convergence-vocabulary hit, `MultiFloatLinearAlgebra.jl/src/residual.jl:299`,
+is an explicit refusal: "performs no convergence test, iteration, fallback, or precision
+escalation"). Negative tests exist: S03's `CapabilityLiar` is refused with
+`liar.generation == 0` and no numeric work attempted (`test/rebuild/S03.jl:773-786`);
+S05's stale-`:success` provider cannot buy a solve (`test/rebuild/S05.jl:263-290`).
+Qualification: V01's only provider-boundary finding (F6) is a provider **failing to report**
+a numeric fact — that is R8, not an authority leak.
 
-**4. factor失效、precision/rounding、pattern/value更新、并发session的所有权是否有测试？—— 部分。**
-- factor invalidation/lease: **是 on the dense path** — M01 204/204 with
-  `cache_leases=(1,2)` (`rebuild-reports/I03/logs/pre_delete/M01_lease_token.log`), and
-  `refactor_numeric!`'s admission refusal now revokes (`factor_lease.jl:350-372`);
-  **否 on the sparse path** — generation delta 0 (R8).
-- precision/rounding: **部分** — B01's explicit rounding code and BFLA's
-  `mpfr_context` tests pass; `PROVIDER-CONCURRENT-PRECISION` is `not_verified` (R9) and
-  `BFLA-RRQR-STALE-SUCCESS` is `not_verified` (A01b-F1).
-- pattern/value updates: **是** — `SDPX-SESSION-UPDATES` (`partially_verified`), M03, and
-  `SDPX-REPLAY-CANCELLATION` = `verified`.
-- concurrent session ownership: **部分** — same-precision concurrency is covered
-  (S06 §5, P03 `365/365`); different-precision in-process concurrency is `unsupported`
-  and is R9.
+**4. factor失效、precision/rounding、pattern/value更新、并发session的所有权是否有测试？—— 部分.**
+pattern/value update: **yes** — a value update keeps `delta == 0`, a structural change
+throws `PreparedStructureMismatch` and drops the symbolic slot
+(`test/test_r2_full_qualification.jl:35-48`), with the same-size/same-nnz/pattern-changed
+case in `test/session_symbolic_lease.jl:94-108`. factor invalidation: suite-level yes for
+the caches (MFLA `test/factor_caches.jl:611` "fail-closed: no stale success"), but
+`src/la/factor_lease.jl` and `src/la/admission.jl` have **zero in-suite coverage**
+(`grep -rn 'FactorLease|FactorHandle|AdmissionRefused|SDPX.admit(' test/*.jl
+test/provider_contracts/*.jl` → no output) and the ADR-003 §6 property runs only in
+`test/rebuild/S03.jl`, which is outside `Pkg.test()`. precision/rounding: provider yes
+(BFLA `test/precision.jl`), SDPX layer **no** — the exact property exists as an **orphan**
+test (`test/test_r1b_owned_object_matrix.jl:106`, launched by nothing) and
+`session_rounding`/`session_rounding_supported` (`src/session/update.jl:154-175`) have no
+executable assertion anywhere. concurrency: **partial** — two-session isolation and the
+sequential-collision refusal are tested (`test_r2_full_qualification.jl:166-241`), but that
+file says itself it "does NOT establish multithread/task-level concurrency qualification",
+and P03's required different-precision row is `unsupported` → **R9**. Residual: **R8**.
 
-**5. 两库factor摘要是否便宜且统一语义；读取诊断是否不触发大对象copy/深扫描？—— 是，按测量。**
-`M01`'s measured summary reads allocate **nothing**: `summary_read_bytes = (kind=0,
-status=0, state=0, inertia=0, grammar=0, pivots=0, block_counts=0)`, with
-`summary_record_bytes = 32` (`rebuild-reports/I03/logs/pre_delete/M01_lease_token.log`).
-Semantics are unified by the contract (`M01 factor/cache/summary contract`, 204/204) and
-`MFLA-PIVOT-GRAMMAR` is `verified`. The qualification the packet already recorded: MFLA's
-summary semantics are the reviewed ones at `e3805c9`, and the "read does not deep-scan"
-property is demonstrated by the zero-allocation counters above, not by an asymptotic proof.
+**5. 两库factor摘要是否便宜且统一语义；读取诊断是否不触发大对象copy/深扫描？—— 部分.**
+Cheap: **measured**. `summary_read_bytes = 0` for all seven accessors and
+`summary_record_bytes = 32` against a 4096-byte factor matrix
+(`rebuild-reports/I03/logs/pre_delete/M01_lease_token.log`, my re-run; M01's own logs
+agree). At the SDPX seam, `@allocated factor_summary(h) == 0` warm with `allocs == [0,0,0]`
+at n = 8/32/128 and size-independent cold allocations
+(`test/rebuild/S05.jl:354-419`; 761/761 in both live legs), and the hot path records
+`deep_calls == 0`, `factor_copies == 0` (433/433). Structural, not just measured:
+`FactorSummary` is forced concrete and immutable and **no field may be an
+array/string/dict/set/tuple** (`src/la/protocol.jl:662-687`), so a summary that could hold
+a matrix cannot be constructed. Unified semantics: **at the SDPX boundary yes** (one
+`FactorSummary` for both providers), **between the two libraries no** — MFLA's 14-field
+summary and BFLA's `FactorFacts` share no field names and there is no differential test;
+the unification exists only because SDPX re-models it. Diagnostics reads: the clause is
+**false for two queries** — B04-F3 records `factor_diagnostics(::BFLALUCache)` rescanning
+`pivots` O(n) on every call and `factor_diagnostics(::BFLALDLTCache)` still copying 640 B
+at n = 8 (`rebuild-reports/B04/report.json:351`).
 
-**6. 所有宣称支持的算术、形状和稀疏路线是否真实运行过；prototype/unsupported是否显式？—— 部分，且显式性良好。**
-Ran: Float64 dense/sparse, BigFloat, MultiFloat (S01 MultiFloat leg 8/8 under
-`--project=$REBUILD_ENV`), rectangular QR, QDLDL sparse, the five provider legs, LP/SOC/SDP
-routes. Not run, explicitly: tiers 16/64 (host), MF/BF live-kernel comparisons in the
-default project (providers unresolvable there — recorded `unsupported`, ADR-003 §3),
-`QDLRL`, native allocator accounting, in-process mixed-precision concurrency,
-`GenericSparseCholeskyFactor`'s entry points (zero callers — F-I03-1). Prototype/unsupported
-labelling is explicit and machine-checkable: `capability_table.tsv` has no row that counts
-an `unsupported` item as passing, `certified 0`, and 5 rows are `not_verified` by name.
+**6. 所有宣称支持的算术、形状和稀疏路线是否真实运行过；prototype/unsupported是否显式？—— 部分.**
+`unsupported` is explicit and machine-visible: across the 25 packet reports the numeric
+tests are **267 pass / 12 not_run / 10 unsupported / 5 fail = 294** (adding the ad-hoc
+A01b report: 284 / 12 / 10 / 5 = 311 — the two scopes are stated because the wider number
+has been quoted without its extra report), and ADR-003 §3 forbids an `unsupported` from
+satisfying a required capability. `prototype` is **not a label in any
+vocabulary**: `grep -c prototype` over `support_matrix.json` and `capability_table.tsv`
+returns 0, and `EVIDENCE_STATE_VOCAB = {verified, partially_verified, not_verified}`
+(`scripts/rebuild/gen_support_matrix.py:62`). ADR-004's sparse provider is
+`Status: PROPOSED (P01, needs_review). Not accepted.` with "keep the explicit prototype"
+and "not wired into any public `optimize!` route" (`ADR-004:3`, `:133-140`) — a reader of
+the capability table alone cannot see that. Claimed but never run: **MultiFloat x3/x4**
+(the arm list is `(:float64, :multifloat_x2, :bigfloat_256)`,
+`benchmark/rebuild/manifest.jl:85-95`, while `release_checklist.md:161` claims x2/x3/x4);
+BigFloat-512 is not a declared arm; Double64 was **removed** (`CHANGELOG.md:290`). The
+MF/BF product outcomes include **5 `fail` rows that were kept as failures** (MF
+`mixed_soc_nonneg` `MethodError nzrange(::Matrix{MultiFloat})` — since fixed by I02's
+guards — and BF `numerical_breakdown` / `memory_upper_bound_exceeded`), which is the
+behaviour the packet asks for.
 
-**7. 性能记分表是否包括setup/迭代/恢复/认证、失败、RSS和编译？—— 部分（否 as a complete scorecard）。**
-Present: setup/iteration/recovery phase instrumentation (`src/performance_trace.jl`,
-`SDPX-SETUP-PLANNING`), certificate timings (S04/S01), failure counts and statuses,
-RSS (`P03`'s calibration numbers, §7), compilation (`INFRA-REPRODUCIBLE-BENCHMARK`,
-precompile gate). **Absent: end-to-end wall clock** (`B04` `wall_clock_timing = not_run`;
-`M03`'s E2E baseline `not_run`) and **native allocation accounting**
-(`B03`/`P03` `not_run`, no MPFR hook). No paper in this packet claims a speed-up on the
-strength of a kernel ratio alone — the 92.5× figure is explicitly a kernel redundancy, not
-an end-to-end effect.
+**7. 性能记分表是否包括setup/迭代/恢复/认证、失败、RSS和编译？—— 否.**
+The `performance` block in all 26 reports is a fixed 12-key schema; setup, iterations,
+recovery, certification and RSS have **no field**. What exists is single-task: setup
+timed by Q01 only (`warm_fresh_setup = 0.000295917 s`); iterations **counted but never
+timed** (zero hits for any per-iteration timing key across `rebuild-reports/` and
+`benchmark/rebuild/`); recovery measured as **accuracy** (`7.8517e-78` against an
+`8.8434e-75` tolerance) with replay timing `not_run` (`benchmark_protocol.md:44`);
+certification a **boolean**, although the engine records the number
+(`src/hsd/phase_timings.jl:32`) and the payload **drops** it
+(`grep -c certification_seconds measure_result.toml` = 0); failures measured by Q01 only
+(14 of 56 rows failed, kept); RSS by Q01 and P03, while B03's RSS phase is 12/12 failed
+with no captured stderr; compilation by Q01 and S07. **Five of the seven dimensions the
+question names are missing.** Thread denominators, named: `Sys.CPU_THREADS = 4` (Julia),
+`length(Sys.cpu_info()) = 10` (OS); rejected tier requests are recorded as `unsupported`
+with that host fact; **executed worker threads were 1 in every measured arm**.
 
-**8. 默认策略是否以跨形状证据决定，而非某一个CSDR案例？—— 部分。**
-The default *pipeline* is single and verified (`INFRA-SINGLE-DEFAULT-PIPELINE`), the
-storage/route decision is made by the planner from a structural classification
-(`src/pipeline/classify.jl`, `plan.jl`), and Q01 supplies cross-shape scaling evidence.
-But the *newest* policy layer is deliberately **not** default: `SDPX_CORE_ROUTE_PLANNER`
-defaults to `"legacy"` and its `"model"` branch is shadow-only
-(`test/core_route_planner.jl:193-212` asserts exactly that no silent default change
-happens). So the honest answer is: the default was **preserved**, not **re-decided**, on
-cross-shape evidence; promotion is still gated on calibration evidence that the shadow run
-has not produced. `SDPX-DEFAULT-ROUTE-PLANNER` is `partially_verified` (1/2).
+**8. 默认策略是否以跨形状证据决定，而非某一个CSDR案例？—— 否.**
+No default was *decided from* cross-shape evidence; the one behaviour-changing policy is
+**deferred in shadow mode precisely because that evidence does not exist**
+(`src/hsd/native_hsd_public.jl:2015-2027`: "It is NOT yet the default. The plan requires a
+representative end-to-end improvement, with paired receipts, before the default policy may
+change"). The planner's coefficients are "calibrated, not fitted" priors
+(`src/hsd/core_route_planner.jl:1-60`); the pre-existing single-dimension rule is retained
+as the documented fallback (`:257-264`); M02's shape-packing plan keeps
+`default_path = false` at **both** construction sites
+(`MultiFloatLinearAlgebra.jl/src/planning/gemm_plan.jl:306`, `:426`; no
+`default_path = true` anywhere in either tree) — the checklist claim is verifiable in
+**MFLA**, not in SDPX, which is where my first reading of it went wrong; and
+`settings.kkt_route`/`provider`/`linear_algebra_backend` defaults are inherited unchanged.
+The evidence base is real but thin: **8 deterministic cases** (2 LP, 4 SOC, 1 PSD, 1 mixed)
+× 3 arithmetic arms, with **no sparse case and no large-scale case**
+(`benchmark/rebuild/manifest.jl:409-427`). The single-case risk the question names is not
+present — but neither is the cross-shape licence to change a default.
 
-**9. 新路线是否真正替代旧控制逻辑，而不是又包一层？—— 部分（主循环是替代；若干子路线仍是并列开关）。**
-Replacement, verified: the S02 cutover deleted the old loop body and left
-`product_hsd_solve!` a thin wrapper over `solver_run_session!`
-(`SDPX-HSD-LOOP`, `SDPX-NO-SECOND-HSD-LOOP`); the nzrange fix is a relocation of guards,
-not a wrapper; M01 IP-3 was a **relocation** with 12-fixture equivalence evidence and IP-4
-a 14-insertion/0-deletion additive alias. Not replaced: `SDPX_CORE_ROUTE_PLANNER`
-(`legacy` default), `SDPX_HKM_VEC4`, `prepare_symmetric_core`,
-`allow_expanded_bordered_fallback`, `linear_algebra_backend=:legacy` — all listed with
-their defaults in §3. The criterion is therefore answered **部分**, and the enumeration
-above is the evidence.
+**9. 新路线是否真正替代旧控制逻辑，而不是又包一层？—— 否.**
+The shipped default still executes the **old** rule:
+`planner_authoritative = get(ENV, "SDPX_CORE_ROUTE_PLANNER", "legacy") == "model"`
+(`:2045`), with `use_compact_schur` falling back to `legacy_dimension_rule`
+(`:2043`, `:2046-2049`) — the new planner is computed and *reported* on every solve
+(`:2029`) but cannot change the executed route, and **no test anywhere sets the variable
+to `"model"`** (`test/core_route_planner.jl:193-196, 212` pins the shadow default and
+restores the environment). A second `:legacy` path is a legal public value
+(`src/pipeline/options.jl:32`, reachable from `settings.provider` and the MOI attribute)
+with **zero tests** (`grep -rn linear_algebra_backend SDPX.jl/test` → nothing). Where
+replacement *is* real: the loop extraction (S02 inverted its assertions rather than
+deleting them) and the nzrange fix (guards relocated, not wrapped). So the honest answer
+is 否 as stated, with the enumeration above as the evidence.
 
-**10. 三库能否按兼容契约独立发布升级，且测试环境能复原？—— 部分。**
-Independence: MFLA/BFLA are reached only through package extensions
-(`Project.toml [extensions]`, ADR-002 §1, `baseline.md` §2); `INFRA-DEPENDENCY-BOUNDARIES`
-is `partially_verified` (1/2, `I01.numeric_test = not_run`: the rollback rehearsal was not
-run). Environment reconstruction: the record+check pair works and is control-tested
-(three SHAs + three `Manifest.toml` sha256 + the Julia version; 10 of 10 control arms
-behaved; `rebuild-reports/Q02/logs/recon_{positive,controls}.log`) — but the record pins
-SDPX `c4b109a`, so **R4 is not satisfied for the release triple**, and `Manifest.toml` is
-gitignored and therefore pinned by hash rather than by commit (`Q02` limitation). The
-command pair that closes it is §5 item 5.
+**10. 三库能否按兼容契约独立发布升级，且测试环境能复原？—— 部分.**
+Independence: each library lists only its own dependencies, and the string `SDPX` appears
+in the other two only in four comments (`I01_integration_record.md:277-283`; I01's
+acceptance is `partially_verified` — "a text measurement over `src/hsd/`, not a call
+graph"). Environment: the record+check pair works and is two-sidedly controlled — three
+40-hex SHAs + three gitignored `Manifest.toml` sha256 + the Julia version, positive arm
+PASS, **10 of 10 control arms correct** (`rebuild-reports/Q02/logs/recon_{positive,controls}.log`).
+What it does **not** do, and this is the material limitation: it **re-runs nothing**, so it
+proves the *environment* is reconstructible and never that a reconstructed tree reproduces
+a measured number (Q02-F12); the Manifest is pinned by hash and the hashed copy came from a
+dirty tree; and the in-repo half carries **tautological assertions** —
+`test/rebuild/release_matrix.jl:334 @test agree >= 0`, `:376 @test checked >= 0`,
+`:433 @test true` — so with live `c8fb65a` ≠ recorded `c4b109a` the agreement assertion
+still passes (**F-I03-7**). Plus **R4**: the record pins `c4b109a`.
 
 ## 9. Limitations carried forward — and what this verdict is not
 
@@ -400,9 +512,12 @@ command pair that closes it is §5 item 5.
    capability for production. The decision is BLOCKED, and every capability in §6 remains
    exactly as Q02's table states it: `certified 0`.
 2. **R3 is `not_measured` by me.** The suites and the 28-leg matrix at the post-commit
-   revision are the parent's step; my evidence is targeted (load + seven drivers, all
-   exit 0). Until that run exists, nothing here should be quoted as "the suite is green at
-   the release revision".
+   revision are the parent's step, running now at a pin of `69c6c09`; my evidence is
+   targeted (load, the R1 certificate probe, and nine driver legs — S01, S03, S04, S06, S07,
+   S05 in its three provider modes, A01_default — all exit 0 on the identical tree content). Until that
+   run exists, nothing here should be quoted as "the suite is green at the release
+   revision". If this document is amended after that run, the amendment is a docs-only
+   commit and the suite results still describe the code (B1+B2) unchanged by it.
 3. **R4's record names a superseded SDPX revision** until it is re-pinned.
 4. **The two production hazards of §2.5 have opposite dispositions**: the
    `refactor_numeric!` node is fixed and verified; A01b-F1 is a live, reproduced defect
@@ -435,6 +550,21 @@ command pair that closes it is §5 item 5.
     verdict anywhere in this document).
 11. **No timing claim is made by this task**, and no benchmark answer is hardcoded. The
     host was shared and the packet's own performance rows are `not_run` or bounded.
+12. **Six performance numbers circulate without a raw record** — B03's `1116.4 ms`
+    compilation figure (the log says `1401.8 ms`), B03's `threads_requested/executed = 4`
+    (all 106 samples say `julia_threads=1`), B03's RSS samples (12/12 failed, the cited
+    stderr file does not exist), `benchmark_protocol.md`'s `27.3 s / 0.00085 s`,
+    `I02_WORK_PLAN.md`'s `1.30–1.37×` SoA penalty, and the 92.5× SOC-roundtrip kernel
+    ratio. §7 lists them; none may be cited as a measurement (F-I03-8).
+13. **`support_matrix.md` attributes both B03 numeric-test rows to both capabilities** —
+    `MFLA-THREAD-TIERS` and `MFLA-MPFR-ALLOCATION` each carry
+    `bfa_tiers_16_and_64 = unsupported` *and* `mfr_native_allocation_attribution = not_run`
+    (lines 1374-1377 and 1400-1403), so each row's non-passing list contains the other
+    row's item (F-I03-9).
+14. **The capability table cannot express `prototype`.** `EVIDENCE_STATE_VOCAB` has three
+    members and `prototype` is not one, so ADR-004's explicitly-proposed sparse provider is
+    absent from the table rather than labelled in it (F-I03-10). A release note must say
+    "prototype" in prose; the table cannot.
 
 ## 10. Findings raised by I03
 
@@ -444,7 +574,11 @@ command pair that closes it is §5 item 5.
 | **F-I03-2** | medium | **Two release documents carry a false mechanism for R1 and S02.** "src/SDPX.jl does not include src/certification/" is false (`src/SDPX.jl:195`); "src/SDPX.jl does not include src/solver/loop.jl" is false (`:194`). Conclusions survive for different reasons (inert module; inverted in-tree test) | `support_matrix.md/json`, `capability_table.tsv` (`SDPX-CERT-ORIGINAL-COORDS.blocked_by`), `release_checklist.md:196-197`, `S02/report.json` acceptance[2], `test/rebuild/S02.jl:641-648` |
 | **F-I03-3** | medium | **`_sdpx_direction_trace` is called unconditionally on the per-iteration hot path** (`product_cone_hsd.jl:4193`), so every HSD step performs an `ENV` lookup and a `parse(Int, …)` before returning `nothing`. It is debug-only code with a hot-path cost. Not fixed at the freeze point (it is a behaviour-neutral but real change); retirement is to hoist the env check into a `const` read at load time or to delete the documented instrument | `product_cone_hsd.jl:4188-4194`, `:3995-4000`; survey call-site map |
 | **F-I03-4** | low | **`iteration_predictor` is a write-only solver-state field** (`product_cone_hsd.jl:280`, assigned `:504`, validated in `public/settings.jl:396-398`) with no read site in `src/`; its only effect is via `factor_pair_admission.jl`. A public knob that appears to steer the HSD predictor but does not | `grep -rn 'iteration_predictor' src/`; the survey's Part 2 |
-| **F-I03-5** | low | **`release_checklist.md:167` refers to an M02 planner flag `default_path = false` that does not exist in `src/`** — it appears only in docs and in the unapplied `docs/evidence/proposed/M02_wire_gemm_candidate.patch`. A checklist row asserting a property of a non-existent symbol cannot be verified | `grep -rn 'default_path' SDPX.jl/src` = 0 |
+| **F-I03-5** | — | **WITHDRAWN by I03 after re-measurement.** An earlier reading of mine held that `release_checklist.md:167`'s `default_path = false` claim referred to a symbol that does not exist. It does exist — in **MFLA**, not SDPX: `MultiFloatLinearAlgebra.jl/src/planning/gemm_plan.jl:110` declares `default_path::Bool`, both construction sites (`:306`, `:426`) pass it `false`, and `grep -rn 'default_path *= *true'` over both trees finds nothing. The checklist row is verifiable; my first grep was scoped to `SDPX.jl/src` and I recorded the wrong conclusion. Withdrawn, and left visible rather than deleted | `gemm_plan.jl:110, 306, 426`; no `default_path = true` anywhere |
+| **F-I03-7** | high | **`test/rebuild/release_matrix.jl` contains assertions that cannot fail on the property they name**: `:334 @test agree >= 0` (record-vs-live-tree agreement), `:376 @test checked >= 0`, `:433 @test true`. Consequence: with live SDPX `c8fb65a` ≠ the recorded `c4b109a`, the agreement check still passes — the same class as `public_sign_patches == 0`. Not fixed by I03: it is Q02's committed instrument, the parent may be about to run it for step (b), and changing an assertion mid-flight would alter that run. Retirement: assert the agreement count equals the number of pinned repositories (or ≥ 3), and give `:376`/`:433` real predicates | `SDPX.jl/test/rebuild/release_matrix.jl:334, 376, 433` |
+| **F-I03-8** | medium | **Performance claims with no raw record, and two that contradict theirs**: B03's `1116.4 ms` compilation (log: `1401.8 ms`), B03's `threads_requested/executed = 4` (106/106 samples `julia_threads=1`; the 1/2/4 arms are three `-t1` processes), B03's RSS samples (12/12 `rss_failed`; the cited `B03_rss_child_stderr.log` does not exist and failing children's stderr is discarded, so the cause is undetermined), `benchmark_protocol.md:23`'s `27.3 s / 0.00085 s`, `I02_WORK_PLAN.md:896`'s `1.30–1.37×` (logged `1.4487`) | `B03/report.json`, `B03/B03_driver_WIRED_static.log:24`, `B03/B03_perf_samples.txt`, `B03/B03_driver_rss.log`, `B03/B03_driver_perf.log:34-36`, `M02/M02_driver.log:289` |
+| **F-I03-9** | low | **`support_matrix.md` duplicates both B03 numeric-test rows under both `MFLA-THREAD-TIERS` and `MFLA-MPFR-ALLOCATION`**, so each capability's non-passing list contains the other's item; the two `capability_table.tsv` `non_passing` strings are identical for that reason | `support_matrix.md:1374-1377, 1400-1403`; `capability_table.tsv` |
+| **F-I03-10** | medium | **`prototype` is not expressible in the capability vocabulary.** `EVIDENCE_STATE_VOCAB = {verified, partially_verified, not_verified}` (`scripts/rebuild/gen_support_matrix.py:62`), and `grep -c prototype` over `support_matrix.json` and `capability_table.tsv` = 0 — so ADR-004's explicitly-proposed sparse provider (`Status: PROPOSED … Not accepted`) is *absent* from the table rather than labelled "prototype" in it. Also `unsupported` (a test status per ADR-003 §3) and the table's three states are two vocabularies with no crosswalk, which is why `release_checklist.md` and the table can say different words about thread tiers and the QDLDL raw entry point | `gen_support_matrix.py:62`; `ADR-004-sparse-provider.md:3, 133-140`; `release_checklist.md:158-163` |
 | **F-I03-6** | low | **`docs/evidence/P0_03_PLATFORM_DIRECTION_BREAKDOWN.md` uses `SDPX_DEBUG_DIRECTION` as its reproduction instrument**, which is the reason those knobs were retained. Retention is a *decision* with a cost (F-I03-3); if the instrument is ever deleted, that document must be marked as not reproducible | `docs/evidence/P0_03_…md`, `P3_01_BETA_EXPERIMENT.md`, `docs/performance/EXECUTION_STATUS.md` |
 
 ## 11. One-paragraph summary for a reader who reads only this
