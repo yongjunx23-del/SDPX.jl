@@ -177,19 +177,6 @@ include("la/factor_lease.jl")
 include("solver/loop.jl")
 include("certification/original.jl")
 Base.include(SDPXCertification, joinpath(@__DIR__, "certification", "public_result.jl"))
-include("planning/costs.jl")
-include("planning/resources.jl")
-include("planning/setup.jl")
-# S07 session layer. ORDER IS MEASURED, NOT ASSUMED:
-# `update.jl` MUST precede `replay.jl` (replay's struct fields name
-# SessionTolerance/SessionScalarPayload/ProblemFingerprint; the driver measured
-# update-then-replay compiling and replay-then-update failing).
-include("session/update.jl")
-include("session/replay.jl")
-# `cancellation.jl` needs `solver_binding_is_complete` from solver/session.jl,
-# which is reached through solver/loop.jl at line 194, so it must come after it.
-include("session/cancellation.jl")
-
 # v0.5 has one public modeling/solve interface.  Mature problem, workspace,
 # provider, and legacy solve types remain package-internal implementation
 # details and are intentionally not re-exported as parallel entry points.
