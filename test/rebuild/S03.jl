@@ -12,11 +12,12 @@
 #   4. adding a hypothetical provider requires no HSD-loop edit — argued
 #      statically AND exercised at runtime, with the static half labelled.
 #
-# Loading note: the four `src/kkt/S03` files are NOT yet wired into
-# `src/SDPX.jl` (that is I01/I02/I03's authority).  This test therefore
-# `include`s them into the current module, which is exactly the entry path the
-# integration will take.  All parent bindings are reached through `SDPX`, so the
-# same files load either way.
+# Loading note: the four `src/kkt/S03` files ARE wired into `src/SDPX.jl` now
+# (`src/SDPX.jl:187-190`).  This test still `include`s them into the current
+# module so the same code can also be exercised standalone; the previous wording
+# ("NOT yet wired ... that is I01/I02/I03's authority") described the pre-wiring
+# phase and is corrected at I03.  All parent bindings are reached through `SDPX`,
+# so the same files load either way.
 
 using Test
 using LinearAlgebra

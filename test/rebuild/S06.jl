@@ -2,12 +2,13 @@
 #
 # Standalone: julia --project=<SDPX.jl> test/rebuild/S06.jl
 #
-# S06 — setup planning, memory and thread budget. The planning sources are new
-# files (`src/planning/costs.jl`, `resources.jl`, `setup.jl`) that the
-# integration role (I01) will add to `src/SDPX.jl`; until then this test includes
-# them itself, supplying from `SDPX` the bindings they rely on. Once the include
-# exists in `src/SDPX.jl` the guard below skips the local include and the test
-# exercises the integrated names instead.
+# S06 — setup planning, memory and thread budget. The planning sources
+# (`src/planning/costs.jl`, `resources.jl`, `setup.jl`) ARE in `src/SDPX.jl` now
+# (`src/SDPX.jl:196-198`, with `plan_setup` defined at `src/planning/setup.jl`),
+# so the guard below takes the integrated branch and this test exercises the
+# packaged names. The local include remains as the standalone fallback; the
+# earlier wording ("that the integration role (I01) will add ... until then")
+# described the pre-wiring phase and is corrected at I03.
 #
 # Sections:
 #   1. plan reproducibility, and the reported plan vs the execution that ran

@@ -463,9 +463,11 @@ end
 _hsd_rowspace_reduction(canonical::CanonicalConicProgram{T}) where {T<:AbstractFloat} =
     _hsd_rowspace_reduction(canonical_equality(canonical), canonical_objective(canonical))
 
-# Transitional internal spelling retained for callers from the earlier
-# independent-column setup.  Both methods now return the orthogonal row-space
-# representation; no selected-column path remains.
+# One-way alias for the earlier independent-column spelling.  Neither method
+# has an in-tree caller (measured at I03: the only other mention is a docstring
+# cross-reference in `equality_reduction.jl`), so "retained for callers" would
+# overstate it; it is kept as a one-way shim.  Both methods return the
+# orthogonal row-space representation; no selected-column path remains.
 _hsd_column_reduction(A::AbstractMatrix{T}, c::AbstractVector{T}) where {T<:AbstractFloat} =
     _hsd_rowspace_reduction(A, c)
 _hsd_column_reduction(canonical::CanonicalConicProgram{T}) where {T<:AbstractFloat} =

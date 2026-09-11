@@ -1,9 +1,13 @@
 #=====================================================================#
 # Internal symmetric product-cone HSD solve loop.
 #
-# This file is deliberately not wired to the public/MOI route.  It drives
-# `product_hsd_step!` and promotes a terminal status only after one of the
-# original-coordinate certificate verifiers succeeds.  There is no legacy
+# Reachability (re-measured at I03, SDPX c8fb65a): this file IS on the public
+# route.  `src/hsd/native_hsd_public.jl:2204` calls `product_hsd_solve!`, which
+# is defined here, and that file's own header names the same chain.  The earlier
+# note that this file was "deliberately not wired to the public/MOI route"
+# became false at the S02 cutover and is corrected here rather than carried.
+# It drives `product_hsd_step!` and promotes a terminal status only after one of
+# the original-coordinate certificate verifiers succeeds.  There is no legacy
 # solve, PSD lift, projected-gradient ray search, or other fallback here.
 #=====================================================================#
 

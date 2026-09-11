@@ -6,10 +6,14 @@
 #
 #     julia --project=$REBUILD_ENV -t1 SDPX.jl/test/rebuild/S07.jl
 #
-# The three S07 source files are NOT in the package include graph (wiring is
-# I02's job), so this driver loads them itself, exactly as `S01.jl`, `S03.jl`
-# and `S05.jl` do. It does so in TWO independent inclusion modes and requires
-# both to run the SAME checks and produce the SAME measured values:
+# The three S07 source files ARE in the package include graph now
+# (`src/SDPX.jl:203-207` includes `session/update.jl`, `replay.jl` and
+# `cancellation.jl`), so `S07_WIRED` is true and this driver loads them itself
+# only to exercise the two standalone inclusion modes below; the earlier wording
+# ("NOT in the package include graph (wiring is I02's job)") described the
+# pre-wiring phase and is corrected at I03. It does so in TWO independent
+# inclusion modes and requires both to run the SAME checks and produce the SAME
+# measured values:
 #
 #   Mode A — explicit `import SDPX: <name>` for every name the sources use.
 #   Mode B — every SDPX binding aliased into a fresh module first, so a name

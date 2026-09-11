@@ -9,11 +9,12 @@
 #    WHAT THIS FILE IS.  S01's deliverable is a layer that owns the raw input
 #    snapshot, the canonical data and the transform stack, plus an equality
 #    elimination reduction that replays primal/dual/ray/objective exactly.
-#    Because that layer is not yet part of the package entry point (existing
-#    source edits belong to I01, and this task may not touch `src/SDPX.jl`),
-#    the two S01 files are loaded here with `include`.  They only use names
-#    `using SDPX` already brings in, so this is the same code I01 will include
-#    into the package.
+#    That layer IS part of the package entry point now (`src/SDPX.jl:185-186`
+#    includes `core/compiled_problem.jl` and `core/transforms.jl`), so the two
+#    S01 files are loaded here with `include` only to exercise them standalone;
+#    the same code is what `using SDPX` already brings in.  (The earlier note
+#    that the layer was "not yet part of the package entry point ... I01 will
+#    include" was true when written and is corrected at I03.)
 #
 #    INDEPENDENT ORACLES.  Round-trip and offset checks use A01's
 #    `reference_oracles.jl` (zero SDPX calls: `Rational{BigInt}` arithmetic and
@@ -41,8 +42,8 @@ using .A01Fixtures
 
 # --- name resolution for the standalone driver --------------------------
 #
-# The two S01 files use the package's unqualified names exactly as they will
-# once I01 includes them into `src/SDPX.jl`. Running them standalone, they are
+# The two S01 files use the package's unqualified names, exactly as they do when
+# they are loaded as part of `src/SDPX.jl`. Running them standalone, they are
 # evaluated in `Main`, so every name they reference has to be resolved first.
 # This block binds those names to the `SDPX` bindings — it does not redefine
 # anything, and it is the only driver-specific adaptation.
