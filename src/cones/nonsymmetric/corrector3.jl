@@ -159,8 +159,6 @@ end
 end
 @inline _nsd_log(a::_NSDirectional3) =
     _NSDirectional3(log(a.value), a.derivative / a.value)
-@inline _nsd_log_abs(a::_NSDirectional3) =
-    _NSDirectional3(log(abs(a.value)), a.derivative / a.value)
 @inline function _nsd_negative_expm1(a::_NSDirectional3)
     exponential = exp(a.value)
     return _NSDirectional3(

@@ -133,16 +133,6 @@ end
     return true
 end
 
-@inline function _runtime_nonsymmetric_theta_solve3!(
-    destination::Vector{T}, theta::Matrix{T}, rhs::Vector{T},
-    factor::Matrix{T}, forward::Vector{T},
-) where {T<:AbstractFloat}
-    _runtime_nonsymmetric_theta_factor3!(factor, theta) || return false
-    _runtime_nonsymmetric_forward_solve3!(forward, factor, rhs) || return false
-    return _runtime_nonsymmetric_backward_solve3!(
-        destination, factor, forward,
-    )
-end
 
 @inline function _runtime_nonsymmetric_theta_solve3_backward_ok(
     theta::Matrix{T}, solution::Vector{T}, rhs::Vector{T},
@@ -250,9 +240,6 @@ function _runtime_validate_block(block, expected::Int)
     return expected + block.length
 end
 
-function _runtime_empty_vectors(::Type{T}) where {T}
-    return Vector{Nothing}()
-end
 
 @inline function _runtime_initial_step_result(::Type{T}) where {T}
     return NonsymmetricStepResult{T}(

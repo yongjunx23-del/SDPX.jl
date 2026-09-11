@@ -264,48 +264,6 @@ how much that backward error may be amplified.
     return true
 end
 
-"""Condition-aware gate for the composed `Q_w(Q_winv(q))` round trip.
-
-Unlike a single-map backward check, the first map's rounding error is amplified
-by the condition number of `Q_w`.  The same one-percent reliability budget used
-when freezing the scaling therefore bounds the composed forward residual.
-"""
-@inline function _soc_q_roundtrip_close(
-    computed::AbstractVector{T},
-    w::AbstractVector,
-    q::AbstractVector,
-    n::Int,
-) where {T}
-    length(computed) == length(w) == length(q) == n || throw(DimensionMismatch())
-    w0 = T(w[1])
-    tail2 = zero(T)
-    qnorm = zero(T)
-    residual = zero(T)
-    @inbounds for i in 1:n
-        qi = T(q[i])
-        ci = T(computed[i])
-        isfinite(qi) && isfinite(ci) || return false
-        qnorm = max(qnorm, abs(qi))
-        residual = max(residual, abs(ci - qi))
-        if i > 1
-            wi = T(w[i])
-            isfinite(wi) || return false
-            tail2 += wi * wi
-        end
-    end
-    r = sqrt(tail2)
-    lambda_plus = w0 + r
-    determinant = (w0 - r) * lambda_plus
-    lambda_minus = determinant / lambda_plus
-    isfinite(lambda_plus) && isfinite(lambda_minus) &&
-        lambda_plus > zero(T) && lambda_minus > zero(T) || return false
-    ratio = lambda_plus / lambda_minus
-    kappa_theta = ratio * ratio
-    gamma = _soc_roundoff_gamma(T, 6n + 24)
-    budget = T(64) * gamma * kappa_theta
-    isfinite(budget) && budget < one(T) / T(100) || return false
-    return residual <= budget * qnorm
-end
 
 @inline function _soc_jordan_backward_close(
     computed::AbstractVector{T},

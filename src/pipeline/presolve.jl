@@ -578,31 +578,3 @@ function presolve_equalities(prob::SDPProblem{T}, opts::SolverOptions{T}) where 
     return reduced, mapping, report
 end
 
-function _restore_equalities(
-    result::SDPResult{T},
-    mapping::EqualityPresolveMap,
-) where {T}
-    length(mapping.keep) == mapping.original_count && return result
-    y = alloc_zeros(T, mapping.original_count)
-    copy_owned!(view(y, mapping.keep), result.y)
-    return SDPResult{T}(
-        result.status,
-        result.message,
-        result.x,
-        result.X,
-        y,
-        result.Y,
-        result.pObj,
-        result.dObj,
-        result.gap_rel,
-        result.p_res,
-        result.d_res,
-        result.iterations,
-        result.restarts,
-        result.regularizations,
-        result.timings,
-        result.parameter_history,
-        result.diagnostics,
-        result.termination,
-    )
-end

@@ -470,22 +470,6 @@ function syrk!(
     return output
 end
 
-function _syrk_bigfloat_selected_workers(
-    panel::AbstractMatrix{BigFloat},
-    config::KernelConfig,
-    thread_count::Int,
-)
-    columns = size(panel, 2)
-    block_count = cld(columns, max(config.column_tile, 1))
-    jobs = block_count * (block_count + 1) ÷ 2
-    return _syrk_worker_count(
-        BigFloat,
-        size(panel, 1),
-        columns,
-        jobs,
-        thread_count,
-    )
-end
 
 @inline function _packed_lower_index(
     dimension::Int,

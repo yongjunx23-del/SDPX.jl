@@ -1533,14 +1533,6 @@ la_backend_provider_precision(::AbstractLABackend) = 0
 
 la_factor_provider_identity(::Any) = :unknown
 
-function _record_la_execution!(ws)
-    ws.executed_la_backend = la_backend_name(ws.la_backend)
-    ws.executed_la_provider = la_backend_provider(ws.la_backend)
-    ws.executed_la_ownership = la_backend_ownership(ws.la_backend)
-    ws.la_fallback_reason === :none &&
-        (ws.la_fallback_reason = la_backend_reason(ws.la_backend))
-    return ws.la_backend
-end
 
 @inline la_dot(::StandardLABackend, x, y) = LinearAlgebra.dot(x, y)
 @inline la_dot(backend::LegacyLABackend, x, y) =

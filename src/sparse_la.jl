@@ -1472,33 +1472,3 @@ function analyze(backend::GenericSparseCholeskyBackend, prob::SDPProblem)
 end
 
 """Construct the provider-neutral sparse SDP Schur workspace at setup time."""
-function _sparse_schur_sdp_workspace(
-    prob::SDPProblem{T},
-    thread_count::Int,
-) where {T}
-    supports_sparse_execution(T) || throw(ArgumentError(
-        "sparse SDP Schur is unsupported for this arithmetic type",
-    ))
-    prob.cons isa SparseCons{T} || throw(ArgumentError(
-        "generic sparse SDP Schur requires SparseCons coefficients",
-    ))
-    storage, assembly_map = freeze_schur_pattern(
-        prob;
-        provider=_sparse_provider(T),
-    )
-    B = Matrix{T}(prob.B)
-    n = prob.dims.n
-    return GenericSparseSchurSDPWorkspace{T}(
-        storage,
-        assembly_map,
-        [sparse_position(storage, index, index) for index in 1:prob.dims.m],
-        [one(T) for _ in 1:prob.dims.m],
-        B,
-        [one(T) for _ in 1:n],
-        nothing,
-        false,
-        zero(T),
-        zero(T),
-        0,
-    )
-end

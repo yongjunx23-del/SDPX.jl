@@ -46,14 +46,6 @@ end
     return true, a + b
 end
 
-@inline function _ns_scaling_safe_exponent_difference(a::Int, b::Int)
-    if b < 0 && a > typemax(Int) + b
-        return false, 0
-    elseif b > 0 && a < typemin(Int) + b
-        return false, 0
-    end
-    return true, a - b
-end
 
 @inline function _ns_scaling_normalize3(a)
     T = typeof(a[1])
@@ -133,13 +125,6 @@ end
     return _ns_scaling_abs_sum2(ab, c)
 end
 
-@inline function _ns_scaling_abs_sum4(a, b, c, d)
-    ok, ab = _ns_scaling_abs_sum2(a, b)
-    ok || return false, ab
-    ok, abc = _ns_scaling_abs_sum2(ab, c)
-    ok || return false, abc
-    return _ns_scaling_abs_sum2(abc, d)
-end
 
 @inline function _ns_scaling_power2_vector_scale(a)
     T = typeof(a[1])
@@ -199,14 +184,6 @@ end
     return ok ? work : typeof(a[1])(Inf)
 end
 
-@inline function _ns_scaling_relative_gate(residual, work, tolerance)
-    isfinite(residual) && isfinite(work) && work >= zero(work) || return false
-    if iszero(work)
-        return iszero(residual)
-    end
-    ratio = abs(residual) / work
-    return isfinite(ratio) && ratio <= tolerance
-end
 
 @inline function _ns_scaling_relative_difference(a, b, tolerance)
     T = typeof(a)
@@ -320,14 +297,6 @@ end
     return true
 end
 
-@inline function _ns_scaling_cross!(destination, a, b)
-    a1, a2, a3 = a[1], a[2], a[3]
-    b1, b2, b3 = b[1], b[2], b[3]
-    destination[1] = a2 * b3 - a3 * b2
-    destination[2] = a3 * b1 - a1 * b3
-    destination[3] = a1 * b2 - a2 * b1
-    return destination
-end
 
 @inline function _ns_scaling_matvec!(destination, matrix, vector)
     v1, v2, v3 = vector[1], vector[2], vector[3]
@@ -372,33 +341,6 @@ end
     )
 end
 
-@inline function _ns_scaling_inverse_spd!(destination, matrix, workspace)
-    rhs = workspace.work1
-    solution = workspace.work2
-    T = eltype(rhs)
-    o = one(T)
-    @inbounds for column in 1:3
-        zero_distinct!(rhs)
-        _store_owned_scalar!(rhs, column, o)
-        _ns_conjugate_spd_solve!(
-            solution, matrix, rhs, workspace.factor,
-        ) || return false
-        _store_owned_scalar!(destination, CartesianIndex(1, column), solution[1])
-        _store_owned_scalar!(destination, CartesianIndex(2, column), solution[2])
-        _store_owned_scalar!(destination, CartesianIndex(3, column), solution[3])
-    end
-    two = o + o
-    h12 = (destination[1, 2] + destination[2, 1]) / two
-    h13 = (destination[1, 3] + destination[3, 1]) / two
-    h23 = (destination[2, 3] + destination[3, 2]) / two
-    destination[1, 2] = h12
-    destination[2, 1] = h12
-    destination[1, 3] = h13
-    destination[3, 1] = h13
-    destination[2, 3] = h23
-    destination[3, 2] = h23
-    return _ns_scaling_finite_matrix(destination)
-end
 
 @inline function _ns_scaling_gamma(workspace, operations::Int)
     T = typeof(workspace.mu)

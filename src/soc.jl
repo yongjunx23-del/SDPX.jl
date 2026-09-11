@@ -122,26 +122,6 @@ function Base.propertynames(result::ConicResult, private::Bool=false)
     return private ? (fields..., aliases...) : (fields..., aliases...)
 end
 
-"""Lorentz Jordan product `(t,u) o (s,v)`."""
-function _soc_jordan!(destination, left, right)
-    length(destination) == length(left) == length(right) ||
-        throw(DimensionMismatch("Lorentz vectors must have equal dimensions"))
-    # Cache both heads before writing.  This makes the kernel safe when the
-    # destination aliases either input, which is useful for scaled Newton
-    # corrections and avoids an otherwise silent tail corruption.
-    left_head = left[1]
-    right_head = right[1]
-    value = left_head * right_head
-    @inbounds for index in 2:length(left)
-        value += left[index] * right[index]
-    end
-    destination[1] = value
-    @inbounds for index in 2:length(left)
-        destination[index] =
-            left_head * right[index] + right_head * left[index]
-    end
-    return destination
-end
 
 @inline function _soc_determinant(vector)
     value = vector[1] * vector[1]

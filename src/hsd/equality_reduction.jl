@@ -236,66 +236,6 @@ function _hsd_eq_verified_equality_ray(
     return valid, full_ray
 end
 
-function _hsd_eq_singleton_qr(E::Matrix{T}) where {T<:AbstractFloat}
-    me,n = size(E)
-    me <= n || return nothing
-    first_variable = Vector{Int}(undef,me)
-    second_variable = zeros(Int,me)
-    first_coefficient = Vector{T}(undef,me)
-    second_coefficient = alloc_zeros(T,me)
-    used = falses(n)
-    @inbounds for row in 1:me
-        count = 0
-        for column in 1:n
-            value = E[row,column]
-            iszero(value) && continue
-            count += 1
-            count <= 2 || return nothing
-            !used[column] || return nothing
-            used[column] = true
-            if count == 1
-                first_variable[row] = column
-                first_coefficient[row] = value
-            else
-                second_variable[row] = column
-                second_coefficient[row] = value
-            end
-        end
-        count >= 1 || return nothing
-    end
-    range_basis = alloc_zeros(T,n,me)
-    null_basis = alloc_zeros(T,n,n-me)
-    R = alloc_zeros(T,me,me)
-    next_null = 1
-    @inbounds for row in 1:me
-        first = first_variable[row]
-        second = second_variable[row]
-        a = first_coefficient[row]
-        if second == 0
-            sign = a > zero(T) ? one(T) : -one(T)
-            range_basis[first,row] = sign
-            R[row,row] = sign * a
-        else
-            b = second_coefficient[row]
-            scale = sqrt(a*a + b*b)
-            isfinite(scale) && scale > zero(T) || return nothing
-            inverse_scale = inv(scale)
-            range_basis[first,row] = a * inverse_scale
-            range_basis[second,row] = b * inverse_scale
-            null_basis[first,next_null] = -b * inverse_scale
-            null_basis[second,next_null] = a * inverse_scale
-            R[row,row] = scale
-            next_null += 1
-        end
-    end
-    @inbounds for variable in 1:n
-        used[variable] && continue
-        null_basis[variable,next_null] = one(T)
-        next_null += 1
-    end
-    next_null == size(null_basis,2)+1 || return nothing
-    return (pivots=collect(1:me),R,range_basis,null_basis)
-end
 
 function _hsd_eq_sparse_disjoint_qr(
     A::SparseMatrixCSC{T,Int}, zero_rows::Vector{Int},

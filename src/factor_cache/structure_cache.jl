@@ -95,19 +95,7 @@ function clear_structure_cache!()
     return _SYMMETRIC_CORE_STRUCTURE_CACHE
 end
 
-function _structure_cache_record_hit!()
-    lock(_SYMMETRIC_CORE_STRUCTURE_LOCK) do
-        _SYMMETRIC_CORE_STRUCTURE_CACHE.hits += 1
-    end
-    return nothing
-end
 
-function _structure_cache_record_miss!()
-    lock(_SYMMETRIC_CORE_STRUCTURE_LOCK) do
-        _SYMMETRIC_CORE_STRUCTURE_CACHE.misses += 1
-    end
-    return nothing
-end
 
 """Atomic cache lookup with hit/miss accounting (call with the lock NOT held).
 

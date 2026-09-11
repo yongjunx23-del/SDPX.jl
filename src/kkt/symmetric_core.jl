@@ -886,28 +886,6 @@ function _core_structure_signature(pattern::SymmetricCorePattern)
     return signature
 end
 
-function _core_mix_cone_signature(
-    signature::UInt64, cone::AbstractConeLinearization,
-)
-    signature = _core_mix_uint(signature, UInt64(hash(typeof(cone))))
-    if hasproperty(cone, :operator)
-        signature = _core_mix_values(signature, getproperty(cone, :operator))
-    elseif hasproperty(cone, :operators)
-        operators = getproperty(cone, :operators)
-        signature = _core_mix_uint(signature, UInt64(length(operators)))
-        for operator in operators
-            signature = _core_mix_values(signature, operator)
-        end
-    end
-    if hasproperty(cone, :block_ranges)
-        signature = _core_mix_ranges(signature, getproperty(cone, :block_ranges))
-    elseif hasproperty(cone, :rows)
-        rows = getproperty(cone, :rows)
-        signature = _core_mix_uint(signature, UInt64(first(rows)))
-        signature = _core_mix_uint(signature, UInt64(last(rows)))
-    end
-    return signature
-end
 
 """Static symmetric-core identity: A, b, c, V and the frozen CSC structure.
 
@@ -935,10 +913,6 @@ function _core_static_signature(
     return signature
 end
 
-"""Content signature of the current numeric Theta operator (K numeric values)."""
-function _core_pattern_theta_signature(pattern::SymmetricCorePattern)
-    return _core_mix_values(UInt64(0xcbf29ce484222325), pattern.nzval)
-end
 
 """Block partition of a semantic product/block cone."""
 function _core_cone_block_ranges(
@@ -1568,18 +1542,6 @@ function _core_normalized_residual(
     return norm_r / scale
 end
 
-"""Solve `Kε⁻¹ * rhs` into `x` through the (regularized) factor cache."""
-function _core_solve_with_cache!(
-    workspace::SymmetricCoreWorkspace{T},
-    x::AbstractVector{T},
-    rhs::AbstractVector{T},
-) where {T}
-    solve!(workspace.cache, x, rhs)
-    all(isfinite, x) || throw(ArgumentError(
-        "symmetric core refined solve produced non-finite data",
-    ))
-    return x
-end
 
 """Iterative refinement of `x` against the original core `K`.
 
