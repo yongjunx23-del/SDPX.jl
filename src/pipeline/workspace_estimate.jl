@@ -474,18 +474,3 @@ function conservative_memory_upper_bound_eligibility(
     )
 end
 
-"""
-    conservative_memory_upper_bound_eligibility(features, estimate_bytes) -> MemoryUpperBoundEligibility
-
-Feature-vector form: reads `memory_limit_bytes` and `current_rss_bytes` from
-the typed feature vector, with the same fail-closed semantics as the
-three-argument form.
-"""
-conservative_memory_upper_bound_eligibility(
-    features::RouteCalibrationFeatures,
-    estimate_bytes::Integer,
-) = conservative_memory_upper_bound_eligibility(
-    estimate_bytes,
-    features.memory_limit_bytes,
-    features.current_rss_bytes,
-)
