@@ -1,0 +1,25 @@
+diff --git a/ext/MultiFloatQDLDLExt.jl b/ext/MultiFloatQDLDLExt.jl
+index 3f974e7..e1b9e9c 100644
+--- a/ext/MultiFloatQDLDLExt.jl
++++ b/ext/MultiFloatQDLDLExt.jl
+@@ -264,6 +264,20 @@ MFLA.solve!(cache::MFSparseLDLCache{MF}, destination::AbstractVecOrMat{MF},
+             rhs::AbstractVecOrMat{MF}) where {MF<:MultiFloat} =
+     _solve!(cache, destination, rhs)
+ 
++# The dense-order alias. Every dense MFLA cache is `solve!(destination, cache,
++# source)` (`src/factor_caches.jl:395`, `:412`, ...); QDLDL's own entry point is
++# `solve!(cache, destination, rhs)`, so a uniform adapter cannot use one call
++# shape for both. This delegates rather than reimplementing, so there is exactly
++# one solve path and the authority checks in `_solve!` are not duplicated.
++#
++# ADDITIVE: the dense-order method for `MFSparseLDLCache` does not exist
++# anywhere before this line (`grep -rn 'solve!(destination' src/ ext/` finds the
++# dense caches and nothing for the sparse one), so this adds a method and
++# overwrites nothing.
++MFLA.solve!(destination::AbstractVecOrMat{MF}, cache::MFSparseLDLCache{MF},
++            rhs::AbstractVecOrMat{MF}) where {MF<:MultiFloat} =
++    _solve!(cache, destination, rhs)
++
+ function MFLA.factor_diagnostics(cache::MFSparseLDLCache{MF}) where {MF}
+     factor = cache.factor
+     return (

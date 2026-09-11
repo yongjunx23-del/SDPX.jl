@@ -1,0 +1,26 @@
+diff --git a/src/la/factor_lease.jl b/src/la/factor_lease.jl
+index be824f8..d931308 100644
+--- a/src/la/factor_lease.jl
++++ b/src/la/factor_lease.jl
+@@ -358,8 +358,20 @@ function refactor_numeric!(h::FactorHandle, values)
+     facts = capabilities(h.request, h.provider)
+     adm = admit(h.request, facts)
+     if !adm.allowed
++        # ADR-002 §4 requires revocation on ANY failure, and an admission refusal
++        # is a failure. It is also the one failure that never reaches the provider,
++        # which is why it used to fall through the revoke-before-status discipline
++        # above: there is no provider status to read, so there was nothing to order
++        # against. But `h.request` has already changed, so a lease left bound here
++        # authorises a request no factor was ever built for -- measured as
++        # `is_valid(lease) == true` with `bound_request_digest != request_digest`,
++        # and `commit_failure_observation` throwing because it refuses to run while
++        # a lease is valid (S07-F1). Revoking here is what makes the §4 guarantee
++        # hold for every exit from this function rather than all but one.
++        _revoke!(h.lease, EvRefactorPreflightRejected,
++                 "request not admitted: $(adm.detail)")
+         return (ok=false, status=StatusUnsupported, generation=h.provider_generation,
+-                revoked=false, provider_status=nothing, admission=adm,
++                revoked=true, provider_status=nothing, admission=adm,
+                 detail="request not admitted: $(adm.detail)")
+     end
+ 

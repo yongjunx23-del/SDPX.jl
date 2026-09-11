@@ -1,0 +1,50 @@
+--- a/test/rebuild/S07.jl
++++ b/test/rebuild/S07.jl
+@@ -135,6 +135,13 @@
+     include($(joinpath(S07_SESSION, "cancellation.jl")))
+ end)
+ 
++# Whether the package itself already binds the S07 surface, measured from the
++# loaded package rather than assumed from the checkout: wiring is I02's move, so
++# this driver must run, and mean something, on both a wired and an unwired tree.
++# `PreparedUpdateState` is defined by the S07 sources and by nothing else in
++# SDPX, so it is a faithful one-bit probe for "I02 has landed".
++const S07_WIRED = isdefined(SDPX, :PreparedUpdateState)
++
+ # =====================================================================
+ # The S07 name surface, pulled out of a mode module.
+ #
+@@ -301,14 +308,28 @@
+     @test api.ProblemChange !== api_other.ProblemChange
+     @test api.SessionBoundary !== api_other.SessionBoundary
+ 
+-    # Names the sources define that SDPX already owns would shadow or extend a
+-    # production binding when I02 wires them. Must be none.
++    # Names the sources define. BEFORE wiring, any of them that SDPX already owns
++    # would shadow or extend a production binding when I02 wires them: must be
++    # none. AFTER wiring the same names are EXPECTED in SDPX -- that is the point
++    # of wiring -- so the fact that must hold inverts to "the package binds every
++    # one of them", i.e. the include graph is complete. Both directions are real
++    # assertions: neither is an `isempty` that a wired tree would silently pass.
+     own = s07_top_level_definitions(api)
++    wired = S07_WIRED
+     collisions = sort([String(n) for n in own if isdefined(SDPX, n)])
++    missing = sort([String(n) for n in own if !isdefined(SDPX, n)])
++    rec(:sources_are_wired_into_sdpx, wired)
+     rec(:source_definition_count, length(own))
+-    rec(:name_collisions_with_sdpx, length(collisions))
+-    isempty(collisions) || @info "S07 name collisions with SDPX" collisions
+-    @test isempty(collisions)
++    if wired
++        rec(:names_unbound_in_sdpx_after_wiring, length(missing))
++        rec(:names_bound_in_sdpx_after_wiring, length(own) - length(missing))
++        isempty(missing) || @info "S07 names unbound in SDPX" missing
++        @test isempty(missing)
++    else
++        rec(:name_collisions_with_sdpx, length(collisions))
++        isempty(collisions) || @info "S07 name collisions with SDPX" collisions
++        @test isempty(collisions)
++    end
+     # The only foreign generics the sources extend are Base's. Counted, not
+     # assumed, so `Base.showerror` extension is a recorded fact.
+     rec(:base_extension_count, s07_base_extensions())

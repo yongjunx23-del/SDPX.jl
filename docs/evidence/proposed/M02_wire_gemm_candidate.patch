@@ -1,0 +1,27 @@
+diff --git a/src/MultiFloatLinearAlgebra.jl b/src/MultiFloatLinearAlgebra.jl
+index e46caba..5641445 100644
+--- a/src/MultiFloatLinearAlgebra.jl
++++ b/src/MultiFloatLinearAlgebra.jl
+@@ -35,6 +35,22 @@ include("residual.jl")
+ include("factor_caches.jl")
+ include("factor_cache_requirements.jl")
+ 
++# --- rebuild packet: M02 shape-oriented packing and SIMD microkernels --------
++#
++# CANDIDATE ONLY. These four files add a shape-oriented planner, panel-local
++# packing, SIMD microkernels and a packed schedule. They are ADDITIVE: they
++# touch no existing definition, they export nothing, and every plan they build
++# carries `default_path = false`, so no route becomes reachable by their
++# presence. Wiring them makes M02's driver run in its `wired` mode.
++#
++# ORDER: gemm_plan.jl needs _default_gemm_panel_columns (kernels/gemm.jl) and
++# _check_supported (types.jl); packing.jl needs _m02_limb_count, defined in
++# gemm_plan.jl. Do not reorder.
++include("planning/gemm_plan.jl")
++include("kernels/packing.jl")
++include("kernels/gemm_microkernels.jl")
++include("kernels/gemm_schedule.jl")
++
+ # --- rebuild packet: the M01 factor/cache/summary contract -------------------
+ #
+ # @integration/core-cutover. The contract layer the packet's M01 task built,

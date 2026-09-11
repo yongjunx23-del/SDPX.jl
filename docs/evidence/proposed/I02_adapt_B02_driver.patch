@@ -1,0 +1,104 @@
+--- a/test/rebuild/B02.jl
++++ b/test/rebuild/B02.jl
+@@ -42,10 +42,52 @@
+ 
+ # ---------------------------------------------------------------------------
+ # Reachability: the files are inert until the integration role wires them.
++#
++# I02 wires them, which flips every fact in this section and makes the
++# unconditional `Base.include` below WRONG -- though not, as an earlier version
++# of this comment claimed, ILLEGAL. That claim was refuted by measurement: on a
++# wired tree the unadapted driver re-includes all three files on top of the
++# package's own include graph and still exits 0 with every assertion passing.
++# Julia permits the struct redefinitions and reports them only as
++# `Warning: Replacing docs for ...` (27 of them, counted). So the reason to guard
++# the load is not that the driver would otherwise fail. It is that a re-include
++# tests a SECOND copy of the code laid over the production bindings -- not the
++# configuration the package uses, and not what "runs against the production
++# inclusion" is supposed to mean.
++#
++# The mode is probed from the loaded package, and each of the three files
++# separately, so that ONE driver runs in both modes and a PARTIAL wiring is
++# named here instead of surfacing as an `UndefVarError` further down. Probed
++# per file rather than per task because a single bit cannot distinguish
++# "nothing wired" from "two of three wired".
+ # ---------------------------------------------------------------------------
+ 
+-const UNWIRED_BEFORE_INCLUDE = !isdefined(BigFloatLinearAlgebra, :BFLARectangularRRQRCache)
++const B02_SOURCES = (
++    qr_panel       = joinpath(SRC, "kernels", "qr_panel.jl"),
++    rectangular_qr = joinpath(SRC, "caches", "rectangular_qr.jl"),
++    least_squares  = joinpath(SRC, "solves", "least_squares.jl"),
++)
++
++# One definition that belongs to that file and to no other, so the probe cannot
++# be satisfied by a name the package already owned. `B02_FILE_PROBES` is in the
++# same order as `B02_SOURCES` (NamedTuple iteration is declaration order), which
++# is what lets the load loop below stay in production include order.
++const B02_FILE_PROBES = (
++    qr_panel       = :RectQRPanelScratch,
++    rectangular_qr = :RRQRShapeUnsupported,
++    least_squares  = :least_squares!,
++)
++
++const B02_WIRED_PARTS = map(n -> isdefined(BigFloatLinearAlgebra, n), B02_FILE_PROBES)
++const B02_WIRED = all(values(B02_WIRED_PARTS))
++const B02_UNWIRED_PARTS = Tuple(k for k in keys(B02_SOURCES) if !B02_WIRED_PARTS[k])
++
++measure("b02_wired_parts", B02_WIRED_PARTS)
++measure("b02_fully_wired", B02_WIRED)
++measure("b02_parts_this_driver_must_load", B02_UNWIRED_PARTS)
+ 
++const UNWIRED_BEFORE_INCLUDE = !B02_WIRED
++
+ entry_text = read(joinpath(SRC, "BigFloatLinearAlgebra.jl"), String)
+ const INCLUDE_GRAPH_REFS = (
+     occursin("rectangular_qr", entry_text),
+@@ -96,18 +138,44 @@
+ measure("child_process_threads", CHILD_THREADS)
+ measure("sys_cpu_threads", Sys.CPU_THREADS)
+ 
++# The control above was MEASURED BUT NEVER ASSERTED in the first version of this
++# driver, so it could not fail. If the child process died, all three HAS_* flags
++# came back false -- which is exactly the unwired expectation -- and the section
++# passed vacuously. `CHILD_OK` is therefore gated first, and the three flags are
++# then required to agree with the mode the package itself reports.
++@test CHILD_OK
++if B02_WIRED
++    # Wired: a fresh process MUST see the names. This is the wiring claim, and
++    # it is the opposite of the unwired expectation below.
++    @test CHILD_HAS_CACHE && CHILD_HAS_LS && CHILD_HAS_FACTS
++else
++    @test !CHILD_HAS_CACHE && !CHILD_HAS_LS && !CHILD_HAS_FACTS
++end
++
+ # ---------------------------------------------------------------------------
+ # Load the B02 files into the package module (the future wired state).
++#
++# Only the parts the package does not already bind, in production include order.
++# In the unwired mode this is all three and executes exactly the statement the
++# wired `include` will execute; in the wired mode it is a no-op and the
++# package's own include graph is what is under test.
+ # ---------------------------------------------------------------------------
+ 
+-Base.include(BigFloatLinearAlgebra, joinpath(SRC, "kernels", "qr_panel.jl"))
+-Base.include(BigFloatLinearAlgebra, joinpath(SRC, "caches", "rectangular_qr.jl"))
+-Base.include(BigFloatLinearAlgebra, joinpath(SRC, "solves", "least_squares.jl"))
++for name in keys(B02_SOURCES)
++    B02_WIRED_PARTS[name] && continue
++    Base.include(BigFloatLinearAlgebra, B02_SOURCES[name])
++end
+ 
+ const RRQR = BigFloatLinearAlgebra.BFLARectangularRRQRCache
+ const RRQRFacts = BigFloatLinearAlgebra.LeastSquaresFacts
+ 
+ measure("wired_names_present_after_include", isdefined(BigFloatLinearAlgebra, :BFLARectangularRRQRCache))
++
++# In BOTH modes the namespace must be COMPLETE after the load step above, so a
++# partially-wired tree fails here rather than later with an `UndefVarError` that
++# reads like a driver bug.
++@test all(n -> isdefined(BigFloatLinearAlgebra, n), values(B02_FILE_PROBES))
++@test isdefined(BigFloatLinearAlgebra, :LeastSquaresFacts)
+ 
+ # ---------------------------------------------------------------------------
+ # Fixtures (all dyadic: exactly representable at both P and PREF).
