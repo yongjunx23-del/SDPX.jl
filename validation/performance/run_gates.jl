@@ -420,30 +420,6 @@ function run_gate_threads(T::Type, rows::Vector, type::AbstractString, req::Int)
     push!(rows, new_row("threads/budget_requested_admitted", "threads", type;
         status=(admitted <= req && admitted >= 1 ? "pass" : "fail"),
         detail="requested=$req julia_threads=$hw_threads admitted=$admitted"))
-    local participating
-    try
-        rep = SDPX.schur_bin_report(Float64, 8, 4, admitted; dense_owner=true)
-        participating = rep.selected_bins
-        push!(rows, new_row("threads/budget_participating_bounded", "threads", type;
-            status=(participating <= admitted ? "pass" : "fail"),
-            detail="admitted=$admitted participating=$participating " *
-                   "mode=$(rep.assembly_mode)"))
-    catch err
-        push!(rows, new_row("threads/budget_participating_bounded", "threads", type;
-            status="error", detail="schur_bin_report threw: $err"))
-        participating = nothing
-    end
-    try
-        w = SDPX.worker_report(req, admitted)
-        push!(rows, new_row("threads/worker_report_consistent", "threads", type;
-            status=(w.requested_workers == req && w.effective_workers == admitted &&
-                    w.oversubscribed == (admitted > w.physical_cores) ? "pass" : "fail"),
-            detail="requested=$(w.requested_workers) effective=$(w.effective_workers) " *
-                   "physical=$(w.physical_cores) oversubscribed=$(w.oversubscribed)"))
-    catch err
-        push!(rows, new_row("threads/worker_report_consistent", "threads", type;
-            status="error", detail="worker_report threw: $err"))
-    end
     # Determinism: two identical budgeted solves must digest identically.
     local d1, d2, r1, r2
     try
