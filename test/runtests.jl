@@ -14,24 +14,24 @@ include(joinpath(@__DIR__, "wide_qr_pivoted_adapter.jl"))
 include(joinpath(@__DIR__, "relaxed_liveness_profile.jl"))
 
 include(joinpath(
-    @__DIR__, "..", "benchmark", "general", "GenericConicBenchmark.jl",
+    @__DIR__, "..", "research", "benchmark", "general", "GenericConicBenchmark.jl",
 ))
 using .GenericConicBenchmark
-include(joinpath(@__DIR__, "..", "benchmark", "robustness",
+include(joinpath(@__DIR__, "..", "research", "benchmark", "robustness",
     "test_route_guard.jl"))
 include(joinpath(
-    @__DIR__, "..", "benchmark", "general", "test_v2.jl",
+    @__DIR__, "..", "research", "benchmark", "general", "test_v2.jl",
 ))
 include(joinpath(
-    @__DIR__, "..", "benchmark", "optimization", "test_v2_schema9_adapter.jl",
+    @__DIR__, "..", "research", "benchmark", "optimization", "test_v2_schema9_adapter.jl",
 ))
 include(joinpath(
-    @__DIR__, "..", "benchmark", "optimization", "test_v2_fresh_process_profile.jl",
+    @__DIR__, "..", "research", "benchmark", "optimization", "test_v2_fresh_process_profile.jl",
 ))
 
-include(joinpath(@__DIR__, "..", "benchmark", "bootstrap", "physics",
+include(joinpath(@__DIR__, "..", "research", "benchmark", "bootstrap", "physics",
     "test_physics_catalog_contracts.jl"))
-include(joinpath(@__DIR__, "..", "benchmark", "bootstrap", "physics",
+include(joinpath(@__DIR__, "..", "research", "benchmark", "bootstrap", "physics",
     "massless_eft", "test_massless_eft_catalog.jl"))
 
 const E2E_CASE_IDS = (
@@ -639,8 +639,8 @@ end
 include(joinpath(@__DIR__, "exp_logarithmic.jl"))
 include(joinpath(@__DIR__, "exp_logarithmic_conjugate.jl"))
 include(joinpath(@__DIR__, "exp_reconstruction_stability.jl"))
-include(joinpath(@__DIR__, "..", "validation", "scientific_core", "test_mathematics.jl"))
-include(joinpath(@__DIR__, "..", "validation", "scientific_core", "test_independent_cone_geometry.jl"))
+include(joinpath(@__DIR__, "..", "research", "validation", "scientific_core", "test_mathematics.jl"))
+include(joinpath(@__DIR__, "..", "research", "validation", "scientific_core", "test_independent_cone_geometry.jl"))
 include(joinpath(@__DIR__, "structure_cache_synchronization.jl"))
 include(joinpath(@__DIR__, "native_structure_diagnostics.jl"))
 include(joinpath(@__DIR__, "gap_normalization.jl"))
@@ -653,11 +653,11 @@ include(joinpath(@__DIR__, "certificate_scratch_ownership.jl"))
 include(joinpath(@__DIR__, "multifloat_trial_tail.jl"))
 include(joinpath(@__DIR__, "test_r1_full_qualification.jl"))
 include(joinpath(@__DIR__, "test_r5a_precision_controller.jl"))
-include(joinpath(@__DIR__, "..", "validation", "scientific_core",
+include(joinpath(@__DIR__, "..", "research", "validation", "scientific_core",
     "test_r2a_symbolic_numeric_separation.jl"))
 include(joinpath(@__DIR__, "session_symbolic_lease.jl"))
 include(joinpath(@__DIR__, "test_r2_full_qualification.jl"))
-include(joinpath(@__DIR__, "..", "validation", "scientific_core", "exp_runtime",
+include(joinpath(@__DIR__, "..", "research", "validation", "scientific_core", "exp_runtime",
     "test_compensated_exp_reference.jl"))
 include(joinpath(@__DIR__, "initialize_counting.jl"))
 include(joinpath(@__DIR__, "core_route_planner.jl"))
@@ -667,10 +667,10 @@ include(joinpath(@__DIR__, "symmetric_core_shapes.jl"))
 include(joinpath(@__DIR__, "sparse_route_fallback.jl"))
 include(joinpath(@__DIR__, "sparse_qdldl_provider.jl"))
 include(joinpath(@__DIR__, "iteration_diagnostics.jl"))
-include(joinpath(@__DIR__, "..", "benchmark", "optimization", "test_profile_catalog.jl"))
-include(joinpath(@__DIR__, "..", "benchmark", "optimization", "test_compare_contract.jl"))
-include(joinpath(@__DIR__, "..", "benchmark", "optimization", "test_measure_target.jl"))
-include(joinpath(@__DIR__, "..", "benchmark", "bootstrap", "physics",
+include(joinpath(@__DIR__, "..", "research", "benchmark", "optimization", "test_profile_catalog.jl"))
+include(joinpath(@__DIR__, "..", "research", "benchmark", "optimization", "test_compare_contract.jl"))
+include(joinpath(@__DIR__, "..", "research", "benchmark", "optimization", "test_measure_target.jl"))
+include(joinpath(@__DIR__, "..", "research", "benchmark", "bootstrap", "physics",
     "smatrix_4d", "spec_only", "test_smatrix_4d_spec.jl"))
 
 # Provider-gated regressions (MultiFloats/MultiFloatLinearAlgebra) run via
