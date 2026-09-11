@@ -69,14 +69,6 @@ if !isdefined(@__MODULE__, :KKTSession)
         KKT_STATE_NUMERIC_FAILURE = 0x06
     end
 
-        state === KKT_STATE_LEASED ? :leased :
-        state === KKT_STATE_SOLVED ? :solved :
-        state === KKT_STATE_REVOKED ? :revoked :
-        state === KKT_STATE_EPOCH_MISMATCH ? :epoch_mismatch :
-        state === KKT_STATE_REFUSED ? :refused :
-        state === KKT_STATE_NUMERIC_FAILURE ? :numeric_failure :
-        throw(ArgumentError("unknown KKT session state $state"))
-
     # ------------------------------------------------------------------ #
     # 2. Provider handle protocol (provider-neutral)
     # ------------------------------------------------------------------ #
