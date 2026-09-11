@@ -802,19 +802,6 @@ function hsd_recover_optimal!(
     valid = _hsd_eq_all_finite(x) && _hsd_eq_all_finite(s) &&
             _hsd_eq_all_finite(y) && primal_ok && dual_ok &&
             complementarity_ok && primal_cone_ok && dual_cone_ok
-    if !valid && get(ENV, "SDPX_DEBUG_EQUALITY_RECOVERY", "0") == "1"
-        println(stderr, (
-            recovery=:optimal,
-            primal_normalized=_hsd_eq_maxabs(primal_residual) /
-                max(one(T), data_scale),
-            dual_normalized=_hsd_eq_maxabs(dual_residual) /
-                max(one(T), data_scale),
-            complementarity_normalized=complementarity /
-                max(one(T), complementarity_scale),
-            primal_ok, dual_ok, complementarity_ok,
-            primal_cone_ok, dual_cone_ok, tolerance,
-        ))
-    end
     valid || return false
     copy_owned!(x_full, x)
     copy_owned!(s_full, s)

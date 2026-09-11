@@ -574,8 +574,13 @@ end
 Cold seam (C7.1b): allocates the frozen core pattern, state-owned per-block
 Theta operators/RHS and a semantic `BlockProductConeLinearization` from the
 canonical cone block layout, and prepares (never factors) the provider
-cache.  No direction dispatch reads this field yet; the old bordered route
-remains authoritative.  `memory_limit_bytes`/`current_rss_bytes` must be
+cache.  Direction dispatch DOES read the prepared field: when
+`state.symmetric_core !== nothing` the bordered route executes the symmetric
+augmented core direction instead of the full-border one, so this workspace is
+the authoritative route whenever it is prepared.  (The earlier note "no
+direction dispatch reads this field yet; the old bordered route remains
+authoritative" became false when the core route landed and is corrected at
+I03.)  `memory_limit_bytes`/`current_rss_bytes` must be
 known (fail closed otherwise) and are checked before any allocation.
 """
 function _prepare_product_hsd_symmetric_core(
@@ -798,29 +803,6 @@ end
         end
     end
     return true
-end
-
-@inline function _product_hsd_soc_condition_budget(w, n::Int)
-    T = eltype(w)
-    w0 = T(w[1])
-    tail2 = zero(T)
-    @inbounds for i in 2:n
-        wi = T(w[i])
-        isfinite(wi) || return T(Inf)
-        tail2 += wi * wi
-    end
-    radius = sqrt(tail2)
-    lambda_plus = w0 + radius
-    determinant = (w0 - radius) * lambda_plus
-    lambda_minus = determinant / lambda_plus
-    isfinite(lambda_plus) && isfinite(lambda_minus) &&
-        lambda_plus > zero(T) && lambda_minus > zero(T) || return T(Inf)
-    ratio = lambda_plus / lambda_minus
-    kappa_theta = ratio * ratio
-    gamma_argument = T(3n + 12) * eps(T)
-    isfinite(gamma_argument) && gamma_argument < one(T) || return T(Inf)
-    gamma = gamma_argument / (one(T) - gamma_argument)
-    return T(64) * gamma * kappa_theta
 end
 
 @inline function _product_hsd_soc_q_coefficient(
@@ -3836,14 +3818,7 @@ Base.@noinline function _product_hsd_bordered_route_direction!(
         catch exception
             exception isa InterruptException && rethrow()
             state.diagnostic = :symmetric_core_dispatch_exception
-            if get(ENV, "SDPX_DEBUG_SYMMETRIC_CORE", "0") == "1"
-                showerror(stderr, exception, catch_backtrace())
-                println(stderr)
-            end
             false
-        end
-        if !direction_ok && get(ENV, "SDPX_DEBUG_SYMMETRIC_CORE", "0") == "1"
-            println(stderr, "SYMMETRIC_CORE_DIRECTION_FALSE diagnostic=", state.diagnostic)
         end
         return direction_ok ? HSDStepOK : HSDStepDirectionFailed
     end
@@ -4133,9 +4108,6 @@ Base.@noinline function product_hsd_step!(state::ProductConeHSDState{T,R,RT,NS,C
     end
     timings.scaling_seconds += Float64(time_ns() - t0) * 1.0e-9
     if !scaling_ok
-        if get(ENV, "SDPX_DEBUG_SYMMETRIC_CORE", "0") == "1"
-            println(stderr, "PRODUCT_SCALING_FALSE result=", state.runtime.last_nonsymmetric)
-        end
         return HSDStepDirectionFailed
     end
     base.epoch += 1
@@ -4196,10 +4168,6 @@ Base.@noinline function product_hsd_step!(state::ProductConeHSDState{T,R,RT,NS,C
     accepted = try
         _product_hsd_line_search!(state)
     catch exception
-        if get(ENV, "SDPX_DEBUG_SYMMETRIC_CORE", "0") == "1"
-            showerror(stderr, exception, catch_backtrace())
-            println(stderr)
-        end
         # Unexpected scaling-kernel failure remains fail-closed.  Restore the
         # runtime/base consistency when the original iterate is still valid.
         if !isempty(state.runtime.exp) || !isempty(state.runtime.power)
