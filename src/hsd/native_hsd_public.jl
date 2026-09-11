@@ -57,14 +57,6 @@ function _native_hsd_kkt_descriptor(
             :factor_once_predictor_corrector_refinement,
             :native_expanded_ldlt, :native_serial, (:bordered,),
         )
-    elseif route === :factor_pair
-        T === Float64 || throw(ArgumentError(
-            "factor_pair requires Float64 arithmetic",
-        ))
-        return NativeHSDKKTDescriptor(
-            route, :dense_factor_pair_lu, :dense, :native,
-            :lu_dense, :affine_combined_same_factor, :dense_lu, :dense_lu, (),
-        )
     elseif route === :bordered
         if T === Float64
             return NativeHSDKKTDescriptor(
@@ -233,7 +225,7 @@ end
 
 """Authoritative family payload for one direct native-HSD execution."""
 struct NativeHSDPlan <: AbstractExecutionPlanPayload
-    formulation::Union{DenseHomogeneousBordered,DenseHybridCoupled,SymmetricAugmentedHSD,DenseFactorPairHSD}
+    formulation::Union{DenseHomogeneousBordered,DenseHybridCoupled,SymmetricAugmentedHSD}
     storage::Symbol
     factorization::Symbol
     factorization_reuse::Symbol
@@ -257,8 +249,6 @@ struct NativeHSDPlan <: AbstractExecutionPlanPayload
     kkt_route::Symbol
     kkt_execution::NativeHSDKKTDescriptor
     structure::NativeHSDStructureFacts
-    # R0-P4 whole-epoch backend selector actually consulted for this plan.
-    nonsymmetric_backend::NonsymmetricBackendChoice
 end
 
 """Typed diagnostics for the direct native-HSD public route."""
@@ -626,27 +616,9 @@ function _native_hsd_plan(
     full_core_dimension::Integer=0,
     compact_dimension::Integer=0,
     use_compact_schur::Bool=false,
-    factor_pair_formulation::Union{Nothing,DenseFactorPairHSD}=nothing,
 ) where {T<:AbstractFloat}
-    fp = factor_pair_formulation !== nothing
     reduced = reduction.reduced
-    planned_route = fp ? :factor_pair : settings.kkt_route
-    if fp
-        settings.nonsymmetric_backend === ExperimentalHalfPowerFactorPairBackend &&
-            reduction.status === HSDEqualityReady && reduced !== nothing ||
-            throw(ArgumentError("factor-pair plan requires admitted experimental reduction"))
-        factor_pair_formulation.reduced_variables == canonical_num_variables(reduced) &&
-            factor_pair_formulation.active_rows == canonical_num_slack(reduced) ||
-            throw(ArgumentError("factor-pair descriptor dimensions do not match reduction"))
-        FactorPairHSD.reduced_layout(reduced) === nothing &&
-            throw(ArgumentError("unsupported factor-pair layout"))
-        product_rank = 0 # compatibility sentinel, never a numerical rank claim
-        product_rank_reason = :not_computed_factor_pair
-        product_rank_ambiguous = product_rank_incompatible = false
-        core_dimension = factor_pair_formulation.dimension
-        fixed_trace_applicable = use_compact_schur = false
-        full_core_dimension = compact_dimension = 0
-    end
+    planned_route = settings.kkt_route
     reduced_variables = reduced === nothing ? 0 : canonical_num_variables(reduced)
     active_rows = length(reduction.reduced_to_full)
     active_blocks = reduced === nothing ? 0 : length(reduced.cone_layout.blocks)
@@ -687,7 +659,7 @@ function _native_hsd_plan(
             psd_storage_status,
         )
     end
-    descriptor = fp ? factor_pair_formulation : _native_hsd_formulation_descriptor(
+    descriptor = _native_hsd_formulation_descriptor(
         canonical,
         reduction,
         product_rank,
@@ -695,7 +667,7 @@ function _native_hsd_plan(
         product_rank_incompatible,
         product_rank_reason,
     )
-    if !fp && settings.kkt_route === :bordered && descriptor.available
+    if settings.kkt_route === :bordered && descriptor.available
         descriptor = SymmetricAugmentedHSD(
             product_rank,
             active_rows,
@@ -705,7 +677,6 @@ function _native_hsd_plan(
         )
     end
     factor_dimension = !descriptor.available ? 0 :
-        fp ? descriptor.dimension :
         settings.kkt_route === :sparse_schur ? product_rank + 1 :
         settings.kkt_route === :bordered ?
             core_dimension :
@@ -740,7 +711,6 @@ function _native_hsd_plan(
         planned_route,
         kkt_execution,
         structure,
-        settings.nonsymmetric_backend,
     )
 
     entries = nnz(classification_layout.A)
@@ -779,8 +749,8 @@ function _native_hsd_plan(
         rank_revealing_qr=true,
         factor_solve=descriptor.available,
         multi_rhs=descriptor.available,
-        iterative_refinement=!fp && descriptor.available,
-        sparse_factorization=!fp && descriptor.available &&
+        iterative_refinement=descriptor.available,
+        sparse_factorization=descriptor.available &&
             (settings.kkt_route === :sparse_schur ||
              (settings.kkt_route === :bordered && T === Float64)),
     )
@@ -793,7 +763,7 @@ function _native_hsd_plan(
         capability_symbols,
         capabilities,
         descriptor.available ?
-            (fp ? (:lu, :factor_solve) : settings.kkt_route === :sparse_schur ?
+            (settings.kkt_route === :sparse_schur ?
                 (:sparse_factorization, :factor_solve) :
                 settings.kkt_route === :bordered ?
                     (T === Float64 ? (:sparse_factorization, :factor_solve) :
@@ -831,8 +801,8 @@ function _native_hsd_plan(
         executed_threads=min(max(Int(settings.limits.threads), 1),
                              Base.Threads.nthreads()),
         fallback_chain=kkt_execution.fallback_chain,
-        symmetric_core_dimension=fp ? 0 : factor_dimension,
-        symmetric_core_storage=fp ? :not_applicable : kkt_execution.storage,
+        symmetric_core_dimension=factor_dimension,
+        symmetric_core_storage=kkt_execution.storage,
         core_estimate_bytes=Int(core_estimate_bytes),
         current_rss_bytes=Int(current_rss_bytes === nothing ? 0 : current_rss_bytes),
         requested_precision_bits=canonical.precision_bits,
@@ -845,9 +815,6 @@ function _native_hsd_plan(
         psd_hypothetical_triangular_scalars=structure.psd_hypothetical_triangular_scalars,
         psd_storage_status=structure.psd_storage_status,
     )
-    if fp
-        parameters = (; parameters..., core_dimension=descriptor.dimension)
-    end
     return ExecutionPlan(
         classification,
         :native_hsd,
@@ -855,8 +822,8 @@ function _native_hsd_plan(
         backend,
         FormulationPlan(
             descriptor,
-            fp ? :native_hsd_factor_pair_formulation : :native_hsd_typed_formulation,
-            fp ? :factor_pair : :native_hsd,
+            :native_hsd_typed_formulation,
+            :native_hsd,
         ),
         la,
         storage,
@@ -1063,7 +1030,6 @@ function _native_hsd_diagnostics(
     executed_kkt_attempts::Tuple{Vararg{Symbol}}=(),
     state::Union{Nothing,ProductConeHSDState}=nothing,
     product::Union{Nothing,ProductHSDSolveResult{T}}=nothing,
-    factor_pair_terminal::Union{Nothing,NamedTuple}=nothing,
     equilibration::Symbol=:off,
     core_estimate_bytes::Integer=0,
     core_dimension::Integer=0,
@@ -1072,7 +1038,6 @@ function _native_hsd_diagnostics(
     factor_owner::Symbol=:none,
     owner_current::Bool=false,
     owner_unused::Tuple=(),
-    factor_pair_execution::Union{Nothing,NamedTuple}=nothing,
 ) where {T<:AbstractFloat}
     payload = plan.payload::NativeHSDPlan
     descriptor = payload.formulation
@@ -1087,12 +1052,7 @@ function _native_hsd_diagnostics(
         actual_route, mathematical_formulation, T,
     )
     did_execute = equality_ready && factorizations > 0
-    # A failed experimental LU still attempted this route. Do not promote
-    # completion-dependent factor/reuse/ownership facts along with provenance.
-    did_attempt = did_execute || (equality_ready &&
-        payload.nonsymmetric_backend === ExperimentalHalfPowerFactorPairBackend &&
-        factor_pair_execution !== nothing &&
-        factor_pair_execution.factorization_attempts > 0)
+    did_attempt = did_execute
     route_attempts = if !did_attempt
         ()
     elseif isempty(executed_kkt_attempts)
@@ -1235,19 +1195,6 @@ function _native_hsd_diagnostics(
                 terminal_base.record.step_size
     backtracking = terminal_base === nothing ? -1 :
                    terminal_base.record.backtracking
-    if factor_pair_terminal !== nothing
-        terminal_tau = factor_pair_terminal.tau
-        terminal_kappa = factor_pair_terminal.kappa
-        terminal_mu = factor_pair_terminal.mu
-        p_residual = factor_pair_terminal.p_residual
-        d_residual = factor_pair_terminal.d_residual
-        gap_residual = factor_pair_terminal.gap_residual
-        normalized_residual = factor_pair_terminal.normalized_residual
-        last_step = :factor_pair
-        terminal_alpha = factor_pair_terminal.terminal_alpha
-        step_size = factor_pair_terminal.step_size
-        backtracking = factor_pair_terminal.backtracking
-    end
     # PR-07 step diagnostics. The plan requires the ACTUAL per-step values to be
     # observable, not only the requested knobs: "先记录每步真实 mu_aff/mu,
     # sigma_used, alpha_aff, alpha_combined, correction norm, backtracks, retry
@@ -1285,9 +1232,6 @@ function _native_hsd_diagnostics(
         correction_norm,
         retry_reason,
     )
-    if factor_pair_execution !== nothing
-        termination = (; termination..., factor_pair_execution)
-    end
     selected = (
         solver=:native_hsd,
         engine=:native_hsd,
@@ -1298,7 +1242,6 @@ function _native_hsd_diagnostics(
         planned_kkt_formulation=planned_formulation,
         executed_kkt_formulation=executed_formulation,
         requested_kkt_route=payload.kkt_route,
-        nonsymmetric_backend=payload.nonsymmetric_backend,
         planned_kkt_route=planned_kkt.route,
         executed_kkt_route=did_attempt ? executed_kkt.route : :not_executed,
         planned_kkt_storage=planned_storage,
@@ -1350,8 +1293,7 @@ function _native_hsd_diagnostics(
             psd_block_count=payload.structure.psd_block_count,
             psd_hypothetical_triangular_scalars=payload.structure.psd_hypothetical_triangular_scalars,
             psd_storage_status=payload.structure.psd_storage_status,
-            planned_core_dimension=descriptor isa DenseFactorPairHSD ?
-                plan.parameters.core_dimension : plan.parameters.symmetric_core_dimension,
+            planned_core_dimension=plan.parameters.symmetric_core_dimension,
             # `prepared`/`executed` come from the actual factor-owning
             # workspace for the terminal active route (see
             # _native_hsd_factor_owner_dims): a prepared but never-stepped
@@ -1370,11 +1312,6 @@ function _native_hsd_diagnostics(
             dual_infeasible=(:primal,),
         ),
     )
-    if descriptor isa DenseFactorPairHSD
-        selected = (; selected..., matrix_structure=descriptor.matrix_structure,
-            coordinate_system=descriptor.coordinate_system,
-            border_dimension=descriptor.border_dimension)
-    end
     equality = (
         status=reduction.status,
         original_rows=payload.original_rows,
@@ -1385,12 +1322,12 @@ function _native_hsd_diagnostics(
         dependent=Tuple(reduction.dependent),
     )
     rank = (
-        rank=descriptor isa DenseFactorPairHSD ? nothing : payload.product_rank,
+        rank=payload.product_rank,
         reason=payload.product_rank_reason,
         variables=payload.reduced_variables,
         ambiguous=payload.product_rank_ambiguous,
         incompatible=payload.product_rank_incompatible,
-        basis=descriptor isa DenseFactorPairHSD ? :not_applicable : :orthogonal_rowspace,
+        basis=:orthogonal_rowspace,
     )
     timings = if state !== nothing
         merge(
@@ -1420,10 +1357,9 @@ function _native_hsd_diagnostics(
         estimated_workspace_bytes=core_estimate_bytes,
         process_peak_rss_bytes=process_peak,
         memory_budget_bytes=plan.memory_budget_bytes,
-        symmetric_core_dimension=descriptor isa DenseFactorPairHSD ? 0 : core_dimension,
-        symmetric_core_estimate_bytes=descriptor isa DenseFactorPairHSD ? 0 : core_estimate_bytes,
-        symmetric_core_actual_provider=descriptor isa DenseFactorPairHSD ?
-            :not_applicable : executed_provider_fact,
+        symmetric_core_dimension=core_dimension,
+        symmetric_core_estimate_bytes=core_estimate_bytes,
+        symmetric_core_actual_provider=executed_provider_fact,
         symmetric_core_actual_precision=executed_precision_fact,
         symmetric_core_actual_regularization=executed_regularization_fact,
         symmetric_core_actual_factor_epoch=executed_reuse_fact,
@@ -1460,7 +1396,6 @@ function _native_hsd_core_result(
     executed_kkt_attempts::Tuple{Vararg{Symbol}}=(),
     state::Union{Nothing,ProductConeHSDState}=nothing,
     product::Union{Nothing,ProductHSDSolveResult{T}}=nothing,
-    factor_pair_terminal::Union{Nothing,NamedTuple}=nothing,
     equilibration::Symbol=:off,
     core_estimate_bytes::Integer=0,
     core_dimension::Integer=0,
@@ -1469,7 +1404,6 @@ function _native_hsd_core_result(
     factor_owner::Symbol=:none,
     owner_current::Bool=false,
     owner_unused::Tuple=(),
-    factor_pair_execution::Union{Nothing,NamedTuple}=nothing,
 ) where {T<:AbstractFloat}
     diagnostics = _native_hsd_diagnostics(
         plan,
@@ -1485,8 +1419,6 @@ function _native_hsd_core_result(
         executed_kkt_attempts,
         state,
         product,
-        factor_pair_terminal,
-        factor_pair_execution,
         equilibration,
         core_estimate_bytes,
         core_dimension,
@@ -1512,147 +1444,6 @@ function _native_hsd_core_result(
     )
 end
 
-"""
-    _factor_pair_public_core(...)
-
-Opt-in R0-P4 route: run the certified half-Power factor-pair epoch on the
-admitted reduced problem, recover the full canonical coordinates through the
-existing equality-reduction lineage, and return the same
-`NativeHSDCoreResult` type the ordinary route returns.  The public
-original-coordinate recovery and certificate authority downstream are
-unchanged; this function never constructs a legacy dense-metric runtime.
-"""
-function _factor_pair_public_core(
-    model::Model{Float64},
-    program::NativeConeProgram{Float64},
-    canonical::CanonicalConicProgram{Float64},
-    reduction::HSDEqualityReduction{Float64},
-    route::NativeConeRoute,
-    settings::Settings{Float64},
-    setup_seconds::Float64,
-)
-    reduced = reduction.reduced
-    layout = FactorPairHSD.reduced_layout(reduced)
-    layout === nothing && throw(UnsupportedBackendError(
-        :admission, :cones, settings.nonsymmetric_backend,
-        "post-reduction cone layout is not the admitted contiguous orthant + half-Power shape",
-    ))
-    A, b, c = FactorPairHSD.canonical_problem(reduced)
-    # Experimental estimate gate only. The subtotal is incomplete; checking
-    # it against this threshold does NOT bound actual simultaneous-live memory.
-    # Full peak-memory qualification remains open (R0-P4 / R3-D).
-    live_estimate = FactorPairHSD.estimate_live_bytes(A, b, c, layout, 2)
-    live_estimate <= FACTOR_PAIR_MAX_LIVE_BYTES || throw(UnsupportedBackendError(
-        :admission, :memory, settings.nonsymmetric_backend,
-        "estimated live bytes $(live_estimate) exceed the experimental ceiling $(FACTOR_PAIR_MAX_LIVE_BYTES)",
-    ))
-    automatic = auto_tolerance(Float64, precision_bits(model))
-    tp = settings.tolerances.primal === nothing ? automatic : settings.tolerances.primal
-    td = settings.tolerances.dual === nothing ? automatic : settings.tolerances.dual
-    tg = settings.tolerances.gap === nothing ? automatic : settings.tolerances.gap
-    cert_tol = min(tp, td, tg)
-    target = max(tp, td, tg)
-    core_started = time_ns()
-    terminal = FactorPairHSD.execute_with_refusal(
-        ledger -> FactorPairHSD.cold_start(A, b, c, layout;
-            settings=NativeHalfPair.RootSettings(), target=target, cert_tol=cert_tol,
-            memory_limit_bytes=FACTOR_PAIR_MAX_LIVE_BYTES,
-            max_time_seconds=Float64(settings.limits.time),
-            factorization_ledger=ledger),
-        state -> FactorPairHSD.solve!(state;
-            max_iterations=_native_hsd_max_iterations(settings)))
-    core_seconds = Float64(time_ns() - core_started) * 1.0e-9
-
-    n = canonical_num_variables(canonical)
-    m = canonical_num_slack(canonical)
-    x_full = alloc_zeros(Float64, n)
-    s_full = alloc_zeros(Float64, m)
-    y_full = alloc_zeros(Float64, m)
-    status = NumericalFailure
-    reason = :factor_pair_not_certified
-    recovery_valid = false
-    recovery_started = time_ns()
-    refusal_reason = get(terminal, :refusal_reason, :none)
-    if terminal.status === :refused
-        reason = refusal_reason === :none ? :factor_pair_refused : refusal_reason
-    elseif terminal.status === :certified_terminal
-        inv_tau = inv(terminal.tau)
-        recovery_valid = hsd_recover_optimal_source!(x_full, s_full, y_full,
-            reduction, terminal.x .* inv_tau, terminal.s .* inv_tau,
-            terminal.y .* inv_tau; tol=cert_tol)
-        if recovery_valid
-            status = Optimal
-            reason = :factor_pair_certified
-        else
-            reason = :full_canonical_recovery_failed
-        end
-    elseif terminal.status === :time_limit
-        status = TimeLimit
-        reason = :time_limit
-    elseif terminal.status === :iteration_limit
-        status = IterLimit
-        reason = :iteration_limit
-    end
-    recovery_seconds = Float64(time_ns() - recovery_started) * 1.0e-9
-
-    descriptor = DenseFactorPairHSD(size(A, 2), size(A, 1))
-    core_dim = descriptor.dimension
-    plan = _native_hsd_plan(program, canonical, reduction, route, settings;
-        factor_pair_formulation=descriptor, memory_limit_bytes=live_estimate,
-        core_estimate_bytes=live_estimate)
-    return canonical, reduction, _native_hsd_core_result(
-        Float64,
-        status,
-        reason,
-        plan,
-        reduction,
-        terminal.iterations,
-        terminal.factorizations,
-        nothing,
-        recovery_valid,
-        x_full,
-        s_full,
-        y_full,
-        setup_seconds,
-        core_seconds,
-        recovery_seconds;
-        executed_kkt_route=:factor_pair,
-        executed_kkt_attempts=(:factor_pair,),
-        factor_pair_execution=(
-            status=terminal.status,
-            refusal_stage=get(terminal, :refusal_stage, :none),
-            refusal_reason=get(terminal, :refusal_reason, :none),
-            refusal_detail=get(terminal, :refusal_detail, ""),
-            factorization_attempts=terminal.factorization_attempts,
-            accepted_state_available=get(terminal, :accepted_state_available, true),
-            pair_generation=terminal.pair_generation,
-            accepted_steps=length(terminal.history),
-            factor_ownership=terminal.factor_ownership,
-        ),
-        factor_pair_terminal=terminal.audit === nothing ? nothing : (
-            tau=terminal.tau,
-            kappa=terminal.kappa,
-            mu=terminal.audit.mu,
-            p_residual=terminal.audit.primal_feas,
-            d_residual=terminal.audit.dual_feas,
-            gap_residual=terminal.audit.homo_gap,
-            normalized_residual=terminal.audit.norm_resid,
-            terminal_alpha=isempty(terminal.history) ? 0.0 :
-                           last(terminal.history).alpha,
-            step_size=isempty(terminal.history) ? 0.0 :
-                      last(terminal.history).alpha,
-            backtracking=isempty(terminal.history) ? -1 :
-                         last(terminal.history).backtracking,
-        ),
-        core_dimension=core_dim,
-        owner_prepared_dimension=terminal.factor_ownership.prepared_dimension,
-        owner_executed_dimension=terminal.factor_ownership.executed_dimension,
-        factor_owner=terminal.factor_ownership.factor_owner,
-        owner_current=terminal.factor_ownership.current,
-        owner_unused=(),
-    )
-end
-
 """Execute the direct canonical/equality/product-HSD route exactly once."""
 function _public_native_hsd_core(
     model::Model{T},
@@ -1662,11 +1453,6 @@ function _public_native_hsd_core(
     allow_expanded_bordered_fallback::Bool=true,
     execution_context::Union{Nothing,NativeExecutionContext}=nothing,
 ) where {T<:AbstractFloat}
-    # R0-P4: typed fail-closed backend admission happens before any numerical
-    # setup.  The default backend returns immediately; an explicit experimental
-    # request either passes the declared scope or refuses here (never falls
-    # back to the default path).
-    enforce_factor_pair_admission!(settings)
     setup_started = time_ns()
     canonical = canonicalize(program)
     fixed_trace_plan = settings.kkt_route === :bordered ?
@@ -1679,13 +1465,6 @@ function _public_native_hsd_core(
     x_full = alloc_zeros(T, n)
     s_full = alloc_zeros(T, m)
     y_full = alloc_zeros(T, m)
-
-    if settings.nonsymmetric_backend === ExperimentalHalfPowerFactorPairBackend &&
-       reduction.status !== HSDEqualityInconsistent
-        return _factor_pair_public_core(
-            model, program, canonical, reduction, route, settings, setup_seconds,
-        )
-    end
 
     if reduction.status === HSDEqualityInconsistent
         copy_owned!(y_full, reduction.primal_infeasibility_ray)
@@ -2441,7 +2220,6 @@ function _native_hsd_route_settings(settings::Settings{T}, route::Symbol) where 
         certification=settings.certification,
         blas_threads=settings.blas_threads,
         iteration_knobs=settings.iteration_knobs,
-        nonsymmetric_backend=settings.nonsymmetric_backend,
     )
 end
 
@@ -2591,10 +2369,6 @@ function _public_optimize_native_hsd(
     warm_start;
     execution_context::Union{Nothing,NativeExecutionContext}=nothing,
 ) where {T<:AbstractFloat}
-    # R0-P4 typed admission runs before the legacy policy validation so an
-    # explicit experimental request receives UnsupportedBackendError rather
-    # than a legacy PublicOptimizeError.
-    enforce_factor_pair_admission!(settings)
     _public_validate_native_hsd_policy(
         model,
         program,
@@ -2608,8 +2382,7 @@ function _public_optimize_native_hsd(
         allow_expanded_bordered_fallback=true,
         execution_context=execution_context,
     )
-    if settings.nonsymmetric_backend === NativeNonsymmetricBackend &&
-       _native_hsd_should_restart_bordered(
+    if _native_hsd_should_restart_bordered(
         settings.kkt_route,core.status,core.reason,core.iterations,
     )
         if execution_context !== nothing && execution_context.symbolic_lease !== nothing

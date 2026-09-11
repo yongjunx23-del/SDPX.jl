@@ -102,53 +102,6 @@ struct DenseHomogeneousBordered <: AbstractNativeHSDFormulation
     available::Bool
 end
 
-"""Dense factor-coordinate HSD core, with two scalar homogeneous unknowns.
-Counts are structural dimensions, never evidence of numerical product rank.
-"""
-struct DenseFactorPairHSD <: AbstractNativeHSDFormulation
-    dimension::Int
-    reduced_variables::Int
-    active_rows::Int
-    border_dimension::Int
-    matrix_structure::Symbol
-    layout::Symbol
-    row_scaling::Symbol
-    coordinate_system::Symbol
-    border_structure::Symbol
-    factorization::Symbol
-    pivoting::Symbol
-    factor_reuse::Symbol
-    gram_or_metric::Symbol
-    backend::Symbol
-    route::Symbol
-    reason::Symbol
-    available::Bool
-end
-function DenseFactorPairHSD(n::Integer, m::Integer)
-    nv = _native_hsd_nonnegative_dimension(n, :reduced_variables)
-    nr = _native_hsd_nonnegative_dimension(m, :active_rows)
-    dim = Base.Checked.checked_add(Base.Checked.checked_add(nv, nr), 2)
-    return DenseFactorPairHSD(dim, nv, nr, 2, :general_nonsymmetric,
-        :equality_reduced_product_rows, :factor_pair_coordinates,
-        :factor_pair_coordinates, :two_scalar_homogeneous_border, :lu_dense,
-        :partial, :affine_combined_same_factor, :factor_pair_actions, :native,
-        :dense_factor_pair_lu, :experimental_factor_pair, true)
-end
-function Base.getproperty(d::DenseFactorPairHSD, name::Symbol)
-    name === :matrix_dimension && return getfield(d, :dimension)
-    name === :formulation && return getfield(d, :route)
-    name === :reduced_layout && return getfield(d, :layout)
-    name === :border && return getfield(d, :border_structure)
-    name in (:factorization_reuse, :reuse) && return getfield(d, :factor_reuse)
-    name === :transform && return getfield(d, :row_scaling)
-    name === :metric && return getfield(d, :gram_or_metric)
-    name === :pivoting_strategy && return getfield(d, :pivoting)
-    return getfield(d, name)
-end
-Base.propertynames(d::DenseFactorPairHSD, private::Bool=false) =
-    (fieldnames(typeof(d))..., :matrix_dimension, :formulation, :reduced_layout,
-     :border, :factorization_reuse, :reuse, :transform, :metric, :pivoting_strategy)
-
 """Typed descriptor for `K = [0 Ar'; Ar -Theta]`."""
 struct SymmetricAugmentedHSD <: AbstractNativeHSDFormulation
     dimension::Int
@@ -444,7 +397,6 @@ formulation_symbol(::NoKKTFormulation) = :not_applicable
 formulation_symbol(::DenseHomogeneousBordered) = :dense_homogeneous_bordered
 formulation_symbol(::SymmetricAugmentedHSD) = :symmetric_augmented_hsd_core
 formulation_symbol(::DenseHybridCoupled) = :dense_hybrid_coupled
-formulation_symbol(::DenseFactorPairHSD) = :dense_factor_pair_lu
 formulation_symbol(formulation::UnsupportedKKTFormulation) = formulation.name
 formulation_symbol(plan::FormulationPlan) =
     formulation_symbol(plan.formulation)
@@ -479,8 +431,6 @@ function kkt_backend_from_formulation(
     formulation isa SymmetricAugmentedHSD &&
         return formulation.backend
     formulation isa DenseHybridCoupled &&
-        return formulation.backend
-    formulation isa DenseFactorPairHSD &&
         return formulation.backend
     sdp_algorithms = (:sdp_primal_dual,)
     if formulation isa Union{

@@ -54,7 +54,6 @@ include("memory_utils.jl")
 include("frontend/solve_options.jl")
 include("midend/resolve_options.jl")
 include("public/settings.jl")
-include("hsd/factor_pair_admission.jl")
 include("public/outputs.jl")
 include("kernels/api.jl")
 include("kernels/generic.jl")
@@ -139,12 +138,6 @@ include("public/result.jl")
 # implementation details; they are not exported and they do not change the
 # default dense-metric route.  Independent research oracles stay in
 # validation/scientific_core/.
-include("hsd/factor_pair/factor_preserving_affine.jl")
-include("hsd/factor_pair/native_factor_affine_certificate.jl")
-include("hsd/factor_pair/half_power_native_corrector.jl")
-include("hsd/factor_pair/factor_combined_epoch.jl")
-include("hsd/factor_pair/native_half_pair.jl")
-include("hsd/factor_pair/factor_pair_hsd.jl")
 include("hsd/core_route_planner.jl")
 include("hsd/native_hsd_public.jl")
 include("public/optimize.jl")
@@ -222,8 +215,6 @@ export certificate, diagnostics, iteration_history, performance_trace
 export Optimizer
 export clear_structure_cache!, set_structure_cache_enabled!
 export symbolic_analysis_count, symbolic_analysis_counts, symbolic_analysis_delta
-export NonsymmetricBackendChoice, NativeNonsymmetricBackend
-export ExperimentalHalfPowerFactorPairBackend, UnsupportedBackendError
 export AccuracyContract, AccuracyClass, UnsupportedAccuracyContext
 export AccuracyVerified, AccuracyUnsupported, AccuracyNumericalFailure
 export AccuracyInfrastructureFailure
