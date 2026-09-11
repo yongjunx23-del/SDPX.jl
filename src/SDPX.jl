@@ -165,8 +165,6 @@ include("moi_wrapper.jl")
 # Verified before wiring: a copy with exactly these includes precompiles clean
 # (`✓ SDPX`, zero warnings) and passes the full inherited suite (170 testsets,
 # 9395 assertions, exit 0).
-include("core/compiled_problem.jl")
-include("core/transforms.jl")
 include("kkt/operator.jl")
 include("kkt/session.jl")
 include("kkt/strategy.jl")
