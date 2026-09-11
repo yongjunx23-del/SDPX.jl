@@ -300,21 +300,6 @@ struct SolveDiagnostics <: AbstractCoreDiagnostics
     precision_ladder::Union{Nothing,PrecisionLadderReport}
 end
 
-"""Solve-local ladder bookkeeping threaded from the BigFloat staging loop into
-`_attach_diagnostics`. Mutable because it accumulates the small per-rung
-diagnostics reports (`PrecisionAttemptReport`s — never results, workspaces,
-factors, or per-rung `SolveDiagnostics` snapshots) as the ladder advances; it
-is never part of any public record. Diagnostics-disabled runs allocate the
-empty report vector once and never fill it."""
-mutable struct PrecisionLadderContext
-    plan::PrecisionLadderPlan
-    rung::Int
-    attempt_id::Int
-    explicit_bits::Int
-    rung_started_ns::UInt64
-    remaining_budget_seconds::Float64
-    reports::Vector{PrecisionAttemptReport}
-end
 
 # Source compatibility for the pre-`termination` positional form.
 SolveDiagnostics(classification, plan, presolve, timings, memory,
