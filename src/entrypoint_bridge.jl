@@ -55,161 +55,229 @@ end
     return cons.Asp[l][i]
 end
 
-"""Add `coefficient * entry` to every matrix cell."""
-function _bridge_psd_contribute!(
-    matrix::Matrix{ScalarAffine{T}},
-    coefficient::SparseMatrixCSC{T,Int},
-    entry::VariableEntry{T},
-) where {T}
-    rows = rowvals(coefficient)
-    values = nonzeros(coefficient)
-    for column in axes(coefficient, 2), index in nzrange(coefficient, column)
-        value = values[index]
-        iszero(value) && continue
-        row = rows[index]
-        matrix[row, column] = matrix[row, column] + value * entry
-    end
-    return matrix
-end
-
-function _bridge_psd_contribute!(
-    matrix::Matrix{ScalarAffine{T}},
-    coefficient::AbstractMatrix{T},
-    entry::VariableEntry{T},
-) where {T}
-    for column in axes(coefficient, 2), row in axes(coefficient, 1)
-        value = coefficient[row, column]
-        iszero(value) && continue
-        matrix[row, column] = matrix[row, column] + value * entry
-    end
-    return matrix
-end
-
 """
-    _bridge_sdp_psd_expression(model, problem, l, free)
+    _bridge_sdp_program(problem) -> (model, NativeConeProgram)
 
-Affine PSD row block `Σ_i A_l[i]·x_i - C_l in S_+`, matching the SDPX
-primal-slack definition `X_l = Σ_i A_l[i]·x_i - C_l`.
+Build the native program directly from the ingested `SDPProblem`: PSD blocks
+lower-pack to packed row blocks (`s = A x + rhs` rows carry `rhs = +C`), and
+equalities become `ZeroCone` rows (`rhs = b`). The returned `model` is a
+shell carrying only ref tables — no expression tree is built.
 """
-function _bridge_sdp_psd_expression(
-    model::Model{T},
-    problem::SDPProblem{T},
-    l::Int,
-    free,
-) where {T}
-    dimension = problem.dims.k[l]
-    matrix = Matrix{ScalarAffine{T}}(undef, dimension, dimension)
-    @inbounds for column in 1:dimension, row in 1:dimension
-        matrix[row, column] = _constant_affine(
-            model,
-            -problem.C[l][row, column],
-        )
-    end
-    free === nothing && return matrix
-    for variable in 1:problem.dims.m
-        coefficient = _bridge_psd_coefficient(
-            problem.cons, l, variable, dimension,
-        )
-        iszero(coefficient) && continue
-        _bridge_psd_contribute!(
-            matrix, coefficient, free[variable],
-        )
-    end
-    return matrix
-end
+function _bridge_sdp_program(problem::SDPProblem{T}) where {T<:AbstractFloat}
+    model = _bridge_new_model(T)
+    m = problem.dims.m
+    L = problem.dims.L
+    n = problem.dims.n
+    identity = model.identity
 
-"""One equality row `Σ_j B[j,i]·x_j - b_i in {0}`."""
-function _bridge_sdp_equality_expression(
-    model::Model{T},
-    problem::SDPProblem{T},
-    i::Int,
-    free,
-) where {T}
-    expression = _constant_affine(model, zero(T))
-    B = problem.B
-    if free !== nothing
-        if B isa SparseMatrixCSC
-            values = nonzeros(B)
-            rows = rowvals(B)
-            for index in nzrange(B, i)
-                value = values[index]
+    # ---- variable block: the free variables x in R^m ----
+    blocks = NativeBlock[]
+    if m > 0
+        push!(model.variable_blocks, VariableBlockRecord{T}(
+            :free_variables, Reals(), m, 1, m, nothing, nothing))
+        model.block_names[:free_variables] = 1
+        for i in 1:m
+            push!(model.variables, VariableRef(identity, 1, i))
+        end
+        push!(blocks, NativeBlock(Reals(), m, 1))
+    end
+    model.next_variable_id = length(model.variables) + 1
+
+    # ---- affine row blocks: packed PSD rows per block, then ZeroCone equalities ----
+    row_blocks = RowBlock[]
+    rhs = T[]
+    a_rows = Int[]
+    a_cols = Int[]
+    a_vals = T[]
+    row = 0
+    block_id = 0
+    for l in 1:L
+        d = problem.dims.k[l]
+        count = div(d * (d + 1), 2)
+        push!(row_blocks, RowBlock(PSDCone(), row + 1, d))
+        refs = [ConstraintRef(identity, block_id + 1, i) for i in 1:count]
+        push!(model.constraint_blocks, AffineConstraintRecord{T}(
+            Symbol(:psd_block_, l), PSDCone(), d, ScalarAffine{T}[], refs, nothing))
+        model.constraint_names[Symbol(:psd_block_, l)] = block_id + 1
+        append!(model.constraints, refs)
+        block_id += 1
+        Cl = problem.C[l]
+        for column in 1:d, r in column:d
+            row += 1
+            push!(rhs, Cl[r, column])
+            for i in 1:m
+                coefficient = _bridge_psd_coefficient(problem.cons, l, i, d)
+                value = coefficient[r, column]
                 iszero(value) && continue
-                expression = expression + value * free[rows[index]]
-            end
-        else
-            @inbounds for row in 1:problem.dims.m
-                value = B[row, i]
-                iszero(value) && continue
-                expression = expression + value * free[row]
+                push!(a_rows, row)
+                push!(a_cols, i)
+                push!(a_vals, value)
             end
         end
     end
-    return expression - problem.b[i]
+    if n > 0
+        push!(row_blocks, RowBlock(ZeroCone(), row + 1, n))
+        refs = [ConstraintRef(identity, block_id + 1, i) for i in 1:n]
+        push!(model.constraint_blocks, AffineConstraintRecord{T}(
+            :equalities, ZeroCone(), n, ScalarAffine{T}[], refs, nothing))
+        model.constraint_names[:equalities] = block_id + 1
+        append!(model.constraints, refs)
+        B = problem.B
+        for i in 1:n
+            row += 1
+            push!(rhs, problem.b[i])
+            if B isa SparseMatrixCSC
+                values = nonzeros(B)
+                rows = rowvals(B)
+                for index in nzrange(B, i)
+                    push!(a_rows, row)
+                    push!(a_cols, rows[index])
+                    push!(a_vals, values[index])
+                end
+            else
+                for j in 1:m
+                    value = B[j, i]
+                    iszero(value) && continue
+                    push!(a_rows, row)
+                    push!(a_cols, j)
+                    push!(a_vals, value)
+                end
+            end
+        end
+    end
+    model.next_constraint_id = length(model.constraints) + 1
+
+    matrix = sparse(a_rows, a_cols, a_vals, row, m)
+    dropzeros!(matrix)
+    program = NativeConeProgram(
+        model.arithmetic,
+        Minimize(),
+        copy(problem.c),
+        zero(T),
+        matrix,
+        rhs,
+        blocks,
+        row_blocks,
+        copy(model.variables),
+        copy(model.constraints),
+        copy(model.variables),
+        identity,
+    )
+    return model, program
 end
 
-"""Full typed Model for an SDPProblem in SDPX slack-image form."""
-function _bridge_sdp_model(problem::SDPProblem{T}) where {T<:AbstractFloat}
+"""Full typed program for a ConicProblem in the native Lorentz form."""
+function _bridge_conic_program(problem::ConicProblem{T}) where {T<:AbstractFloat}
     model = _bridge_new_model(T)
-    free = problem.dims.m > 0 ?
-           variable!(model, :free_variables, problem.dims.m; domain=Reals()) :
-           nothing
-    for l in 1:problem.dims.L
-        constraint!(
-            model,
-            Symbol(:psd_block_, l),
-            _bridge_sdp_psd_expression(model, problem, l, free),
-            PSDCone(),
-        )
-    end
-    if problem.dims.n > 0
-        expressions = Vector{ScalarAffine{T}}(undef, problem.dims.n)
-        @inbounds for i in 1:problem.dims.n
-            expressions[i] = _bridge_sdp_equality_expression(
-                model, problem, i, free,
-            )
-        end
-        constraint!(model, :equalities, expressions, ZeroCone())
-    end
-    objective = _constant_affine(model, zero(T))
-    if free !== nothing
-        for i in 1:problem.dims.m
-            value = problem.c[i]
-            iszero(value) && continue
-            objective = objective + value * free[i]
-        end
-    end
-    objective!(model, Minimize(), objective)
-    return model
-end
+    nv = problem.variables
+    identity = model.identity
 
-"""Full typed Model for a ConicProblem in the native Lorentz form."""
-function _bridge_conic_model(problem::ConicProblem{T}) where {T<:AbstractFloat}
-    model = _bridge_new_model(T)
-    block = variable!(model, :variables, problem.variables; domain=Reals())
-    if size(problem.Aeq, 1) > 0
-        base = problem.Aeq * block
-        expressions = Vector{ScalarAffine{T}}(undef, length(problem.beq))
-        @inbounds for i in eachindex(expressions)
-            expressions[i] = base[i] - problem.beq[i]
+    blocks = NativeBlock[]
+    if nv > 0
+        push!(model.variable_blocks, VariableBlockRecord{T}(
+            :variables, Reals(), nv, 1, nv, nothing, nothing))
+        model.block_names[:variables] = 1
+        for i in 1:nv
+            push!(model.variables, VariableRef(identity, 1, i))
         end
-        constraint!(model, :equalities, expressions, ZeroCone())
+        push!(blocks, NativeBlock(Reals(), nv, 1))
+    end
+    model.next_variable_id = length(model.variables) + 1
+
+    row_blocks = RowBlock[]
+    rhs = T[]
+    a_rows = Int[]
+    a_cols = Int[]
+    a_vals = T[]
+    row = 0
+    block_id = 0
+    Aeq = problem.Aeq
+    neq = size(Aeq, 1)
+    if neq > 0
+        push!(row_blocks, RowBlock(ZeroCone(), row + 1, neq))
+        refs = [ConstraintRef(identity, block_id + 1, i) for i in 1:neq]
+        push!(model.constraint_blocks, AffineConstraintRecord{T}(
+            :equalities, ZeroCone(), neq, ScalarAffine{T}[], refs, nothing))
+        model.constraint_names[:equalities] = block_id + 1
+        append!(model.constraints, refs)
+        block_id += 1
+        Aeqt = Aeq isa SparseMatrixCSC ? sparse(Aeq') : nothing
+        for i in 1:neq
+            row += 1
+            push!(rhs, -problem.beq[i])
+            if Aeqt !== nothing
+                values = nonzeros(Aeqt)
+                rows = rowvals(Aeqt)
+                for index in nzrange(Aeqt, i)
+                    push!(a_rows, row)
+                    push!(a_cols, rows[index])
+                    push!(a_vals, values[index])
+                end
+            else
+                for j in 1:nv
+                    value = Aeq[i, j]
+                    iszero(value) && continue
+                    push!(a_rows, row)
+                    push!(a_cols, j)
+                    push!(a_vals, value)
+                end
+            end
+        end
     end
     for (index, cone) in enumerate(problem.cones)
-        base = cone.A * block
-        expressions = Vector{ScalarAffine{T}}(undef, length(cone.b))
-        @inbounds for i in eachindex(expressions)
-            expressions[i] = base[i] + cone.b[i]
+        d = length(cone.b)
+        push!(row_blocks, RowBlock(LorentzCone(), row + 1, d))
+        refs = [ConstraintRef(identity, block_id + 1, i) for i in 1:d]
+        push!(model.constraint_blocks, AffineConstraintRecord{T}(
+            Symbol(:soc_, index), LorentzCone(), d, ScalarAffine{T}[], refs, nothing))
+        model.constraint_names[Symbol(:soc_, index)] = block_id + 1
+        append!(model.constraints, refs)
+        block_id += 1
+        At = cone.A isa SparseMatrixCSC ? sparse(cone.A') : nothing
+        for i in 1:d
+            row += 1
+            push!(rhs, -cone.b[i])
+            if At !== nothing
+                values = nonzeros(At)
+                rows = rowvals(At)
+                for j in nzrange(At, i)
+                    push!(a_rows, row)
+                    push!(a_cols, rows[j])
+                    push!(a_vals, values[j])
+                end
+            else
+                for j in 1:nv
+                    value = cone.A[i, j]
+                    iszero(value) && continue
+                    push!(a_rows, row)
+                    push!(a_cols, j)
+                    push!(a_vals, value)
+                end
+            end
         end
-        constraint!(
-            model,
-            Symbol(:soc_, index),
-            expressions,
-            LorentzCone(),
-        )
     end
-    objective!(model, Minimize(), dot(problem.c, block))
-    return model
+    model.next_constraint_id = length(model.constraints) + 1
+
+    matrix = sparse(a_rows, a_cols, a_vals, row, nv)
+    dropzeros!(matrix)
+    program = NativeConeProgram(
+        model.arithmetic,
+        Minimize(),
+        copy(problem.c),
+        zero(T),
+        matrix,
+        rhs,
+        blocks,
+        row_blocks,
+        copy(model.variables),
+        copy(model.constraints),
+        copy(model.variables),
+        identity,
+    )
+    return model, program
 end
+
+
 
 # ---------------------------------------------------------------------------
 # Legacy options -> typed public Settings (engine=:native_hsd)
@@ -304,17 +372,26 @@ function _bridge_sdp_solve(
     options::SolverOptions{T};
     execution_context::Union{Nothing,NativeExecutionContext}=nothing,
 ) where {T<:AbstractFloat}
-    model = _bridge_sdp_model(problem)
-    settings = _bridge_settings(options)
+    model, program = _bridge_sdp_program(problem)
+    settings = _public_normalize_settings(model, _bridge_settings(options))
+    outputs = _bridge_outputs(settings.diagnostics !== :none)
+    _public_validate_output_refs(model, outputs)
+    route = classify_native_cone_program(program)
+    _public_validate_algorithm(route, settings)
     # Internal seam: the public `optimize!` signature stays unchanged and
     # lease-free; the prepared session threads the session-local symbolic
     # lease through the common internal implementation only.
-    result = _optimize_impl(
-        model;
-        settings=settings,
-        outputs=_bridge_outputs(settings.diagnostics !== :none),
+    run() = _public_optimize_native_hsd(
+        model, program, route, settings, outputs, nothing;
         execution_context=execution_context,
     )
+    result = if T === BigFloat && Base.precision(BigFloat) != precision_bits(model)
+        setprecision(BigFloat, precision_bits(model)) do
+            run()
+        end
+    else
+        run()
+    end
     return _bridge_sdp_result(problem, model, result)
 end
 
@@ -352,13 +429,23 @@ function _bridge_conic_solve(
     problem::ConicProblem{T},
     options::SolverOptions{T},
 ) where {T<:AbstractFloat}
-    model = _bridge_conic_model(problem)
-    settings = _bridge_settings(options)
-    result = optimize!(
-        model;
-        settings=settings,
-        outputs=_bridge_outputs(settings.diagnostics !== :none),
+    model, program = _bridge_conic_program(problem)
+    settings = _public_normalize_settings(model, _bridge_settings(options))
+    outputs = _bridge_outputs(settings.diagnostics !== :none)
+    _public_validate_output_refs(model, outputs)
+    route = classify_native_cone_program(program)
+    _public_validate_algorithm(route, settings)
+    run() = _public_optimize_native_hsd(
+        model, program, route, settings, outputs, nothing;
+        execution_context=nothing,
     )
+    result = if T === BigFloat && Base.precision(BigFloat) != precision_bits(model)
+        setprecision(BigFloat, precision_bits(model)) do
+            run()
+        end
+    else
+        run()
+    end
     return _bridge_conic_result(problem, model, result)
 end
 

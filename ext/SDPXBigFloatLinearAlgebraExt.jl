@@ -1083,12 +1083,16 @@ end
 function SDPX._build_symmetric_core_ldlt_cache_provider(
     ::Type{BigFloat},
     pattern::SDPX.SymmetricCorePattern{BigFloat},
-    precision_bits::Int,
+    precision_bits::Int;
+    workers::Integer=1,
 )
     SDPX.symmetric_core_provider_available(BigFloat, precision_bits)
     cache = BFLALDLTFactorCache()
     SDPX.prepare!(
-        cache, BigFloatFactorRequirements(pattern.dimension, precision_bits),
+        cache,
+        BigFloatFactorRequirements(
+            pattern.dimension, 0, precision_bits, max(Int(workers), 1),
+        ),
     )
     return cache
 end

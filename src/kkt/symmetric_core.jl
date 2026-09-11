@@ -2038,7 +2038,8 @@ function build_symmetric_core_ldlt_cache(
     pattern::SymmetricCorePattern{T},
     precision_bits::Int,
     memory_limit_bytes::Union{Nothing,Integer},
-    current_rss_bytes::Union{Nothing,Integer},
+    current_rss_bytes::Union{Nothing,Integer};
+    workers::Integer=1,
 ) where {T<:AbstractFloat}
     eligibility = symmetric_core_dense_eligibility(
         T, pattern.dimension, memory_limit_bytes, current_rss_bytes,
@@ -2047,7 +2048,7 @@ function build_symmetric_core_ldlt_cache(
         "symmetric core dense factor ineligible: $(eligibility.reason)",
     ))
     return _build_symmetric_core_ldlt_cache_provider(
-        T, pattern, precision_bits,
+        T, pattern, precision_bits; workers=workers,
     )
 end
 
@@ -2055,7 +2056,8 @@ end
 function _build_symmetric_core_ldlt_cache_provider(
     ::Type{T},
     pattern::SymmetricCorePattern{T},
-    precision_bits::Int,
+    precision_bits::Int;
+    workers::Integer=1,
 ) where {T<:AbstractFloat}
     throw(ArgumentError(
         "symmetric core dense LDL has no provider for arithmetic $(T); " *
@@ -2320,6 +2322,7 @@ function prepare_symmetric_core_state(
     take_cone_ownership::Bool=false,
     execution_context::Union{Nothing,NativeExecutionContext}=nothing,
     prepared_key_context::Union{Nothing,NamedTuple}=nothing,
+    workers::Integer=1,
 ) where {T<:AbstractFloat}
     length(block_ranges) == length(block_sizes) || throw(ArgumentError(
         "symmetric core state block ranges/sizes counts disagree",
@@ -2389,7 +2392,7 @@ function prepare_symmetric_core_state(
         # are already strictly quasi-definite.
         build_symmetric_core_ldlt_cache(
             T, pattern, precision_bits, memory_limit_bytes,
-            current_rss_bytes,
+            current_rss_bytes; workers=workers,
         )
     end
     # Build the state-owned block-cone NewtonSystem first so the workspace
@@ -2526,6 +2529,7 @@ function build_symmetric_core_workspace(
     current_rss_bytes::Union{Nothing,Integer},
     regularization::Real;
     symbolic_epoch::Integer=0,
+    workers::Integer=1,
 ) where {T<:AbstractFloat}
     if T !== Float64
         # Provider and dimension-only memory eligibility are checked before
@@ -2548,7 +2552,8 @@ function build_symmetric_core_workspace(
         cache
     else
         cache = build_symmetric_core_ldlt_cache(
-            T, pattern, precision_bits, memory_limit_bytes, current_rss_bytes,
+            T, pattern, precision_bits, memory_limit_bytes, current_rss_bytes;
+            workers=workers,
         )
         factorize!(cache, materialize_dense(pattern), Int(matrix_epoch))
         cache

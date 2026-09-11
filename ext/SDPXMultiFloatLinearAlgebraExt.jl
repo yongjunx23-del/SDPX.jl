@@ -1070,8 +1070,10 @@ mutable struct MFLDLTFactorCache{MF<:MultiFloat} <: SDPX.AbstractFactorCache{MF}
     status::SDPX.FactorCacheState
 end
 
-MFLDLTFactorCache(::Type{MF}) where {MF<:MultiFloat} = MFLDLTFactorCache{MF}(
-    MFLDLTCache(MF), 0, -1, 0, SDPX.Unprepared,
+MFLDLTFactorCache(::Type{MF}, threads::Integer=1) where {MF<:MultiFloat} = MFLDLTFactorCache{MF}(
+    MFLDLTCache(
+        MF; config=KernelConfig(thread_count=max(Int(threads), 1)),
+    ), 0, -1, 0, SDPX.Unprepared,
 )
 
 function SDPX.prepare!(
@@ -1346,10 +1348,11 @@ end
 function SDPX._build_symmetric_core_ldlt_cache_provider(
     ::Type{MF},
     pattern::SDPX.SymmetricCorePattern{MF},
-    precision_bits::Int,
+    precision_bits::Int;
+    workers::Integer=1,
 ) where {MF<:MultiFloat}
     SDPX.symmetric_core_provider_available(MF, precision_bits)
-    cache = MFLDLTFactorCache(MF)
+    cache = MFLDLTFactorCache(MF, workers)
     SDPX.prepare!(
         cache, SDPX.FactorRequirements(pattern.dimension, 0),
     )

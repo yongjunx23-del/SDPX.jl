@@ -648,6 +648,7 @@ function _prepare_product_hsd_symmetric_core(
         take_cone_ownership=true,
         execution_context=execution_context,
         prepared_key_context=prepared_key_context,
+        workers=workers,
     )
 end
 
