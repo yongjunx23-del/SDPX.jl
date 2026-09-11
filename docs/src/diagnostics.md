@@ -72,3 +72,25 @@ an alternate cone formulation. Full diagnostics retain its executed rungs and
 each rung's child execution plan. See [architecture](architecture.md),
 [parameters](parameters.md), and [precision](precision.md) for the planning and
 arithmetic invariants.
+
+## Original-coordinate certificate machinery
+
+When `src/SDPX.jl` loads the certification submodule, a solve's terminal
+evidence can be re-checked in the problem's **original coordinates** rather
+than in the scaled or reduced coordinates the solver iterated in. That
+submodule — `SDPXCertification` — owns the terminal/verification/capability
+classification, the original-coordinate point and operator types, the cone
+membership and margin checks, the dual-map consistency artifacts, and the
+per-class error-bound classification.
+
+Every name above carries a docstring in the source. They are deliberately
+**not** enumerated in this manual, and `docs/make.jl` lists `SDPXCertification`
+in `checkdocs_ignored_modules` for the same reason it already lists
+`ExtendedPrecisionBLAS`, `SymmetricCones` and `FactorPreservingAffine`: it is an
+implementation namespace whose export list mixes the certificate API with
+internal helpers (`block_span`, `psd_packed_length`, `measurement_label`), so
+enumerating it is not a build requirement for the root API. The submodule became
+reachable from `src/SDPX.jl` in the core cutover, which is what made this
+distinction visible: before that it was not loaded, so Documenter never checked
+it. Documenting it name by name remains open work, not a decision that it is
+unimportant.
