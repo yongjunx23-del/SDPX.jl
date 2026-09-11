@@ -42,21 +42,6 @@ function _native_hsd_kkt_descriptor(
             :factor_once_homogeneous_predictor_corrector,
             :cholmod_symmetric_ldl, :cholmod, (),
         )
-    elseif route === :sparse_schur
-        return NativeHSDKKTDescriptor(
-            route, :sparse_reduced_schur, :sparse,
-            :sparse_reduced_schur, :sparse_lu,
-            :one_numeric_factor_per_predictor_corrector_epoch,
-            :suitesparse_umfpack, :suitesparse_umfpack,
-            (:expanded, :bordered),
-        )
-    elseif route === :expanded
-        return NativeHSDKKTDescriptor(
-            route, :dense_expanded_quasidefinite, :dense,
-            :native_hsd_expanded_quasidefinite, :quasidefinite_ldlt,
-            :factor_once_predictor_corrector_refinement,
-            :native_expanded_ldlt, :native_serial, (:bordered,),
-        )
     elseif route === :bordered
         if T === Float64
             return NativeHSDKKTDescriptor(
@@ -677,7 +662,6 @@ function _native_hsd_plan(
         )
     end
     factor_dimension = !descriptor.available ? 0 :
-        settings.kkt_route === :sparse_schur ? product_rank + 1 :
         settings.kkt_route === :bordered ?
             core_dimension :
             descriptor.matrix_dimension
@@ -751,8 +735,7 @@ function _native_hsd_plan(
         multi_rhs=descriptor.available,
         iterative_refinement=descriptor.available,
         sparse_factorization=descriptor.available &&
-            (settings.kkt_route === :sparse_schur ||
-             (settings.kkt_route === :bordered && T === Float64)),
+            (settings.kkt_route === :bordered && T === Float64),
     )
     capability_symbols = la_capability_symbols(capabilities)
     la = LABackendConfiguration(
@@ -763,12 +746,10 @@ function _native_hsd_plan(
         capability_symbols,
         capabilities,
         descriptor.available ?
-            (settings.kkt_route === :sparse_schur ?
-                (:sparse_factorization, :factor_solve) :
-                settings.kkt_route === :bordered ?
-                    (T === Float64 ? (:sparse_factorization, :factor_solve) :
-                                     (:factor_solve,)) :
-                    (:lu, :factor_solve)) : (),
+            (settings.kkt_route === :bordered ?
+                (T === Float64 ? (:sparse_factorization, :factor_solve) :
+                                 (:factor_solve,)) :
+                (:lu, :factor_solve)) : (),
         descriptor.available ? kkt_execution.kernel : :not_applicable,
         (),
         :none,
@@ -886,8 +867,6 @@ the TERMINAL active route (`state.kkt_route`, mutated by same-iterate
 fallbacks), never mere workspace existence. Allocated fallback workspaces
 are reported in `prepared_unused`, never as the owner. Returns
 `(prepared, executed, owner, current, prepared_unused)`:
-- `:sparse_schur` → the sparse session (`dimension`, solve-gate currency).
-- `:expanded` → the expanded session (`dimension`, receipt currency).
 - `:bordered`/`:sparse_augmented` → symmetric core, then coupled with
   nonsymmetric rows (`coupled.dimension` is rank + nonsymmetric_dimension
   + 2, never the planner rank + 1 candidate), then `symmetric_bordered`
@@ -904,24 +883,6 @@ function _native_hsd_factor_owner_dims(
     state::ProductConeHSDState{T}, any_factorizations::Bool,
 ) where {T<:AbstractFloat}
     active = state.kkt_route
-    if active === :sparse_schur
-        session = state.sparse_schur
-        unused = _native_hsd_present_buffers(state, :sparse_schur_session)
-        session === nothing && return 0, 0, :none, false, unused
-        prepared = session.dimension
-        current = _native_hsd_sparse_receipt_current(session)
-        return prepared, (any_factorizations && current) ? prepared : 0,
-            :sparse_schur_session, current, unused
-    elseif active === :expanded
-        session = state.expanded
-        unused = _native_hsd_present_buffers(state, :expanded_session)
-        session === nothing && return 0, 0, :none, false, unused
-        prepared = session.dimension
-        current = session.factor_receipt !== nothing &&
-            _expanded_factor_receipt_current(session)
-        return prepared, (any_factorizations && current) ? prepared : 0,
-            :expanded_session, current, unused
-    end
     core = product_hsd_symmetric_core(state)
     if core !== nothing
         prepared = core.dimension
@@ -959,7 +920,7 @@ end
 
 Cold-only inventory for the `prepared_unused` diagnostic: every allocated
 workspace the terminal dispatch does NOT execute (e.g. an unused coupled
-fallback buffer on an expanded solve). Pure reads, small_tuple output."""
+fallback buffer on a non-owning workspace). Pure reads, small_tuple output."""
 function _native_hsd_present_buffers(
     state::ProductConeHSDState{T}, owner::Symbol,
 ) where {T<:AbstractFloat}
@@ -971,48 +932,13 @@ function _native_hsd_present_buffers(
         owner !== :coupled && push!(buffers, :coupled)
     state.symmetric_bordered !== nothing && owner !== :symmetric_bordered &&
         push!(buffers, :symmetric_bordered)
-    state.expanded !== nothing && owner !== :expanded_session &&
-        push!(buffers, :expanded_session)
-    state.sparse_schur !== nothing && owner !== :sparse_schur_session &&
-        push!(buffers, :sparse_schur_session)
     return Tuple(buffers)
-end
-
-"""Sparse-session factor currency, replicating the solve's own gate.
-
-Same predicates as `solve_sparse_schur!` (status, numeric epochs, pattern,
-receipt), plus an explicit `nothing`-receipt guard: the shared receipt
-validator cannot bind its arithmetic from a `nothing` receipt, so calling
-it unguarded would throw instead of reporting stale. Cold-only."""
-function _native_hsd_sparse_receipt_current(session)
-    session.status === SPARSE_SCHUR_FACTORED || return false
-    session.factor === nothing && return false
-    session.factor_numeric_epoch == session.numeric_assembly_count ||
-        return false
-    session.factor_pattern_signature == session.pattern_signature ||
-        return false
-    session.factor_receipt === nothing && return false
-    return factor_receipt_owned(
-        session.factor_receipt;
-        matrix_epoch=session.factor_numeric_epoch,
-        factor_epoch=session.numeric_factor_count,
-        pattern_signature=session.pattern_signature,
-        route=:sparse_schur,
-        provider=:sparsearrays_umfpack,
-        regularization=session.regularization,
-    )
 end
 
 @inline function _native_hsd_fallback_reason(
     requested::Symbol, executed::Symbol,
 )
     requested === executed && return :none
-    requested === :sparse_schur && executed === :expanded &&
-        return :sparse_factor_or_refinement_failure
-    requested === :sparse_schur && executed === :bordered &&
-        return :sparse_and_expanded_failure
-    requested === :expanded && executed === :bordered &&
-        return :expanded_factor_or_refinement_failure
     return :route_changed_fail_closed
 end
 
@@ -1076,8 +1002,6 @@ function _native_hsd_diagnostics(
         SDPX.factor_status(core.cache) === Fresh
     executed_provider_fact = if core_executed
         core_receipt.provider
-    elseif state !== nothing && state.kkt_route === :sparse_schur && state.sparse_schur !== nothing
-        state.sparse_schur.executed_provider
     else
         !equality_ready ? :not_executed :
         did_execute ? executed_kkt.provider :
@@ -1450,7 +1374,6 @@ function _public_native_hsd_core(
     program::NativeConeProgram{T},
     route::NativeConeRoute,
     settings::Settings{T};
-    allow_expanded_bordered_fallback::Bool=true,
     execution_context::Union{Nothing,NativeExecutionContext}=nothing,
 ) where {T<:AbstractFloat}
     setup_started = time_ns()
@@ -1892,7 +1815,6 @@ function _public_native_hsd_core(
             schur_threads=settings.limits.threads,
             relaxed_liveness=settings.relaxed_liveness,
             iteration_knobs=settings.iteration_knobs,
-            allow_expanded_bordered_fallback=allow_expanded_bordered_fallback,
             execution_context=execution_context,
             prepared_key_context=(
                 execution_context === nothing || execution_context.symbolic_lease === nothing || settings.kkt_route !== :bordered || T !== Float64 ?
@@ -1922,7 +1844,6 @@ function _public_native_hsd_core(
         state = ProductConeHSDState(
             solve_reduced; kkt_route=settings.kkt_route,
             iteration_knobs=settings.iteration_knobs,
-            allow_expanded_bordered_fallback=allow_expanded_bordered_fallback,
         )
         base = state.base
         plan = _native_hsd_plan(
@@ -2199,166 +2120,6 @@ function _public_result_from_native_hsd(
     )
 end
 
-"""Return a settings copy with only the structural KKT route changed."""
-function _native_hsd_route_settings(settings::Settings{T}, route::Symbol) where {T<:AbstractFloat}
-    return Settings{T}(
-        tolerances=settings.tolerances,
-        limits=settings.limits,
-        engine=settings.engine,
-        scaling=settings.scaling,
-        formulation=settings.formulation,
-        kkt_route=route,
-        provider=settings.provider,
-        presolve=settings.presolve,
-        algorithm=settings.algorithm,
-        sparse=settings.sparse,
-        equality_solver=settings.equality_solver,
-        working_precision_policy=settings.working_precision_policy,
-        diagnostics=settings.diagnostics,
-        verbosity=settings.verbosity,
-        timing=settings.timing,
-        certification=settings.certification,
-        blas_threads=settings.blas_threads,
-        iteration_knobs=settings.iteration_knobs,
-    )
-end
-
-"""Attach a transparent one-shot route restart to the final core receipt.
-
-The guard is deliberately narrow: it handles only an early fixed-trace
-predictor residual failure.  An exact duplicate-equality model may still
-fail in the expanded route with tau-collapse recovery exhaustion; that is a
-separate equality-reduction/geometry issue and must remain fail-closed rather
-than being claimed as repaired by this fallback.
-"""
-function _native_hsd_restarted_core(
-    initial::NativeHSDCoreResult{T},
-    fallback::NativeHSDCoreResult{T},
-) where {T<:AbstractFloat}
-    initial_diag = initial.diagnostics
-    fallback_diag = fallback.diagnostics
-    initial_t = initial_diag.timings
-    fallback_t = fallback_diag.timings
-    initial_selected = initial_diag.selected_algorithms
-    fallback_selected = fallback_diag.selected_algorithms
-    # Each child core records the routes it actually attempted.  Compose the
-    # restart receipt from those records rather than reconstructing route names
-    # from the restart policy.  This keeps the receipt honest if a child
-    # terminates before execution and filters only the explicit sentinel.
-    initial_attempts = Tuple(filter(
-        route -> route !== :not_executed,
-        initial_selected.attempted_kkt_routes,
-    ))
-    fallback_attempts = Tuple(filter(
-        route -> route !== :not_executed,
-        fallback_selected.attempted_kkt_routes,
-    ))
-    isempty(initial_attempts) && throw(ArgumentError(
-        "native HSD restart requires an executed initial route receipt",
-    ))
-    isempty(fallback_attempts) && throw(ArgumentError(
-        "native HSD restart requires an executed fallback route receipt",
-    ))
-    attempts = (initial_attempts..., fallback_attempts...)
-    executed_route = fallback_selected.executed_kkt_route
-    timings = merge(
-        fallback_t,
-        (
-            setup=get(fallback_t, :setup, 0.0) + get(initial_t, :setup, 0.0),
-            core=get(fallback_t, :core, 0.0) + get(initial_t, :core, 0.0),
-            reconstruction=get(fallback_t, :reconstruction, 0.0) +
-                           get(initial_t, :reconstruction, 0.0),
-            total=get(fallback_t, :total, get(fallback_t, :core, 0.0)) +
-                  get(initial_t, :total, get(initial_t, :core, 0.0)),
-        ),
-    )
-    # Preserve every planning/identity field from the initial receipt, not
-    # just the currently documented aliases.  The fields listed here are
-    # execution outcomes supplied by the final child and therefore must remain
-    # from `fallback_selected`; all other initial fields are planning facts.
-    execution_fields = (
-        :executed_algorithm,
-        :executed_kkt_formulation,
-        :executed_kkt_route,
-        :executed_kkt_storage,
-        :executed_factorization,
-        :executed_factorization_reuse,
-        :executed_factorization_kernel,
-        :row_scaling,
-        :transform,
-        :border_structure,
-        :pivoting,
-        :gram_or_metric,
-        :metric,
-        :route,
-        :execution_path,
-        :executed_scaling,
-        :executed_backend,
-        :backend,
-        :la_executed_provider,
-        :attempted_kkt_routes,
-        :executed_fallback_chain,
-        :executed_threads,
-        :fallback_reason,
-    )
-    planned_fields = Tuple(filter(
-        field -> !(field in execution_fields),
-        propertynames(initial_selected),
-    ))
-    initial_planned = NamedTuple{planned_fields}(
-        Tuple(getproperty(initial_selected, field) for field in planned_fields),
-    )
-    selected = merge(
-        fallback_selected,
-        initial_planned,
-        (
-            executed_kkt_route=executed_route,
-            attempted_kkt_routes=attempts,
-            executed_fallback_chain=attempts,
-            fallback_reason=:bordered_predictor_residual_fallback,
-            route_restart_reason=initial.reason,
-            route_restart_iteration=initial.iterations,
-        ),
-    )
-    termination = merge(
-        fallback_diag.termination,
-        (
-            route_restart_reason=initial.reason,
-            route_restart_iteration=initial.iterations,
-            route_attempts=attempts,
-        ),
-    )
-    diagnostics = NativeHSDDiagnostics(
-        initial_diag.plan,
-        timings,
-        fallback_diag.memory,
-        selected,
-        vcat(initial_diag.warnings, fallback_diag.warnings),
-        termination,
-        fallback_diag.equality,
-        fallback_diag.rank,
-    )
-    return NativeHSDCoreResult{T}(
-        fallback.status,
-        fallback.message,
-        fallback.iterations,
-        diagnostics,
-        fallback.reason,
-        fallback.factorizations,
-        fallback.product_status,
-        fallback.recovery_valid,
-        fallback.x,
-        fallback.s,
-        fallback.y,
-    )
-end
-
-@inline function _native_hsd_should_restart_bordered(route::Symbol,status,reason::Symbol,iterations::Integer)
-    return route === :bordered && status === NumericalBreakdown &&
-        reason in (:symmetric_core_predictor_residual_failed,
-                   :disjoint_fixed_head_q3_predictor_residual_failed) && iterations <= 1
-end
-
 """Public direct-native orchestration.  No family lowerer is reachable."""
 function _public_optimize_native_hsd(
     model::Model{T},
@@ -2379,28 +2140,8 @@ function _public_optimize_native_hsd(
     )
     canonical, _, core = _public_native_hsd_core(
         model, program, route, settings;
-        allow_expanded_bordered_fallback=true,
         execution_context=execution_context,
     )
-    if _native_hsd_should_restart_bordered(
-        settings.kkt_route,core.status,core.reason,core.iterations,
-    )
-        if execution_context !== nothing && execution_context.symbolic_lease !== nothing
-            finish_symbolic!(execution_context.symbolic_lease; certified_optimal=false, eligible=false)
-        end
-        fallback_settings = _native_hsd_route_settings(settings, :expanded)
-        fallback_route = NativeConeRoute(:expanded)
-        _public_validate_native_hsd_policy(
-            model, program, fallback_route, fallback_settings, outputs, warm_start,
-        )
-        fallback_canonical, _, fallback_core = _public_native_hsd_core(
-            model, program, fallback_route, fallback_settings;
-            allow_expanded_bordered_fallback=false,
-            execution_context=nothing,
-        )
-        core = _native_hsd_restarted_core(core, fallback_core)
-        canonical = fallback_canonical
-    end
     return _public_result_from_native_hsd(
         model,
         program,

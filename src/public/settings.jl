@@ -241,7 +241,7 @@ struct Settings{T<:AbstractFloat}
             (:auto, :variable_space_schur, :dense_augmented_kkt, :psd_lift),
             "formulation",
         )
-        _validate_symbol(kkt_route, (:bordered, :expanded, :sparse_schur, :sparse_augmented), "kkt_route")
+        _validate_symbol(kkt_route, (:bordered, :sparse_augmented), "kkt_route")
         kkt_route === :sparse_augmented && T !== Float64 && throw(ArgumentError(
             "kkt_route=:sparse_augmented requires Float64 CHOLMOD arithmetic",
         ))

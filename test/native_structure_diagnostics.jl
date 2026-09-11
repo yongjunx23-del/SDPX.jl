@@ -251,22 +251,22 @@ end
     end
     # k=3 packs to q=6; triangular Theta holds 6*7/2=21 scalars (not 36).
     expanded = SDPX.optimize!(build_psd();
-        settings=SDPX.Settings(Float64; verbosity=0, kkt_route=:expanded))
+        settings=SDPX.Settings(Float64; verbosity=0, kkt_route=:sparse_augmented))
     @test SDPX.status(expanded) === :optimal
     @test SDPX.certificate(expanded).valid
     de = _diagnostics(expanded)
     se = de.selected_algorithms.structure
-    @test de.selected_algorithms.requested_kkt_route === :expanded
-    @test de.selected_algorithms.executed_kkt_route === :expanded
+    @test de.selected_algorithms.requested_kkt_route === :sparse_augmented
+    @test de.selected_algorithms.executed_kkt_route === :sparse_augmented
     @test se.compact_selection_reason === :route_not_bordered
     @test se.psd_block_count == 1
     @test se.psd_hypothetical_triangular_scalars == 21
     @test se.psd_storage_status === :ok
-    @test se.prepared_core_dimension == 10
-    @test se.executed_core_dimension == 10
-    @test se.factor_owner === :expanded_session
+    @test se.prepared_core_dimension == 9
+    @test se.executed_core_dimension == 9
+    @test se.factor_owner === :symmetric_core
     @test se.factor_current === true
-    @test se.prepared_unused == (:symmetric_bordered,)
+    @test se.prepared_unused == ()
 
     bordered = SDPX.optimize!(build_psd();
         settings=SDPX.Settings(Float64; verbosity=0, kkt_route=:bordered))
@@ -462,96 +462,6 @@ end
     @test SDPX._product_bordered_factor_receipt_current(fresh) === false
 end
 
-@testset "expanded nonsymmetric solve owns the session, not coupled" begin
-    # Control for the dispatch finding: the same mixed model on the expanded
-    # route (no fallback) must report the expanded session even though a
-    # coupled buffer is allocated; the coupled buffer is prepared-unused.
-    #
-    # KNOWN ISSUE (Float64, pre-existing at 0602a27, R0-E): the model
-    # contains an ExponentialCone, and the production Float64 exponential
-    # path breaks down (:line_search_breakdown, cert invalid - frozen in
-    # validation/scientific_core/exp_runtime/, Clarabel authority -log(3)/
-    # logsumexp, precision ladder closes Float64 rounding in the Exp
-    # conjugate scaling). The dispatch/ownership assertions below must hold
-    # on the diagnosed (broken or solved) outcome; the solve-status
-    # assertions are a KNOWN-ISSUE control that MUST flip back to
-    # status=:optimal + cert valid once R0-E lands in production.
-    model = SDPX.Model(Float64)
-    y = SDPX.variable!(model, :y, 2; domain=SDPX.Reals())
-    SDPX.constraint!(model, :b1, y[1], SDPX.Nonnegative())
-    SDPX.constraint!(model, :b2, y[2], SDPX.Nonnegative())
-    SDPX.constraint!(model, :b3, 5.0 - y[1], SDPX.Nonnegative())
-    SDPX.constraint!(model, :b4, 5.0 - y[2], SDPX.Nonnegative())
-    for i in 1:8
-        SDPX.constraint!(model, Symbol(:x, i), (10.0 + i) - y[1] - y[2],
-            SDPX.Nonnegative())
-    end
-    SDPX.constraint!(model, :e, Any[y[1] - y[2], 1.0, 200.0],
-        SDPX.ExponentialCone())
-    SDPX.objective!(model, SDPX.Minimize(), y[1] + y[2])
-    result = SDPX.optimize!(
-        model; settings=SDPX.Settings(Float64; verbosity=0, kkt_route=:expanded),
-    )
-    @test SDPX.status(result) in (:optimal, :numerical_breakdown)
-    if SDPX.status(result) === :optimal
-        @test SDPX.certificate(result).valid
-    else
-        @test !SDPX.certificate(result).valid   # R0-E known issue control
-    end
-    d = _diagnostics(result)
-    @test d.selected_algorithms.requested_kkt_route === :expanded
-    @test d.selected_algorithms.executed_kkt_route === :expanded
-    @test d.selected_algorithms.executed_fallback_chain == (:expanded,)
-    s = d.selected_algorithms.structure
-    @test s.factor_owner === :expanded_session
-    @test s.prepared_core_dimension == 18
-    @test s.executed_core_dimension == 18
-    @test s.factor_current === true
-    @test s.prepared_unused == (:coupled, :symmetric_bordered)
-end
-
-@testset "sparse to expanded fallback moves ownership" begin
-    # The sparse session fails on this mixed model and the same-iterate
-    # expanded retry succeeds: the terminal active route owns the expanded
-    # session while the historically-attempted sparse session is listed as
-    # prepared-unused (historical execution, not current ownership).
-    model = SDPX.Model(Float64)
-    y = SDPX.variable!(model, :y, 2; domain=SDPX.Reals())
-    SDPX.constraint!(model, :b1, y[1], SDPX.Nonnegative())
-    SDPX.constraint!(model, :b2, y[2], SDPX.Nonnegative())
-    SDPX.constraint!(model, :b3, 5.0 - y[1], SDPX.Nonnegative())
-    SDPX.constraint!(model, :b4, 5.0 - y[2], SDPX.Nonnegative())
-    for i in 1:8
-        SDPX.constraint!(model, Symbol(:f, i), (10.0 + i) - y[1] - y[2],
-            SDPX.Nonnegative())
-    end
-    SDPX.constraint!(model, :e, Any[y[1] - y[2], 1.0, 200.0],
-        SDPX.ExponentialCone())
-    SDPX.objective!(model, SDPX.Minimize(), y[1] + y[2])
-    result = SDPX.optimize!(model; settings=SDPX.Settings(Float64;
-        verbosity=0, kkt_route=:sparse_schur))
-    # R0-E known-issue control (same ExponentialCone Float64 breakdown as the
-    # expanded testset above; pre-existing at 0602a27). Flip back to
-    # status === :optimal + cert valid when R0-E lands in production.
-    @test SDPX.status(result) in (:optimal, :numerical_breakdown)
-    if SDPX.status(result) === :optimal
-        @test SDPX.certificate(result).valid
-    else
-        @test !SDPX.certificate(result).valid
-    end
-    d = _diagnostics(result)
-    @test d.selected_algorithms.requested_kkt_route === :sparse_schur
-    @test d.selected_algorithms.executed_kkt_route === :expanded
-    @test d.selected_algorithms.executed_fallback_chain ==
-        (:sparse_schur, :expanded)
-    s = d.selected_algorithms.structure
-    @test s.factor_owner === :expanded_session
-    @test s.prepared_core_dimension == 18
-    @test s.executed_core_dimension == 18
-    @test s.factor_current === true
-    @test s.prepared_unused ==
-        (:coupled, :symmetric_bordered, :sparse_schur_session)
-end
 
 @testset "compact zero-time prepares bordered workspace only" begin
     # Pure-symmetric compact solve with Limits(time=0): the bordered

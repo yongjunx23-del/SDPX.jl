@@ -224,8 +224,6 @@ mutable struct ProductConeHSDState{
     NS,
     CW,
     SB,
-    EW,
-    SW,
     SCW,
 }
     base::HSDState{T,R}
@@ -258,8 +256,6 @@ mutable struct ProductConeHSDState{
     symmetric_bordered::SB
     kkt_route::Symbol
     kkt_route_attempts::Vector{Symbol}
-    expanded::EW
-    sparse_schur::SW
     symmetric_core::SCW
     diagnostic::Symbol
     tau_collapse_recoveries::Int
@@ -281,9 +277,6 @@ mutable struct ProductConeHSDState{
     # Opt-in relaxing liveness profile. Recording and gating only for the
     # liveness relaxation chosen at plan time; no acceptance gate reads it.
     relaxed_liveness::Bool
-    # One-shot route restart uses a terminal expanded executor. Ordinary
-    # expanded requests retain the historical expanded->bordered fallback.
-    allow_expanded_bordered_fallback::Bool
     # Loop-invariant terminal-recovery operators. The reduced operator `Ad`,
     # the right-hand side `b` and the cone layout are fixed for the lifetime of
     # a solve, so the two least-squares factorizations the terminal recovery
@@ -324,7 +317,6 @@ function _product_cone_hsd_state(
     iteration_knobs::NamedTuple=(;
         sigma=nothing, beta=nothing, gamma=nothing, predictor=:classic,
     ),
-    allow_expanded_bordered_fallback::Bool=true,
     execution_context::Union{Nothing,NativeExecutionContext}=nothing,
     prepared_key_context::Union{Nothing,NamedTuple}=nothing,
     relaxed_liveness::Bool=false,
@@ -332,8 +324,8 @@ function _product_cone_hsd_state(
     if kkt_route === :sparse_augmented
         prepare_symmetric_core = true
     end
-    kkt_route in (:bordered, :expanded, :sparse_schur, :sparse_augmented) || throw(ArgumentError(
-        "product HSD kkt_route must be :bordered, :expanded, :sparse_schur, or :sparse_augmented",
+    kkt_route in (:bordered, :sparse_augmented) || throw(ArgumentError(
+        "product HSD kkt_route must be :bordered or :sparse_augmented",
     ))
     schur_threads >= 1 || throw(ArgumentError("schur_threads must be positive"))
     if prepare_symmetric_core && kkt_route !== :bordered && kkt_route !== :sparse_augmented
@@ -402,22 +394,10 @@ function _product_cone_hsd_state(
         SymmetricBorderedWorkspace(
             T, base.workspace.nr; threads=schur_threads,
         )
-    # Expanded storage is opt-in ownership, not an eager shadow workspace.
-    # The default bordered route must not pay the dense O((n+m)^2) memory cost
-    # of a factorization session it can never execute.
-    # A sparse request owns its explicit dense-expanded fallback at setup;
-    # unsupported arithmetic never enters SparseArrays' implicit Float64
-    # conversion and instead starts the same-iterate expanded→bordered ladder.
-    expanded = (!prepare_symmetric_core && kkt_route in (:expanded, :sparse_schur)) ?
-        ExpandedKKTSession(T, base.n, base.m; rhs_count=2) : nothing
-    sparse_schur = (!prepare_symmetric_core && kkt_route === :sparse_schur &&
-        sparse_schur_factorization_supported(T)) ?
-        SparseSchurSession(T, base.n, base.m) : nothing
-
     # Product-HSD direction validation is currently serial.  Own one fused
-    # workspace for the lifetime of the state so expanded/sparse predictor and
-    # corrector acceptance form A*dx, A'*dy, and the cone action exactly once
-    # per candidate without claiming parallel execution that does not exist.
+    # workspace for the lifetime of the state so predictor and corrector
+    # acceptance form A*dx, A'*dy, and the cone action exactly once per
+    # candidate without claiming parallel execution that does not exist.
     residual_budget = ThreadBudget()
     residual_hook = ProductHSDResidualHook(T; budget=residual_budget)
     residual_ranges = UnitRange{Int}[
@@ -460,7 +440,7 @@ function _product_cone_hsd_state(
         alloc_zeros(T, base.workspace.nr, m) : alloc_zeros(T, 0, 0)
     return ProductConeHSDState{
         T,R,typeof(runtime),typeof(ns_schur),typeof(coupled),
-        typeof(symmetric_bordered),typeof(expanded),typeof(sparse_schur),
+        typeof(symmetric_bordered),
         typeof(symmetric_core),
     }(
         base,
@@ -490,8 +470,6 @@ function _product_cone_hsd_state(
         symmetric_bordered,
         kkt_route,
         Symbol[kkt_route],
-        expanded,
-        sparse_schur,
         symmetric_core,
         :none,
         0,
@@ -503,7 +481,6 @@ function _product_cone_hsd_state(
         get(iteration_knobs, :gamma, nothing),
         get(iteration_knobs, :predictor, :classic),
         relaxed_liveness,
-        allow_expanded_bordered_fallback,
         ProductHSDTerminalRecoveryCache(T),
     )
 end
@@ -520,7 +497,6 @@ function ProductConeHSDState(
     iteration_knobs::NamedTuple=(;
         sigma=nothing, beta=nothing, gamma=nothing, predictor=:classic,
     ),
-    allow_expanded_bordered_fallback::Bool=true,
     relaxed_liveness::Bool=false,
 ) where {T<:AbstractFloat}
     prepare_symmetric_core = prepare_symmetric_core || (kkt_route === :sparse_augmented)
@@ -540,7 +516,6 @@ function ProductConeHSDState(
         symmetric_core_regularization=symmetric_core_regularization,
         schur_threads=schur_threads,
         iteration_knobs=iteration_knobs,
-        allow_expanded_bordered_fallback=allow_expanded_bordered_fallback,
         relaxed_liveness=relaxed_liveness,
     )
 end
@@ -710,11 +685,6 @@ end
     if state.symmetric_core !== nothing
         return state.symmetric_core.factor_epoch
     end
-    state.kkt_route === :expanded && return state.expanded === nothing ? 0 :
-        state.expanded.numeric_factor_count
-    state.kkt_route === :sparse_schur &&
-        return state.sparse_schur === nothing ? 0 :
-               state.sparse_schur.numeric_factor_count
     if state.coupled !== nothing && state.coupled.nonsymmetric_dimension > 0
         return factor_epoch(state.coupled.cache)
     end
@@ -725,11 +695,6 @@ end
     if state.symmetric_core !== nothing
         return state.symmetric_core.receipt_build_count
     end
-    state.kkt_route === :expanded && return state.expanded === nothing ? 0 :
-        state.expanded.receipt_build_count
-    state.kkt_route === :sparse_schur &&
-        return state.sparse_schur === nothing ? 0 :
-               state.sparse_schur.receipt_build_count
     if state.coupled !== nothing && state.coupled.nonsymmetric_dimension > 0
         return state.coupled.receipt_build_count
     end
@@ -740,10 +705,6 @@ end
     if state.symmetric_core !== nothing
         return state.symmetric_core.factor_receipt
     end
-    state.kkt_route === :expanded && return state.expanded === nothing ? nothing :
-        state.expanded.factor_receipt
-    state.kkt_route === :sparse_schur && return
-        state.sparse_schur === nothing ? nothing : state.sparse_schur.factor_receipt
     if state.coupled !== nothing && state.coupled.nonsymmetric_dimension > 0
         return state.coupled.factor_receipt
     end
@@ -1247,8 +1208,8 @@ the serial path because their block kernels own mutable local workspaces.
 The staged row-major path is selected when the state owns a staging buffer.
 """
 Base.@noinline function _product_hsd_form_schur_border!(
-    state::ProductConeHSDState{T,R,RT,NS,CW,SB,EW,SW,SCW},
-) where {T,R,RT,NS,CW,SB,EW,SW,SCW}
+    state::ProductConeHSDState{T,R,RT,NS,CW,SB,SCW},
+) where {T,R,RT,NS,CW,SB,SCW}
     base = state.base
     A = base.workspace.Ar
     H = base.workspace.H
@@ -1386,8 +1347,8 @@ end
 end
 
 Base.@noinline function _product_hsd_assemble_bordered!(
-    state::ProductConeHSDState{T,R,RT,NS,CW,SB,EW,SW,SCW}, border_scalar::T,
-) where {T,R,RT,NS,CW,SB,EW,SW,SCW}
+    state::ProductConeHSDState{T,R,RT,NS,CW,SB,SCW}, border_scalar::T,
+) where {T,R,RT,NS,CW,SB,SCW}
     base = state.base
     workspace = state.symmetric_bordered
     n = workspace.dimension
@@ -1572,8 +1533,8 @@ reduction across `i`), so `@simd` cannot change any summation order.
 end
 
 Base.@noinline function _product_hsd_factor_bordered!(
-    state::ProductConeHSDState{T,R,RT,NS,CW,SB,EW,SW,SCW},
-) where {T,R,RT,NS,CW,SB,EW,SW,SCW}
+    state::ProductConeHSDState{T,R,RT,NS,CW,SB,SCW},
+) where {T,R,RT,NS,CW,SB,SCW}
     base = state.base
     workspace = state.symmetric_bordered
     workspace.factor_certified = false
@@ -3327,9 +3288,9 @@ end
 end
 
 Base.@noinline function _product_hsd_solve_shift_raw!(
-    state::ProductConeHSDState{T,R,RT,NS,CW,SB,EW,SW,SCW},
+    state::ProductConeHSDState{T,R,RT,NS,CW,SB,SCW},
     scalar_rhs::T,
-) where {T,R,RT,NS,CW,SB,EW,SW,SCW}
+) where {T,R,RT,NS,CW,SB,SCW}
     base = state.base
     workspace = state.symmetric_bordered
     _product_hsd_prepare_bordered_rhs!(state, scalar_rhs) || return false
@@ -3667,9 +3628,9 @@ Base.@noinline function _product_hsd_refine_shift!(
 end
 
 Base.@noinline function _product_hsd_solve_shift!(
-    state::ProductConeHSDState{T,R,RT,NS,CW,SB,EW,SW,SCW},
+    state::ProductConeHSDState{T,R,RT,NS,CW,SB,SCW},
     scalar_rhs::T,
-) where {T,R,RT,NS,CW,SB,EW,SW,SCW}
+) where {T,R,RT,NS,CW,SB,SCW}
     _product_hsd_solve_shift_raw!(
         state, scalar_rhs,
     ) || return (_sdpx_direction_failure_report(state, "solve_shift_raw"); false)
@@ -3799,8 +3760,8 @@ This is an explicit core API only: it does not assign solver status, recover a
 public result, or fall back to a legacy/lifted route.
 """
 Base.@noinline function _product_hsd_bordered_route_direction!(
-    state::ProductConeHSDState{T,R,RT,NS,CW,SB,EW,SW,SCW}, has_nonsymmetric::Bool,
-) where {T,R,RT,NS,CW,SB,EW,SW,SCW}
+    state::ProductConeHSDState{T,R,RT,NS,CW,SB,SCW}, has_nonsymmetric::Bool,
+) where {T,R,RT,NS,CW,SB,SCW}
     base = state.base
     # C7.2a: when the state owns a prepared symmetric-core workspace, the
     # bordered route executes ONLY the symmetric augmented core.  A core
@@ -3859,22 +3820,10 @@ Base.@noinline function _product_hsd_bordered_route_direction!(
     return HSDStepOK
 end
 
-@inline function _product_hsd_expanded_fallback_allowed(state::ProductConeHSDState)
-    state.allow_expanded_bordered_fallback || return false
-    state.expanded === nothing && return false
-    return state.expanded.status in (
-        EXPANDED_KKT_FACTOR_FAILED,
-        EXPANDED_KKT_WRONG_INERTIA,
-        EXPANDED_KKT_SOLVE_FAILED,
-        EXPANDED_KKT_REFINEMENT_STAGNATED,
-        EXPANDED_KKT_REFINEMENT_AT_FLOOR,
-    )
-end
-
 @inline function _product_hsd_record_route_attempt!(
     state::ProductConeHSDState, route::Symbol,
 )
-    route in (:bordered, :expanded, :sparse_schur) || throw(ArgumentError(
+    route in (:bordered, :sparse_augmented) || throw(ArgumentError(
         "unknown product-HSD route attempt $route",
     ))
     if isempty(state.kkt_route_attempts) ||
@@ -3882,48 +3831,6 @@ end
         push!(state.kkt_route_attempts, route)
     end
     return Tuple(state.kkt_route_attempts)
-end
-
-@inline function _product_hsd_retry_bordered_same_iterate!(
-    state::ProductConeHSDState, has_nonsymmetric::Bool,
-)
-    _product_hsd_record_route_attempt!(state, :bordered)
-    state.kkt_route = :bordered
-    state.diagnostic = :expanded_to_bordered_same_iterate_fallback
-    return _product_hsd_bordered_route_direction!(state, has_nonsymmetric)
-end
-
-@inline function _product_hsd_sparse_fallback_allowed(state::ProductConeHSDState)
-    state.sparse_schur === nothing && return true
-    return state.sparse_schur.status in (
-        SPARSE_SCHUR_FACTOR_FAILED,
-        SPARSE_SCHUR_SOLVE_FAILED,
-        SPARSE_SCHUR_REFINEMENT_STAGNATED,
-        SPARSE_SCHUR_REFINEMENT_AT_FLOOR,
-    )
-end
-
-@inline function _product_hsd_retry_expanded_same_iterate!(
-    state::ProductConeHSDState, has_nonsymmetric::Bool,
-)
-    state.expanded === nothing && return HSDStepDirectionFailed
-    _product_hsd_record_route_attempt!(state, :expanded)
-    state.kkt_route = :expanded
-    state.diagnostic = :sparse_to_expanded_same_iterate_fallback
-    direction_ok = try
-        _product_hsd_expanded_direction!(state)
-    catch
-        false
-    end
-    if direction_ok
-        state.diagnostic = :sparse_to_expanded_same_iterate_fallback
-        return HSDStepOK
-    end
-    _product_hsd_expanded_fallback_allowed(state) ||
-        return HSDStepDirectionFailed
-    return _product_hsd_retry_bordered_same_iterate!(
-        state, has_nonsymmetric,
-    )
 end
 
 """Per-epoch frozen residual refresh; the fixed-trace core supplies the
@@ -4057,7 +3964,7 @@ Base.@noinline function _sdpx_direction_trace(
     return nothing
 end
 
-Base.@noinline function product_hsd_step!(state::ProductConeHSDState{T,R,RT,NS,CW,SB,EW,SW,SCW}) where {T,R,RT,NS,CW,SB,EW,SW,SCW}
+Base.@noinline function product_hsd_step!(state::ProductConeHSDState{T,R,RT,NS,CW,SB,SCW}) where {T,R,RT,NS,CW,SB,SCW}
     base = state.base
     base.workspace.rank_ambiguous && return HSDStepDirectionFailed
     base.workspace.rank_incompatible && return HSDStepDirectionFailed
@@ -4107,48 +4014,9 @@ Base.@noinline function product_hsd_step!(state::ProductConeHSDState{T,R,RT,NS,C
     base.epoch += 1
     has_nonsymmetric = _product_hsd_has_nonsymmetric(state)
     t0 = time_ns()
-    direction_code = if state.kkt_route === :sparse_schur
-        direction_ok = try
-            _product_hsd_sparse_direction!(state)
-        catch exception
-            exception isa InterruptException && rethrow()
-            if state.sparse_schur !== nothing
-                state.sparse_schur.status = SPARSE_SCHUR_SOLVE_FAILED
-                state.sparse_schur.last_reason = :sparse_dispatch_exception
-            end
-            false
-        end
-        if direction_ok
-            HSDStepOK
-        elseif _product_hsd_sparse_fallback_allowed(state)
-            # Sparse, expanded and bordered routes see the same accepted HSD
-            # iterate. Only direction/factor scratch has been touched here.
-            _product_hsd_retry_expanded_same_iterate!(
-                state, has_nonsymmetric,
-            )
-        else
-            HSDStepDirectionFailed
-        end
-    elseif state.kkt_route === :expanded
-        direction_ok = try
-            _product_hsd_expanded_direction!(state)
-        catch
-            false
-        end
-        if direction_ok
-            HSDStepOK
-        elseif _product_hsd_expanded_fallback_allowed(state)
-            # No iterate component has been accepted or mutated at this point:
-            # retry the same residual/scaling epoch through the bordered route.
-            _product_hsd_retry_bordered_same_iterate!(
-                state, has_nonsymmetric,
-            )
-        else
-            HSDStepDirectionFailed
-        end
-    else
-        _product_hsd_bordered_route_direction!(state, has_nonsymmetric)
-    end
+    direction_code = _product_hsd_bordered_route_direction!(
+        state, has_nonsymmetric,
+    )
     if direction_code !== HSDStepOK && state.symmetric_core !== nothing &&
        !isempty(state.runtime.power) && !all(block.force_dual_hessian for block in state.runtime.power)
         if force_power_dual_hessian_scaling!(state.runtime, base.s, base.y, base.mu)

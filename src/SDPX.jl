@@ -86,9 +86,7 @@ include("kkt/symmetric_core.jl")
 # Thin INTERNAL EXPERIMENTAL sparse-core wrapper (R3 bounded).  Included
 # after `kkt/symmetric_core.jl` because the wrapper constructor consumes
 # `SymmetricCorePattern`; it is not part of any public/native route.
-include("kkt/expanded_quasidefinite.jl")
 include("kkt/psd_panels.jl")
-include("kkt/reduced_schur.jl")
 # HSD state and the shared/product-cone HSD state machine. Included here
 # (after the IR, factor-cache routes and the KKT route driver) so they can
 # reference CanonicalConicProgram, ConeProductLayout, AbstractFactorCache and
